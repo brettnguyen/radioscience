@@ -1,0 +1,1245 @@
+## Logic Analysis: `src/geolocation/geolocator.py`
+
+### 1. Role of `Geolocator`
+
+`src/geolocation/geolocator.py` should implement the high-level per-window orchestration layer for real COSMIC-2 back-propagation geolocation.
+
+This module should not implement the physics of propagation, magnetic-field geometry, signal correction, or quality-control algorithms directly. Instead, it should coordinate the existing components defined in the design:
+
+- `SignalPreprocessor`
+- `ScintillationCalculator`
+- `LosGeometry`
+- `BackpropProcessor`
+- `QualityController`
+
+The public API must follow the design exactly:
+
+```text
+class Geolocator:
+    +__init__(config, preprocessor, scintillation, los_geometry, processor, qc)
+    +process_window(window: SignalWindow, wavelength_m: float) GeolocationResult
+    +process_many(windows: Iterator[SignalWindow], wavelength_m: float) list[GeolocationResult]
+    +make_result(window: SignalWindow, d_curve: DCurve, crossing_km: float, metrics: ScintillationMetrics) GeolocationResult
+```
+
+No additional public methods should be introduced.
+
+---
+
+## 2. Scientific Responsibility of This Module
+
+For each 10-second `SignalWindow`, `Geolocator` must reproduce the paper’s operational decision chain:
+
+1. Prepare the high-rate phase and amplitude/SNR signal.
+2. Compute scintillation metrics:
+   - phase scintillation index `sigma_phi`
+   - amplitude scintillation index `S4`
+   - mean SNR
+3. Apply pre-BP quality control:
+   - `sigma_phi > 0.25 rad`
+   - tangent-point height `> 150 km`
+4. Run back-propagation geolocation:
+   - compute `D(L_mf) = L0 - L_mf`
+   - detect zero crossings
+5. Reject multi-valued geolocations.
+6. Build a geolocation candidate for the single valid crossing.
+7. Apply final QC:
+   - single-valued geolocation
+   - `Q > 1.2`
+   - `cos(alpha) > 0.1`
+8. Return one `GeolocationResult`, accepted or rejected, for the input window.
+
+All threshold values must come from `AppConfig`, which is loaded from `config.yaml`.
+
+---
+
+## 3. Configuration Values Used
+
+This module should not hard-code methodological thresholds. It should rely on `AppConfig`, which reflects `config.yaml`.
+
+Relevant configuration fields include:
+
+### Pre-BP QC
+
+From:
+
+```yaml
+processing:
+  scintillation_indices:
+    sigma_phi_threshold_rad: 0.25
+
+  tangent_point_filter:
+    min_height_km: 150
+```
+
+Mapped in `AppConfig` design to:
+
+```text
+config.sigma_phi_threshold_rad
+config.tangent_height_min_km
+```
+
+### Back-Propagation / Final QC
+
+From:
+
+```yaml
+back_propagation:
+  quality_control:
+    q_threshold: 1.2
+    cos_alpha_threshold: 0.1
+    require_single_valued_geolocation: true
+    discard_multivalued_geolocations: true
+```
+
+Mapped in `AppConfig` design to:
+
+```text
+config.q_threshold
+config.cos_alpha_threshold
+```
+
+### BP Distance Grid
+
+Used indirectly by `BackpropProcessor`, not directly by `Geolocator`:
+
+```yaml
+back_propagation:
+  distance_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+### Local Time
+
+For monthly-map filtering downstream, `GeolocationResult.local_time_hr` should be populated using:
+
+```yaml
+processing:
+  local_time_filter:
+    reference: "geolocation_longitude"
+```
+
+The paper does not explicitly specify the local-time reference. The configuration states that geolocation longitude is used.
+
+---
+
+## 4. Inputs and Outputs
+
+### 4.1 Input: `SignalWindow`
+
+`process_window` receives a `SignalWindow` containing one 10-second high-rate interval.
+
+Required fields used by this module:
+
+```text
+SignalWindow.event_id
+SignalWindow.leo_id
+SignalWindow.gnss_id
+SignalWindow.signal_name
+SignalWindow.mid_time
+SignalWindow.phase_rad
+SignalWindow.amplitude
+SignalWindow.snr_vv
+SignalWindow.tangent_height_km
+SignalWindow.rx_states
+SignalWindow.tx_states
+```
+
+The window should already be segmented to the configured 10-second interval by `CosmicLoader.segment_to_windows`.
+
+### 4.2 Input: `wavelength_m`
+
+`process_window` receives `wavelength_m` explicitly.
+
+This is important because:
+
+- GPS L1 and L2 have different wavelengths.
+- GLONASS frequencies may differ by channel.
+- The paper processes L1 and compares L1/L2 geolocations.
+
+`Geolocator` should not infer wavelength internally unless this is handled elsewhere before calling it.
+
+### 4.3 Output: `GeolocationResult`
+
+Every processed input window should return exactly one `GeolocationResult`.
+
+If processing fails QC, the result should have:
+
+```text
+accepted = False
+rejection_reason = meaningful reason string
+```
+
+If processing succeeds:
+
+```text
+accepted = True
+rejection_reason = ""
+```
+
+The result must include:
+
+```text
+event_id
+leo_id
+gnss_id
+signal_name
+mid_time
+distance_km
+latitude_deg
+longitude_deg
+altitude_km
+local_time_hr
+sigma_phi_rad
+s4
+mean_snr_vv
+q
+cos_alpha
+d_slope
+is_multivalued
+```
+
+For rejected cases where a value cannot be computed, use a consistent missing-value representation such as `NaN` for floats and `False` for boolean flags unless the rejection reason specifically concerns multi-valued geometry.
+
+---
+
+## 5. `__init__` Logic
+
+The constructor should store references to the injected dependencies only.
+
+Expected signature from design:
+
+```text
+__init__(
+    config: AppConfig,
+    preprocessor: SignalPreprocessor,
+    scintillation: ScintillationCalculator,
+    los_geometry: LosGeometry,
+    processor: BackpropProcessor,
+    qc: QualityController
+)
+```
+
+Responsibilities:
+
+1. Store `config`.
+2. Store `preprocessor`.
+3. Store `scintillation`.
+4. Store `los_geometry`.
+5. Store `processor`.
+6. Store `qc`.
+
+No scientific computation should happen in `__init__`.
+
+---
+
+## 6. `process_window` Logic
+
+### 6.1 Purpose
+
+`process_window(window, wavelength_m)` is the main per-interval API.
+
+It should implement the paper’s 10-second-window processing sequence:
+
+```text
+SignalWindow
+    -> preprocessing
+    -> scintillation metrics
+    -> pre-BP QC
+    -> D-curve computation
+    -> zero-crossing / multivalue decision
+    -> make geolocation result
+    -> final QC
+    -> GeolocationResult
+```
+
+---
+
+## 7. Detailed `process_window` Flow
+
+### Step 1: Preprocess the Signal
+
+Call:
+
+```text
+prepared_window = self.preprocessor.prepare_window(window)
+```
+
+This delegates to `SignalPreprocessor`.
+
+Expected operations inside `SignalPreprocessor`, not here:
+
+- phase cleaning
+- phase unwrapping if required
+- phase detrending according to config
+- amplitude/SNR normalization
+- preparation of signal arrays
+
+The exact detrending method is unclear in the paper. According to `config.yaml`, default implementation is polynomial detrending with configured polynomial order:
+
+```yaml
+processing:
+  scintillation_indices:
+    phase_detrending:
+      default_implementation: "polynomial"
+      polynomial_order: 1
+```
+
+`Geolocator` should not implement detrending itself.
+
+---
+
+### Step 2: Compute Scintillation Metrics
+
+Call:
+
+```text
+metrics = self.scintillation.compute(prepared_window)
+```
+
+This returns `ScintillationMetrics`.
+
+It should contain:
+
+```text
+metrics.sigma_phi_rad
+metrics.s4
+metrics.mean_snr_vv
+metrics.passes_threshold
+```
+
+The paper’s definition for the amplitude index is:
+
+\[
+S_4 =
+\frac{\sqrt{\langle I^2\rangle - \langle I\rangle^2}}
+{\langle I\rangle}
+\]
+
+where:
+
+\[
+I = A^2
+\]
+
+The phase scintillation index is:
+
+\[
+\sigma_\phi = \mathrm{std}(\phi_{\mathrm{detrended}})
+\]
+
+The configured threshold is:
+
+\[
+\sigma_\phi > 0.25 \ \mathrm{rad}
+\]
+
+---
+
+### Step 3: Apply Pre-BP QC
+
+Call:
+
+```text
+passed, reason = self.qc.passes_pre_bp(
+    metrics,
+    prepared_window.tangent_height_km
+)
+```
+
+The QC must enforce the paper’s two pre-BP checks:
+
+1. Phase scintillation threshold:
+
+\[
+\sigma_\phi > 0.25 \ \mathrm{rad}
+\]
+
+2. Tangent point height threshold:
+
+\[
+h_{\tan} > 150 \ \mathrm{km}
+\]
+
+These values come from `config.yaml`.
+
+If this check fails, `process_window` should immediately return a rejected `GeolocationResult`.
+
+The rejected result should still include available diagnostic values:
+
+```text
+sigma_phi_rad = metrics.sigma_phi_rad
+s4 = metrics.s4
+mean_snr_vv = metrics.mean_snr_vv
+accepted = False
+rejection_reason = reason
+```
+
+Distance, location, `q`, `cos_alpha`, and `d_slope` should be missing/NaN unless available.
+
+---
+
+### Step 4: Compute the D-Curve
+
+If pre-BP QC passes, call:
+
+```text
+d_curve = self.processor.compute_d_curve(
+    prepared_window,
+    wavelength_m
+)
+```
+
+This delegates the core back-propagation work to `BackpropProcessor`.
+
+`Geolocator` should not recompute or inspect raw BP fields.
+
+`BackpropProcessor.compute_d_curve` is responsible for:
+
+1. Looping over magnetic-field candidate distances:
+
+\[
+L_{\mathrm{mf}} = 100, 200, \dots, 6000 \ \mathrm{km}
+\]
+
+using the configured magnetic-field candidate grid.
+
+2. Building the BP plane for each `L_mf`.
+
+3. Running the inner BP loop over:
+
+\[
+L = 100, 200, \dots, 6000 \ \mathrm{km}
+\]
+
+4. Computing:
+
+\[
+V(L) = \frac{\langle A^2 \rangle}{\langle A \rangle^2} - 1
+\]
+
+5. Smoothing `V(L)` using the configured second-order sliding polynomial regression over a 1000 km window.
+
+6. Finding `L0`, the global local minimum of `V(L)`.
+
+7. Computing:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+8. Finding zero crossings of `D`.
+
+The returned `DCurve` should contain:
+
+```text
+d_curve.l_mf_km
+d_curve.d_km
+d_curve.l0_km
+d_curve.q
+d_curve.cos_alpha
+d_curve.zero_crossings_km
+d_curve.is_multivalued
+```
+
+---
+
+### Step 5: Reject No-Solution Cases
+
+After `d_curve` is returned, `process_window` should inspect:
+
+```text
+d_curve.zero_crossings_km
+```
+
+If there are no zero crossings, the window should be rejected.
+
+Reason should be clear, for example:
+
+```text
+"no_d_curve_zero_crossing"
+```
+
+This corresponds to the paper’s case where `D(L)` does not produce a valid geolocation.
+
+---
+
+### Step 6: Reject Multi-Valued Cases
+
+The paper states that if more than one valid zero crossing exists, all solutions for that 10-second interval are considered multi-valued and discarded.
+
+From the paper:
+
+- multi-valued cases are not interpreted as multiple physical irregularity regions,
+- they are caused by scan-angle geometry and magnetic-field variation along LOS,
+- approximately 8% of COSMIC-2 cases are multi-valued,
+- all multi-valued geolocations are discarded.
+
+Therefore, if:
+
+```text
+d_curve.is_multivalued == True
+```
+
+or equivalently:
+
+```text
+len(d_curve.zero_crossings_km) > 1
+```
+
+then return rejected `GeolocationResult`:
+
+```text
+accepted = False
+rejection_reason = "multivalued_geolocation"
+is_multivalued = True
+```
+
+Do not select the “best” crossing based on `Q`, `V0`, distance, or slope. The paper explicitly says true and spurious geolocations cannot be discriminated from observations.
+
+---
+
+### Step 7: Select the Single Crossing
+
+If exactly one crossing exists:
+
+```text
+crossing_km = d_curve.zero_crossings_km[0]
+```
+
+This is the candidate geolocation distance from Rx along the GNSS-LEO line of sight.
+
+The distance corresponds to the solution of:
+
+\[
+D(L_{\mathrm{mf}}) = 0
+\]
+
+meaning:
+
+\[
+L_0 = L_{\mathrm{mf}}
+\]
+
+---
+
+### Step 8: Build Candidate Result
+
+Call:
+
+```text
+result = self.make_result(
+    prepared_window,
+    d_curve,
+    crossing_km,
+    metrics
+)
+```
+
+`make_result` should construct a `GeolocationResult` with all available information populated.
+
+The result is not necessarily accepted yet. Final QC still needs to be applied.
+
+---
+
+### Step 9: Apply Final QC
+
+Call:
+
+```text
+passed, reason = self.qc.passes_final(result)
+```
+
+Final QC must enforce:
+
+1. Single-valued geolocation.
+2. Minimum-depth criterion:
+
+\[
+Q > 1.2
+\]
+
+3. Scan-angle criterion:
+
+\[
+\cos \alpha > 0.1
+\]
+
+The configured values are:
+
+```yaml
+back_propagation:
+  quality_control:
+    q_threshold: 1.2
+    cos_alpha_threshold: 0.1
+```
+
+If final QC fails:
+
+```text
+result.accepted = False
+result.rejection_reason = reason
+```
+
+If it passes:
+
+```text
+result.accepted = True
+result.rejection_reason = ""
+```
+
+Then return the result.
+
+---
+
+## 8. `make_result` Logic
+
+### 8.1 Purpose
+
+`make_result(window, d_curve, crossing_km, metrics)` converts a valid single D-curve crossing into a geolocated point and diagnostic record.
+
+It should not rerun BP or QC.
+
+---
+
+### 8.2 Compute Latitude, Longitude, Altitude
+
+Call the existing `LosGeometry` public method:
+
+```text
+lat_deg, lon_deg, alt_km = self.los_geometry.geolocation_from_distance(
+    window,
+    crossing_km
+)
+```
+
+This must implement the paper’s geolocation equation:
+
+\[
+\mathbf{R}_{geo}
+=
+\mathbf{R}_{rx}
++
+L \mathbf{n}_{rt}
+\]
+
+where the paper defines:
+
+\[
+\mathbf{n}_{rt}
+=
+\frac{\mathbf{R}_{rx} - \mathbf{R}_{tx}}
+{|\mathbf{R}_{rx} - \mathbf{R}_{tx}|}
+\]
+
+However, the paper’s sign convention is flagged as unclear in `config.yaml`:
+
+```yaml
+back_propagation:
+  geolocation:
+    note: >
+      The sign convention must be verified during implementation so that the
+      geolocation lies along the receiver-transmitter line of sight.
+```
+
+Therefore, `LosGeometry.geolocation_from_distance` is the correct place to handle and verify the sign convention. `Geolocator` should not implement ECEF vector math directly.
+
+---
+
+### 8.3 Compute Local Time
+
+`GeolocationResult.local_time_hr` should be computed using:
+
+- `window.mid_time`
+- accepted geolocation longitude
+
+The configuration states:
+
+```yaml
+processing:
+  local_time_filter:
+    reference: "geolocation_longitude"
+```
+
+The local time formula is:
+
+\[
+LT =
+UTC_{\mathrm{hours}}
++
+\frac{\lambda}{15^\circ}
+\]
+
+wrapped to the interval `[0, 24)`.
+
+Because the public `Geolocator` design does not include a `CoordinateTransformer` dependency, this can be implemented internally in `make_result` using the longitude returned by `LosGeometry.geolocation_from_distance`.
+
+No additional public method is required.
+
+---
+
+### 8.4 Assign Q and cos(alpha)
+
+The `DCurve` contains arrays:
+
+```text
+d_curve.l_mf_km
+d_curve.q
+d_curve.cos_alpha
+```
+
+`make_result` must assign a representative `q` and `cos_alpha` for the selected crossing.
+
+Recommended logic:
+
+1. Identify the index in `d_curve.l_mf_km` nearest to `crossing_km`.
+2. Use the corresponding:
+   - `q`
+   - `cos_alpha`
+
+This is consistent with the discrete 100 km grid used in the paper.
+
+If the crossing is interpolated between samples, nearest-neighbor assignment is acceptable for initial reproduction, because the paper’s BP and magnetic-field grids are discrete with 100 km spacing.
+
+Do not invent a new interpolation method unless it is documented.
+
+---
+
+### 8.5 Compute D-Curve Slope
+
+`GeolocationResult` includes:
+
+```text
+d_slope
+```
+
+The paper defines:
+
+\[
+M =
+\left|
+\frac{\Delta D}{\Delta L}
+\right|
+\]
+
+using the first samples where:
+
+```text
+D > 0
+D < 0
+```
+
+around the zero crossing.
+
+If `QualityController.find_zero_crossings` or `BackpropProcessor.compute_d_curve` already computes or stores this value, use that available value. However, the current `DCurve` design does not include a dedicated slope array.
+
+Therefore, `make_result` may compute `d_slope` from existing `DCurve` fields without adding new public interfaces:
+
+```text
+d_curve.l_mf_km
+d_curve.d_km
+```
+
+Recommended logic:
+
+1. Find the closest samples on either side of `crossing_km`.
+2. Locate the nearest positive `D` and nearest negative `D` bracketing the crossing.
+3. Compute:
+
+\[
+M =
+\left|
+\frac{D_+ - D_-}{L_+ - L_-}
+\right|
+\]
+
+4. If no bracketing samples are available, set `d_slope` to `NaN`.
+
+This follows the paper’s uncertainty-diagnostic definition.
+
+---
+
+### 8.6 Populate `GeolocationResult`
+
+For a candidate result before final QC:
+
+```text
+GeolocationResult(
+    event_id = window.event_id,
+    leo_id = window.leo_id,
+    gnss_id = window.gnss_id,
+    signal_name = window.signal_name,
+    mid_time = window.mid_time,
+    accepted = False initially,
+    rejection_reason = "",
+    distance_km = crossing_km,
+    latitude_deg = lat_deg,
+    longitude_deg = lon_deg,
+    altitude_km = alt_km,
+    local_time_hr = local_time_hr,
+    sigma_phi_rad = metrics.sigma_phi_rad,
+    s4 = metrics.s4,
+    mean_snr_vv = metrics.mean_snr_vv,
+    q = selected_q,
+    cos_alpha = selected_cos_alpha,
+    d_slope = computed_slope,
+    is_multivalued = d_curve.is_multivalued
+)
+```
+
+`accepted` should be finalized only after `QualityController.passes_final`.
+
+---
+
+## 9. Rejected Result Construction
+
+The design does not define a separate helper method for rejected results, and no new public method should be added.
+
+Implementation can use a private internal helper if desired, but externally only the designed methods should be visible.
+
+Rejected results are needed for:
+
+1. Preprocessing failures.
+2. Pre-BP QC failures.
+3. No zero crossing.
+4. Multi-valued geolocation.
+5. Final QC failure.
+6. Runtime failure in downstream components, if caught and logged.
+
+For rejected results, preserve as much diagnostic information as possible.
+
+Example rejected-result field policy:
+
+| Field | Value |
+|---|---|
+| `event_id` | from `window` |
+| `leo_id` | from `window` |
+| `gnss_id` | from `window` |
+| `signal_name` | from `window` |
+| `mid_time` | from `window` |
+| `accepted` | `False` |
+| `rejection_reason` | specific reason |
+| `distance_km` | `NaN` unless crossing exists |
+| `latitude_deg` | `NaN` |
+| `longitude_deg` | `NaN` |
+| `altitude_km` | `NaN` |
+| `local_time_hr` | `NaN` |
+| `sigma_phi_rad` | from metrics if available |
+| `s4` | from metrics if available |
+| `mean_snr_vv` | from metrics if available |
+| `q` | `NaN` unless available |
+| `cos_alpha` | `NaN` unless available |
+| `d_slope` | `NaN` unless available |
+| `is_multivalued` | `True` only for multi-valued rejection |
+
+Useful rejection reason strings:
+
+```text
+"preprocessing_failed"
+"pre_bp_qc_failed_sigma_phi"
+"pre_bp_qc_failed_tangent_height"
+"no_d_curve_zero_crossing"
+"multivalued_geolocation"
+"final_qc_failed_q"
+"final_qc_failed_cos_alpha"
+"final_qc_failed"
+"backpropagation_failed"
+```
+
+The exact reason returned by `QualityController` should be preserved when possible.
+
+---
+
+## 10. `process_many` Logic
+
+### 10.1 Purpose
+
+`process_many(windows, wavelength_m)` processes an iterator of `SignalWindow` objects and returns a list of `GeolocationResult`.
+
+Design signature:
+
+```text
+process_many(windows: Iterator[SignalWindow], wavelength_m: float) -> list[GeolocationResult]
+```
+
+### 10.2 Flow
+
+For each window:
+
+1. Call:
+
+```text
+self.process_window(window, wavelength_m)
+```
+
+2. Append the returned `GeolocationResult` to a list.
+
+3. Continue even if a single window fails, as long as the failure can be represented as a rejected `GeolocationResult`.
+
+Use `tqdm` for progress reporting, as specified in the task dependencies.
+
+Do not perform aggregation, plotting, monthly binning, or L1/L2 pairing here. Those responsibilities belong to `RealDataExperiments`.
+
+---
+
+## 11. Failure Handling Strategy
+
+Real COSMIC-2 processing involves many external data uncertainties:
+
+- missing orbit states
+- malformed signal arrays
+- missing phase/SNR
+- invalid sampling interval
+- failed magnetic-field evaluation
+- failed interpolation
+- no valid BP minimum
+
+`Geolocator` should be robust enough that one bad window does not terminate full-year processing.
+
+Recommended behavior:
+
+1. Catch exceptions around major stages:
+   - preprocessing
+   - metrics computation
+   - BP processing
+   - geolocation conversion
+2. Convert expected per-window failures into rejected `GeolocationResult`.
+3. Let truly unrecoverable programming/configuration errors surface during development if desired.
+
+For full production runs, rejected results should be logged and written, consistent with:
+
+```yaml
+reproducibility:
+  log_rejection_reasons: true
+  log_multivalued_cases: true
+  log_processing_statistics: true
+```
+
+Actual logging may be handled elsewhere, but rejection reasons should be explicit.
+
+---
+
+## 12. Alignment With Paper Methodology
+
+This module must preserve the paper’s processing sequence exactly.
+
+### 12.1 Pre-BP Processing
+
+The paper states:
+
+> “In this study, to apply BP in a 10-s interval, we first check σϕ and continue processing if σϕ is greater than 0.25 rad. Next, we check geometry and apply BP if the LOS tangent point is above 150 km…”
+
+Therefore, `process_window` must not call `BackpropProcessor.compute_d_curve` unless both checks pass.
+
+---
+
+### 12.2 Single-Valued Requirement
+
+The paper states:
+
+> “If more than one solution D(L)=0 is found, all the solutions for this case (10-s interval) are considered multi-valued… all multi-valued geolocations are discarded.”
+
+Therefore, this module must not choose between multiple crossings.
+
+---
+
+### 12.3 Final QC
+
+The paper states successful geolocation requires:
+
+1. single-valued geolocation,
+2. `Q > 1.2`,
+3. `cos(alpha) > 0.1`.
+
+`Geolocator` should delegate final enforcement to:
+
+```text
+QualityController.passes_final(result)
+```
+
+but it must ensure the `GeolocationResult` contains the correct `q`, `cos_alpha`, and `is_multivalued` fields before calling final QC.
+
+---
+
+## 13. Dependencies and Non-Responsibilities
+
+### 13.1 Direct Dependencies
+
+`src/geolocation/geolocator.py` should depend on:
+
+- `src/config.py`
+- `src/core/types.py`
+- `src/signal/preprocessing.py`
+- `src/signal/scintillation.py`
+- `src/geometry/los.py`
+- `src/geolocation/backprop_processor.py`
+- `src/geolocation/qc.py`
+- `numpy`
+- `tqdm`
+
+### 13.2 Should Not Depend On
+
+`Geolocator` should not directly depend on:
+
+- `FftPropagator`
+- `StationaryCorrector`
+- `BpPlaneBuilder`
+- `MagneticFieldModel`
+- `CoordinateTransformer`, unless already reachable through existing design or used privately only for simple local-time computation
+- COSMIC file readers
+- plotting modules
+- result writers
+
+Those are handled elsewhere in the design.
+
+### 13.3 Should Not Implement
+
+This file should not implement:
+
+- phase detrending algorithms,
+- S4 or sigma-phi formulas,
+- magnetic-field projection,
+- BP plane construction,
+- FFT propagation,
+- stationary-transmitter correction,
+- `V(L)` smoothing,
+- local-minimum detection,
+- zero-crossing detection,
+- monthly map binning,
+- L1/L2 pairing.
+
+It should only orchestrate these operations.
+
+---
+
+## 14. Important Edge Cases
+
+### 14.1 Metrics Computed but Threshold Failed
+
+If `sigma_phi_rad <= config.sigma_phi_threshold_rad`, reject before BP.
+
+The paper threshold is strict:
+
+\[
+\sigma_\phi > 0.25 \ \mathrm{rad}
+\]
+
+Therefore equality should not pass.
+
+---
+
+### 14.2 Tangent Height Equality
+
+The paper says BP is applied if tangent point is above 150 km:
+
+\[
+h_{\tan} > 150 \ \mathrm{km}
+\]
+
+Therefore equality should not pass unless `QualityController` intentionally defines inclusive behavior. For paper fidelity, strict greater-than is preferred.
+
+---
+
+### 14.3 Empty D-Curve
+
+If BP fails to produce any valid local minima for all `L_mf`, `d_curve.zero_crossings_km` should be empty and the window rejected.
+
+---
+
+### 14.4 Multi-Valued D-Curve
+
+If there is more than one zero crossing, reject even if one crossing has high `Q`.
+
+This is scientifically important.
+
+---
+
+### 14.5 Crossing Outside Configured Range
+
+If a crossing is outside the configured BP range, it should already be excluded by `QualityController.find_zero_crossings`. If encountered in `Geolocator`, reject as invalid.
+
+---
+
+### 14.6 Missing q or cos(alpha)
+
+If `q` or `cos_alpha` cannot be associated with the crossing, final QC should fail.
+
+Do not accept a geolocation without these diagnostics.
+
+---
+
+### 14.7 Invalid Geodetic Conversion
+
+If `LosGeometry.geolocation_from_distance` returns invalid latitude, longitude, or altitude, reject the result.
+
+The paper does not specify an altitude QC threshold, but invalid numerical values must not be accepted.
+
+---
+
+## 15. Expected Integration With `RealDataExperiments`
+
+`RealDataExperiments.process_year(year, signal)` will call:
+
+```text
+geolocator.process_many(windows, wavelength_m)
+```
+
+The returned results are then converted to a `DataFrame`.
+
+Downstream processing expects both accepted and rejected records so that statistics can be computed:
+
+- total windows,
+- pre-BP failures,
+- BP failures,
+- multi-valued cases,
+- final accepted geolocations.
+
+For monthly maps, downstream code should filter:
+
+```text
+accepted == True
+18 <= local_time_hr < 24
+```
+
+using the local-time values populated here.
+
+---
+
+## 16. Reproducibility Targets Supported by This Module
+
+Correct implementation of `Geolocator` is necessary for reproducing the paper’s reported real-data results:
+
+### 16.1 Accepted L1 Geolocation Counts
+
+From `config.yaml`:
+
+```yaml
+real_data_experiments:
+  monthly_l1_maps:
+    expected_total_geolocations:
+      2021: 332000
+      2023: 1108000
+```
+
+`Geolocator` affects these counts through:
+
+- pre-BP QC,
+- D-curve solution handling,
+- multi-valued rejection,
+- final `Q` and `cos(alpha)` QC.
+
+### 16.2 Multi-Valued Fraction
+
+The paper reports approximately:
+
+```text
+8%
+```
+
+multi-valued COSMIC-2 cases.
+
+`Geolocator` must preserve and expose:
+
+```text
+is_multivalued
+rejection_reason = "multivalued_geolocation"
+```
+
+so this statistic can be verified.
+
+### 16.3 L1/L2 Comparison
+
+For the configured period:
+
+```yaml
+signals:
+  l1_l2_comparison:
+    start_date: "2021-02-19"
+    end_date: "2021-03-01"
+```
+
+Expected counts:
+
+```yaml
+real_data_experiments:
+  l1_l2_comparison:
+    expected_counts:
+      l1_geolocations: 13000
+      l2_geolocations: 11000
+      common_l1_l2_cases: 8000
+```
+
+`Geolocator` must behave identically for L1 and L2 except for the supplied wavelength and input signal arrays.
+
+---
+
+## 17. Summary Processing Pseudoflow
+
+Conceptually, `process_window` should behave as:
+
+```text
+process_window(window, wavelength_m):
+
+    prepared_window = preprocessor.prepare_window(window)
+
+    metrics = scintillation.compute(prepared_window)
+
+    passed_pre, reason = qc.passes_pre_bp(
+        metrics,
+        prepared_window.tangent_height_km
+    )
+
+    if not passed_pre:
+        return rejected GeolocationResult with metrics
+
+    d_curve = processor.compute_d_curve(
+        prepared_window,
+        wavelength_m
+    )
+
+    if no zero crossings:
+        return rejected GeolocationResult
+
+    if d_curve is multivalued:
+        return rejected GeolocationResult with is_multivalued=True
+
+    crossing_km = only zero crossing
+
+    result = make_result(
+        prepared_window,
+        d_curve,
+        crossing_km,
+        metrics
+    )
+
+    passed_final, reason = qc.passes_final(result)
+
+    if passed_final:
+        result.accepted = True
+        result.rejection_reason = ""
+    else:
+        result.accepted = False
+        result.rejection_reason = reason
+
+    return result
+```
+
+---
+
+## 18. Key Implementation Constraints
+
+1. Use only the public interfaces defined in the design.
+2. Do not duplicate QC logic already assigned to `QualityController`.
+3. Do not implement BP internals here.
+4. Do not select among multi-valued crossings.
+5. Do not hard-code thresholds from the paper; use `AppConfig`.
+6. Always return a `GeolocationResult`.
+7. Preserve rejection reasons for reproducibility.
+8. Populate diagnostic fields needed for aggregate statistics.

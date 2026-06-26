@@ -1,0 +1,821 @@
+# Logic Analysis: `src/propagation/phase_screen.py`
+
+## 1. Purpose of this module
+
+`src/propagation/phase_screen.py` implements `PhaseScreenGenerator`, which is used only by the synthetic validation experiments. Its role is to generate thin random phase screens representing ionospheric plasma irregularities in the paper’s forward-propagation and back-propagation modeling.
+
+This module supports the paper’s Section 2 modeling experiments:
+
+1. Single thin phase screen localization.
+2. Outer-scale estimation from \(\sigma_\phi/S_4\).
+3. Orientation-error sensitivity.
+4. Two phase screens with the same irregularity orientation.
+5. Two phase screens with different irregularity orientations, requiring 3D forward propagation.
+6. Thermal-noise sensitivity.
+7. Multi-valued geolocation synthetic demonstrations.
+
+The module must follow the design interface exactly:
+
+```text
+class PhaseScreenGenerator {
+    +__init__(random_seed: int)
+    +generate_1d(z_m: ndarray, p: float, outer_scale_km: float, sigma_phi_rad: float, wavelength_m: float) ndarray
+    +generate_2d(y_m: ndarray, z_m: ndarray, alpha_rad: float, p: float, outer_scale_km: float, sigma_phi_rad: float, wavelength_m: float) ndarray
+}
+```
+
+No additional public API should be required.
+
+---
+
+## 2. Paper methodology to reproduce
+
+The paper models a thin phase screen at \(x=x_0\). The screen introduces a random phase delay \(S_0(z)\), and the output field is
+
+\[
+u_{\text{out}}(z)
+=
+A_0 \exp \left[ikx_0 + ikS_0(z)\right]
+\]
+
+where
+
+\[
+k = \frac{2\pi}{\lambda}
+\]
+
+The paper’s 1D random phase irregularity spectrum is
+
+\[
+\Phi(k_z)
+\sim
+(k_0^2 + k_z^2)^{-p/2}
+\]
+
+with
+
+\[
+k_0 = \frac{2\pi}{l_0}
+\]
+
+The configuration file specifies the synthetic defaults:
+
+```yaml
+synthetic_experiments:
+  phase_screen:
+    spectral_index_p: 1.5
+    outer_scale_km: 10
+    spectrum_1d: "(k0^2 + kz^2)^(-p/2)"
+```
+
+The paper uses:
+
+\[
+p = 1.5
+\]
+
+\[
+l_0 = 10 \text{ km}
+\]
+
+and reports an observationally inferred value:
+
+\[
+\langle l_0 \rangle \approx 9.7 \text{ km}
+\]
+
+which is used only as a validation target, not as the default generation value.
+
+The generated phase screen should be normalized so that the standard deviation of the phase perturbation in radians is
+
+\[
+\operatorname{std}(\phi) = \sigma_\phi
+\]
+
+where
+
+\[
+\phi(z) = kS_0(z)
+\]
+
+The synthetic configuration provides the important \(\sigma_\phi\) cases:
+
+```yaml
+synthetic_experiments:
+  observed_average_values:
+    sigma_phi_rad: 1.65
+
+  modeled_cases:
+    thermal_noise:
+      sigma_phi_cases_rad:
+        - 1.65
+        - 0.25
+```
+
+---
+
+## 3. Recommended return convention
+
+Although the paper writes the phase screen as a path delay \(S_0\) inside \(ikS_0\), this module should return the phase perturbation directly in radians:
+
+\[
+\phi(z) = kS_0(z)
+\]
+
+Therefore, downstream synthetic code should construct the field after the phase screen as
+
+\[
+u_{\text{out}}(z) = \exp(i\phi(z))
+\]
+
+rather than
+
+\[
+u_{\text{out}}(z) = \exp(ikS_0(z))
+\]
+
+This is the safest convention because the task explicitly says:
+
+> Normalize screen phase to requested `sigma_phi` in radians.
+
+The `wavelength_m` argument should still be accepted and validated because it is part of the required design interface and because it preserves the paper’s physical relationship:
+
+\[
+S_0 = \frac{\phi}{k}
+\]
+
+If future code needs the path-delay equivalent, it can compute:
+
+\[
+S_0 = \frac{\phi}{2\pi/\lambda}
+\]
+
+But this module’s returned ndarray should be interpreted as phase in radians.
+
+---
+
+## 4. Dependencies
+
+This module should depend only on:
+
+- `numpy`
+- optionally `scipy.fft` or `numpy.fft`
+- `src/core/constants.py` for defaults such as:
+  - synthetic spectral index \(p=1.5\)
+  - synthetic outer scale \(l_0=10\) km
+  - GNSS wavelengths if needed by caller
+- `src/core/types.py` only if useful for type consistency, though the required interface uses plain ndarrays.
+
+It should not depend on real-data modules, geometry modules, configuration parsing, plotting, or geolocation logic.
+
+---
+
+## 5. Reproducibility logic
+
+`PhaseScreenGenerator.__init__(random_seed: int)` should create a local random number generator, preferably with:
+
+```text
+numpy.random.default_rng(random_seed)
+```
+
+The configuration specifies:
+
+```yaml
+reproducibility:
+  random_seed: 42
+```
+
+The generator should not use NumPy’s global random state. Sequential calls should be deterministic for a fixed seed.
+
+Important behavior:
+
+- Do not reseed inside `generate_1d` or `generate_2d`.
+- Use the instance RNG for all random draws.
+- Synthetic experiments should be repeatable when `random_seed: 42` is used.
+
+---
+
+## 6. `generate_1d` logic
+
+### 6.1 Inputs
+
+```text
+generate_1d(
+    z_m: ndarray,
+    p: float,
+    outer_scale_km: float,
+    sigma_phi_rad: float,
+    wavelength_m: float
+) -> ndarray
+```
+
+Expected inputs:
+
+- `z_m`: 1D spatial coordinate in meters.
+- `p`: spectral power index. Default from config/paper is `1.5`.
+- `outer_scale_km`: outer scale \(l_0\) in kilometers. Default from config/paper is `10`.
+- `sigma_phi_rad`: desired standard deviation of generated phase in radians.
+- `wavelength_m`: GNSS wavelength in meters. Used for validation/API consistency; returned screen is phase in radians.
+
+### 6.2 Validation
+
+The method should verify:
+
+1. `z_m` is a 1D finite numeric array.
+2. `z_m` has at least a few samples; practically, synthetic propagation requires many samples.
+3. `z_m` is uniformly spaced.
+4. `p > 0`.
+5. `outer_scale_km > 0`.
+6. `sigma_phi_rad >= 0`.
+7. `wavelength_m > 0`.
+
+If `sigma_phi_rad == 0`, return an array of zeros with the same shape as `z_m`.
+
+### 6.3 Wavenumber construction
+
+Let:
+
+\[
+\Delta z = z_{i+1} - z_i
+\]
+
+Use FFT spatial frequencies:
+
+\[
+f_z = \operatorname{fftfreq}(N, \Delta z)
+\]
+
+or for real-valued inverse FFT:
+
+\[
+f_z = \operatorname{rfftfreq}(N, \Delta z)
+\]
+
+Convert cycles per meter to angular wavenumber:
+
+\[
+k_z = 2\pi f_z
+\]
+
+Convert the configured outer scale:
+
+\[
+l_0 = 1000 \cdot \text{outer\_scale\_km}
+\]
+
+\[
+k_0 = \frac{2\pi}{l_0}
+\]
+
+Then compute the target 1D power spectral density shape:
+
+\[
+\Phi(k_z) = (k_0^2 + k_z^2)^{-p/2}
+\]
+
+The proportionality constant is irrelevant because the field is normalized after generation.
+
+### 6.4 DC handling
+
+The zero-frequency component should be set to zero or removed after generation.
+
+Reason:
+
+- The paper’s scintillation phase fluctuation is a fluctuation about a trend/mean.
+- A constant phase offset does not affect scintillation or BP amplitude variance.
+- The generated screen should have zero mean before normalization.
+
+So the resulting phase screen should satisfy approximately:
+
+\[
+\langle \phi \rangle = 0
+\]
+
+### 6.5 Fourier coefficient generation
+
+For a real-valued random phase screen:
+
+1. Generate complex random Fourier coefficients.
+2. Weight them by the square root of the desired spectrum:
+
+\[
+C(k_z) \propto \sqrt{\Phi(k_z)} \cdot \eta(k_z)
+\]
+
+where \(\eta\) is complex Gaussian noise or random phase noise.
+
+A Gaussian random field is most convenient:
+
+\[
+\eta = a + ib
+\]
+
+with \(a,b\) drawn from independent normal distributions.
+
+Using `irfft` is preferable because it automatically produces a real-valued spatial screen if the one-sided spectrum is constructed correctly.
+
+### 6.6 Inverse transform and normalization
+
+After inverse FFT, produce a real array:
+
+\[
+\phi_{\text{raw}}(z)
+\]
+
+Then:
+
+1. Remove the mean:
+
+\[
+\phi_{\text{raw}} \leftarrow \phi_{\text{raw}} - \langle \phi_{\text{raw}} \rangle
+\]
+
+2. Compute population standard deviation:
+
+\[
+\sigma_{\text{raw}} = \operatorname{std}(\phi_{\text{raw}})
+\]
+
+Use the default NumPy convention, equivalent to `ddof=0`, because the paper uses mean-square ensemble-style definitions.
+
+3. Normalize:
+
+\[
+\phi(z) =
+\phi_{\text{raw}}(z)
+\frac{\sigma_\phi}{\sigma_{\text{raw}}}
+\]
+
+The returned phase screen should satisfy:
+
+\[
+\operatorname{std}(\phi) \approx \sigma_\phi
+\]
+
+### 6.7 Output
+
+Return:
+
+```text
+phase_rad: ndarray
+```
+
+with the same shape as `z_m`.
+
+The output is a phase perturbation in radians, not amplitude and not path delay.
+
+---
+
+## 7. `generate_2d` logic
+
+### 7.1 Purpose
+
+`generate_2d` is needed for the paper’s two-phase-screen, different-orientation synthetic experiment.
+
+The paper describes 3D forward propagation through 2D phase screens with elongated irregularities. The screen phase is not isotropic 2D turbulence. It represents 1D irregularities embedded in a 2D screen plane.
+
+The phase should vary strongly in the direction normal to the irregularities and remain approximately constant along the elongated irregularity direction.
+
+### 7.2 Inputs
+
+```text
+generate_2d(
+    y_m: ndarray,
+    z_m: ndarray,
+    alpha_rad: float,
+    p: float,
+    outer_scale_km: float,
+    sigma_phi_rad: float,
+    wavelength_m: float
+) -> ndarray
+```
+
+Expected inputs:
+
+- `y_m`: 1D y-coordinate grid in meters.
+- `z_m`: 1D z-coordinate grid in meters.
+- `alpha_rad`: scan angle/orientation angle used by synthetic experiments.
+- `p`: spectral power index.
+- `outer_scale_km`: outer scale.
+- `sigma_phi_rad`: desired standard deviation of 2D phase in radians.
+- `wavelength_m`: GNSS wavelength in meters.
+
+Return shape should match the convention expected by `FftPropagator.propagate_3d(field_yz, y_m, z_m, distance_m)`:
+
+```text
+phase_yz.shape == (len(y_m), len(z_m))
+```
+
+Use `indexing="ij"` if meshgrids are constructed.
+
+### 7.3 Orientation convention
+
+This is a critical point.
+
+The configuration uses the paper’s scan-angle cases:
+
+```yaml
+two_phase_screens_different_orientation:
+  alpha_cases_deg:
+    - [30, 60]
+    - [60, 30]
+```
+
+The paper states that the screen with smaller \(\alpha\) is preferentially localized.
+
+For implementation, `alpha_rad` should be interpreted as the scan angle between the receiver trajectory direction, represented by the \(z\)-axis, and the phase-gradient direction normal to the elongated irregularities.
+
+Therefore define the normal coordinate:
+
+\[
+s(y,z) = y\sin\alpha + z\cos\alpha
+\]
+
+Behavior:
+
+- If \(\alpha = 0^\circ\):
+
+\[
+s = z
+\]
+
+The phase varies along the receiver trajectory. This produces strong scintillation.
+
+- If \(\alpha \to 90^\circ\):
+
+\[
+s \approx y
+\]
+
+The phase becomes nearly constant along a receiver cut at fixed \(y\). This produces weak scintillation along the receiver trajectory.
+
+This convention is consistent with the paper’s physical explanation that when \(\alpha\) is close to \(90^\circ\), the LOS scans along the irregularities and does not induce useful scintillation along the receiver trajectory.
+
+The parsed equation in the paper may express the spectral orientation using a complementary angle. To avoid inversion of the 30°/60° synthetic result, the implementation should document that this method uses the physical scan-angle convention above.
+
+### 7.4 Efficient construction strategy
+
+Instead of generating a full isotropic 2D random field, generate a 1D random process along the normal coordinate \(s\), then map it onto the 2D grid.
+
+This produces field-aligned elongated irregularities.
+
+Steps:
+
+1. Build 2D coordinate mesh:
+
+\[
+Y, Z = \operatorname{meshgrid}(y_m, z_m)
+\]
+
+using shape `(len(y_m), len(z_m))`.
+
+2. Compute normal coordinate:
+
+\[
+S = Y\sin\alpha + Z\cos\alpha
+\]
+
+3. Determine the minimum and maximum of \(S\):
+
+\[
+S_{\min}, S_{\max}
+\]
+
+4. Construct a uniform 1D grid `s_m` spanning this interval.
+
+The grid spacing should be no larger than the smaller of the input spacings:
+
+\[
+\Delta s \leq \min(\Delta y, \Delta z)
+\]
+
+This avoids losing high-frequency content when interpolating back to the 2D grid.
+
+5. Generate a 1D random phase screen on `s_m` using the same spectrum:
+
+\[
+\Phi(k_s) \sim (k_0^2 + k_s^2)^{-p/2}
+\]
+
+6. Interpolate this 1D phase process back onto the 2D coordinates:
+
+\[
+\phi(y,z) = f(s(y,z))
+\]
+
+7. Remove the 2D mean and normalize over the full 2D screen:
+
+\[
+\operatorname{std}_{y,z}(\phi) = \sigma_\phi
+\]
+
+### 7.5 Why not generate independent 2D isotropic turbulence?
+
+The paper’s BP localization assumes elongated, anisotropic irregularities. For the misaligned-screen modeling, the phase screen should represent effectively 1D irregularities with a chosen orientation.
+
+A generic 2D random field would introduce isotropic or weakly anisotropic structure and would not reproduce the intended experiment, where localization depends on the scan angle \(\alpha\).
+
+Therefore `generate_2d` should not simply generate a random 2D spectrum over all \((k_y,k_z)\). It should enforce spectral concentration along one orientation, equivalent to the paper’s delta-function constraint.
+
+---
+
+## 8. Relationship to paper’s 2D spectrum
+
+The paper gives the oriented 2D spectrum schematically as:
+
+\[
+\Phi(k_y,k_z)
+\sim
+[k_0^2 + (\cdots)^2]^\nu
+\delta(\cdots)
+\]
+
+The parse is imperfect, but the physical meaning is clear:
+
+- spectral power lies along a line in \((k_y,k_z)\)-space;
+- the screen varies in only one transverse direction;
+- the irregularities are elongated perpendicular to the phase-gradient direction.
+
+The recommended implementation using:
+
+\[
+\phi(y,z) = f(y\sin\alpha + z\cos\alpha)
+\]
+
+is equivalent to imposing that delta-function anisotropy, while being simpler and numerically stable.
+
+---
+
+## 9. Normalization details
+
+For both `generate_1d` and `generate_2d`, normalization should be performed after the spatial field is generated.
+
+For 1D:
+
+\[
+\phi \leftarrow \phi - \langle \phi \rangle_z
+\]
+
+\[
+\phi \leftarrow \phi \frac{\sigma_\phi}{\operatorname{std}_z(\phi)}
+\]
+
+For 2D:
+
+\[
+\phi \leftarrow \phi - \langle \phi \rangle_{y,z}
+\]
+
+\[
+\phi \leftarrow \phi \frac{\sigma_\phi}{\operatorname{std}_{y,z}(\phi)}
+\]
+
+Use population standard deviation, not sample standard deviation.
+
+If the raw standard deviation is numerically zero, the method should raise a clear error unless `sigma_phi_rad == 0`.
+
+---
+
+## 10. Units
+
+All spatial coordinates entering this module are meters.
+
+Configuration gives outer scale in kilometers:
+
+```yaml
+outer_scale_km: 10
+```
+
+Convert internally:
+
+\[
+l_0[\text{m}] = 1000 \cdot l_0[\text{km}]
+\]
+
+The spectral wavenumber is in radians per meter:
+
+\[
+k_0 = \frac{2\pi}{l_0}
+\]
+
+The returned phase is in radians.
+
+The `wavelength_m` argument is in meters.
+
+---
+
+## 11. Integration with synthetic experiments
+
+### 11.1 Single-screen experiment
+
+Synthetic code should do:
+
+\[
+\phi(z) = \texttt{generate\_1d}(...)
+\]
+
+\[
+u_{\text{screen}}(z) = \exp(i\phi(z))
+\]
+
+Then propagate with:
+
+```text
+FftPropagator.propagate_2d(...)
+```
+
+Back propagation should recover a minimum in:
+
+\[
+V(L) = \frac{\langle A^2\rangle}{\langle A\rangle^2} - 1
+\]
+
+at the true screen distance.
+
+### 11.2 Outer-scale estimation
+
+`generate_1d` should be called repeatedly with different `outer_scale_km` values. For each \(l_0\), synthetic forward propagation should estimate \(S_4\), then compute:
+
+\[
+\sigma_\phi/S_4
+\]
+
+The target from the paper/config is:
+
+```yaml
+target_sigma_phi_over_s4_rad: 5.25
+target_distance_km: 1900
+estimated_outer_scale_km: 9.7
+```
+
+The implementation should not force this result. It should generate the correct spectrum so that the experiment can reproduce this relationship statistically.
+
+### 11.3 Two aligned phase screens
+
+Use two independent calls to `generate_1d`.
+
+For equal strength:
+
+\[
+\sigma_{\phi,1} = \sigma_{\phi,2}
+\]
+
+For unequal strength:
+
+\[
+\sigma_{\phi,\text{strong}} = 1.5 \sigma_{\phi,\text{weak}}
+\]
+
+The configuration provides:
+
+```yaml
+sigma_phi_ratio_stronger_to_weaker: 1.5
+```
+
+The generator should provide independent random screens on successive calls.
+
+### 11.4 Two misaligned phase screens
+
+Use `generate_2d` twice with:
+
+```yaml
+alpha_cases_deg:
+  - [30, 60]
+  - [60, 30]
+```
+
+The experiment should verify the paper’s result:
+
+- with equal \(\sigma_\phi\),
+- only the screen with smaller \(\alpha\) is correctly localized.
+
+This depends strongly on using the correct `alpha_rad` convention.
+
+### 11.5 Thermal-noise experiment
+
+The generator creates the deterministic irregularity-induced phase screen. Thermal noise is added later to the complex signal and should not be added inside this module.
+
+Configuration values relevant to the experiment:
+
+```yaml
+thermal_noise:
+  phase_screen_distance_km: 2000
+  sigma_phi_cases_rad:
+    - 1.65
+    - 0.25
+  snr_1hz_cases_vv:
+    - 200
+    - 400
+    - 600
+```
+
+`PhaseScreenGenerator` should only generate the phase screens with the requested \(\sigma_\phi\).
+
+---
+
+## 12. Expected validation checks
+
+Unit or integration tests for this module should verify:
+
+### 12.1 Reproducibility
+
+With the same seed and same call sequence, generated screens are identical.
+
+### 12.2 Shape preservation
+
+For 1D:
+
+```text
+generate_1d(z_m, ...).shape == z_m.shape
+```
+
+For 2D:
+
+```text
+generate_2d(y_m, z_m, ...).shape == (len(y_m), len(z_m))
+```
+
+### 12.3 Mean and standard deviation
+
+For both 1D and 2D:
+
+\[
+|\langle \phi \rangle| \approx 0
+\]
+
+\[
+\operatorname{std}(\phi) \approx \sigma_\phi
+\]
+
+### 12.4 Spectral slope
+
+For 1D generated screens, the empirical power spectrum should approximately follow:
+
+\[
+(k_0^2+k_z^2)^{-p/2}
+\]
+
+over the resolved inertial range.
+
+Because realizations are random, this should be tested statistically or with relaxed tolerances.
+
+### 12.5 Orientation behavior
+
+For 2D screens:
+
+- At \(\alpha=0^\circ\), a cut along \(z\) at fixed \(y\) should show strong variation.
+- At \(\alpha=90^\circ\), a cut along \(z\) at fixed \(y\) should show weak or nearly no variation.
+- The 2D FFT should show power concentrated along a line, not spread isotropically.
+
+This validates the anisotropic field-aligned screen behavior needed for the misaligned two-screen experiment.
+
+---
+
+## 13. Edge cases and numerical cautions
+
+1. Very small grids may not represent the low-wavenumber outer scale correctly.
+2. If the spatial interval is much shorter than \(l_0=10\) km, the generated spectrum may be poorly sampled.
+3. If grid spacing is too coarse, high-frequency structure is aliased.
+4. The zero-frequency component must not dominate the field.
+5. The generated screen is periodic in the FFT sense; synthetic experiments should use sufficiently wide windows or apply windowing later to reduce edge effects.
+6. `wavelength_m` should be validated even if the returned screen is phase in radians.
+7. Do not add receiver thermal noise in this module.
+8. Do not detrend generated screens using the signal preprocessing module; only remove the mean for normalization.
+
+---
+
+## 14. Summary of implementation contract
+
+`PhaseScreenGenerator` should produce reproducible random phase perturbations in radians.
+
+For 1D:
+
+\[
+\phi(z) \sim \mathcal{F}^{-1}
+\left[
+\sqrt{(k_0^2+k_z^2)^{-p/2}}
+\cdot \eta(k_z)
+\right]
+\]
+
+normalized so that:
+
+\[
+\operatorname{std}(\phi)=\sigma_\phi
+\]
+
+For 2D:
+
+\[
+\phi(y,z) = f(y\sin\alpha + z\cos\alpha)
+\]
+
+where \(f\) is a 1D random phase process with the same spectrum and prescribed standard deviation.
+
+The module should use the paper/config defaults:
+
+- \(p=1.5\)
+- \(l_0=10\) km
+- random seed from configuration, usually `42`
+
+but should accept explicit values from the caller and avoid hard-coding experiment-specific constants inside the generation methods.

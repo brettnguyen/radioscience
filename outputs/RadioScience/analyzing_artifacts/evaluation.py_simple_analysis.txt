@@ -1,0 +1,139 @@
+Below is the intended logic analysis for evaluation.py. This document explains, step by step, how the Evaluation class will process the list of geolocation results (each produced per 10‑s interval) to compute quality statistics, error estimates, and generate the key visualizations (maps, histograms, scatter plots) as described in the paper.
+
+──────────────────────────────
+Overview
+
+• The Evaluation class takes as input a list of geolocation result dictionaries (each result coming from the Trainer after processing one 10‑s interval). Each dictionary is expected to include at minimum:
+  – Timestamp (or date) of the interval
+  – Geolocation vector components: latitude, longitude, and height
+  – The computed distance L (from Rx to the region with plasma irregularities)
+  – The scan angle α (or an equivalent attribute – note whether it is in radians or degrees; if in degrees convert to radians when needed)
+  – The quality metric Q (from the BP amplitude variance function)
+  – A flag (or indicator) for whether the geolocation is single‑valued (non-degenerate) or if it has been discarded (multi‑valued cases should have already been removed by Trainer)
+
+• The module will generate statistical summaries, perform error estimation using the formula
+  ΔL = 2 L tan(α) Δα,
+with Δα being the assumed uncertainty in the magnetic field orientation (typically about 0.6° ~0.0105 rad), and produce visual outputs such as:
+  – A heat map (monthly map) of geolocations binned into 3°×3° latitude/longitude cells (similar to Figure 21 from the paper)
+  – Histograms for quality metric Q, and if available, scatter plots of L1 vs. L2 differences (as in Figure 23)
+  – A scatter plot of the computed error estimates (ΔL) versus the distance L to visualize the expected linear relationship
+
+──────────────────────────────
+Evaluation Class: __init__
+
+1. Store Input Data
+  – The __init__ method accepts the list of geolocation dictionaries (and may optionally accept further configuration parameters if needed).
+  – Save this list as an instance attribute.
+  – Optionally, log how many geolocations were received for evaluation.
+
+2. (Optional) Validate the structure of each geolocation dictionary (e.g., check keys "timestamp", "lat", "lon", "L", "alpha", "Q").
+
+──────────────────────────────
+Method: evaluate()
+
+The evaluate() method is responsible for computing statistical summaries and error estimates:
+ 
+A. Quality Filtering and Summary Statistics
+  – Loop over the geolocation results.
+  – Although the Trainer should have already filtered out multi‑valued cases (and ensured Q ≥ Q_threshold and cos(α) > cos_alpha_min), the evaluate() method can double‐check for consistency.
+  – Count the total number of accepted geolocations and, if available, group them by signal type (e.g., L1 vs. L2).
+
+B. Compute Error Estimates Using the ΔL Formula
+  – For each geolocation:
+   ◦ Retrieve the distance L (in km) and the scan angle α.
+   ◦ Convert α to radians if it is provided in degrees.
+   ◦ Use the equation:
+     error_estimate = 2 * L * tan(α) * (Δα)
+   ◦ Use Δα = 0.0105 rad (approx. 0.6°) unless a different value is provided via config.
+  – Record these error estimates for later statistical summaries.
+  – Optionally, compute the average error and its standard deviation.
+  – Also, if Trainer has computed a slope M (|ΔD/ΔL|) as another uncertainty measure, record that too.
+
+C. Temporal and Spatial Aggregation
+  – Parse the timestamps of each geolocation.
+  – Group geolocations by month (or by year/month) to later create monthly geolocation maps.
+  – Also aggregate counts per day if a time series of counts (or geolocation density) is desired.
+  – If the signal type is provided (e.g., L1 vs. L2), create separate groups for later inter-signal comparison.
+
+D. Compare Inter-Signal (e.g., L1 vs. L2) Geolocations
+  – If some intervals include paired L1 and L2 results:
+   ◦ Compute zonal (or other directional) differences between the two sets.
+   ◦ Populate a list of differences to later generate a histogram (mimicking Figure 23b).
+
+E. Final Summary Metrics
+  – Create a dictionary (or object) of summary statistics, e.g.:
+   ◦ Total number of accepted geolocations
+   ◦ Mean and standard deviation of Q values
+   ◦ Average error estimate (ΔL) and its distribution
+   ◦ Counts per month (for seasonal analysis)
+  – Return or store this summary for logging and further inspection.
+
+──────────────────────────────
+Method: plot_results()
+
+This method is dedicated to visualization. The steps include:
+
+A. Monthly Geolocation Map (Heatmap)
+  – Use the grouped geolocation data by month.
+  – Bin the geolocations in 3°×3° latitude/longitude bins.
+  – Create a heatmap (e.g., using matplotlib’s pcolormesh or imshow) for each month (or a composite map where color represents the count).
+  – Label axes (latitude and longitude) and add a color scale representing the number of geolocations.
+  – Optionally, overlay coastlines or geographical outlines if available.
+
+B. Histogram of Quality Metric Q
+  – Plot a histogram of the Q-values.
+  – This helps assess the distribution of the quality metric and verify that most geolocations meet the Q > 1.2 requirement.
+  – Label the axes clearly.
+
+C. Error Estimate vs. Propagation Distance (L) Scatter Plot
+  – Plot the computed error estimates (ΔL) versus the distance L.
+  – Overplot a linear fit if desired to visually inspect whether the relationship ΔL ∝ L (scaled by tan(α)) holds.
+  – Label the axes and add annotations regarding the slope and the assumed Δα.
+
+D. L1 vs. L2 Comparison (if available)
+  – If the evaluation found paired L1 and L2 geolocation results:
+   ◦ Create a scatter plot (or histogram) of the difference in the zonal (east-west) coordinates.
+   ◦ Ensure the bins are chosen to capture differences on the order of 0.5° or as specified in the paper.
+  – This graph should be similar to the histogram shown in Figure 23b.
+
+E. Additional Plots (Optional)
+  – A time series plot of the daily or monthly count of geolocations.
+  – If solar flux data (e.g., F10.7) has been ingested, plot it alongside geolocation counts to check for correlation.
+
+F. Final Output and Saving Figures
+  – Each plot should be clearly titled and include appropriate labels.
+  – Save the plots to disk (or display them interactively) as needed.
+  – Optionally, compile the figures into a report (PDF or HTML).
+
+──────────────────────────────
+Additional Considerations
+
+• Data Consistency and Config Dependencies
+  – All thresholds (like Q_threshold, sigma_phi_threshold, cos_alpha_min) should be read from the config.yaml or passed via configuration parameters.
+  – If the geolocation results do not include some required fields (e.g., scan angle α), the Evaluation class should log a warning and skip error estimate computations for those entries.
+
+• Logging and Debugging
+  – In each method, include logging (or print statements) to note the number of data points processed, any outliers detected, or any unusual distribution (e.g., too many low Q values).
+  – Ensure error estimates are computed and stored alongside each geolocation result for cross-checking.
+
+• Handling Missing or Incomplete Data
+  – If some intervals lack paired L1–L2 data, handle these cases gracefully and document the fraction of intervals with incomplete information.
+
+──────────────────────────────
+Summary
+
+The Evaluation class in evaluation.py will:
+
+– In its __init__, store the list of geolocation results.
+– In its evaluate() method, loop over each geolocation to:
+  • Filter and count results,
+  • Compute error estimates using ΔL = 2L tan(α) Δα,
+  • Group data temporally (monthly) and by signal type (L1 vs. L2),
+  • Compute summary statistics (counts, means, standard deviations).
+– In its plot_results() method, generate:
+  • Monthly geolocation heatmaps,
+  • Histograms (of Q values and inter-signal differences),
+  • Scatter plots (error estimate vs. distance L, and optional time-series plots).
+– Finally, return or log these evaluation metrics and visualizations so that the implementation can be compared with the experimental results described in the paper.
+
+This logic analysis fully informs how evaluation.py should be structured, how its methods interact with the provided geolocation data, and ensures that the produced plots and error estimates align with the methodologies and figures from the paper.

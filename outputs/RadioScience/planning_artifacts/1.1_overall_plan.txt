@@ -1,0 +1,1771 @@
+# Reproduction Plan for “Geolocation of the Ionospheric Irregularities… by Back Propagation of COSMIC-2 RO Signals”
+
+This plan is organized as a roadmap for implementing the paper’s method from scratch. It separates:  
+1. methodology to reproduce,  
+2. numerical modeling experiments,  
+3. COSMIC-2 observational processing,  
+4. quality control and evaluation,  
+5. outputs and validation targets, and  
+6. unclear details requiring decisions or investigation.
+
+---
+
+## 1. Overall Goal
+
+Reproduce the paper’s back-propagation geolocation method for ionospheric F-region plasma irregularities using COSMIC-2 high-rate GNSS radio occultation scintillation data.
+
+The reproduction should generate:
+
+1. Synthetic forward/back propagation modeling results:
+   - Single phase screen localization.
+   - Sensitivity to scan-angle/orientation error.
+   - Two phase screens with aligned irregularities.
+   - Two phase screens with misaligned irregularities.
+   - Noise sensitivity.
+   - Multi-valued geolocation behavior.
+
+2. Real-data COSMIC-2 geolocation products:
+   - 10-s interval geolocation estimates from HR phase/amplitude data.
+   - Monthly 3° × 3° latitude/longitude maps for 2021 and 2023 using L1.
+   - L1/L2 comparison for the test period specified in the paper.
+   - QC statistics including accepted/rejected/multi-valued cases.
+
+---
+
+## 2. Core Physical and Algorithmic Assumptions
+
+The method relies on several assumptions that must be preserved in the implementation.
+
+### 2.1 Thin Phase Screen Approximation
+
+The irregularity region is approximated as a thin phase screen.
+
+- Phase fluctuations are assigned to the phase screen.
+- Amplitude scintillation develops by propagation after the wave passes through the screen.
+- During back propagation from receiver toward transmitter, amplitude variance decreases until the phase screen location, then increases again.
+- Therefore, the irregularity location is inferred from the minimum of the back-propagated amplitude variance.
+
+### 2.2 Anisotropic Field-Aligned Irregularities
+
+The method assumes plasma irregularities are elongated and anisotropic.
+
+- This permits reducing the problem from 3D to 2D.
+- The irregularities are assumed aligned with the geomagnetic field.
+- The IGRF-13 magnetic field model is used to determine the irregularity orientation.
+
+### 2.3 2D Back Propagation Plane
+
+For each candidate distance along the GNSS–LEO line of sight, define a 2D back-propagation plane.
+
+- The plane contains the GNSS–LEO line of sight.
+- It is perpendicular to the projection of the magnetic field onto the phase-screen plane.
+- The COSMIC-2 observed 1D trajectory is projected into this plane.
+
+### 2.4 Geolocation Criterion
+
+The correct geolocation distance is found when the distance used to define the magnetic-field orientation equals the distance returned by the back-propagation amplitude-variance minimum.
+
+Define:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+where:
+
+- \(L_{\mathrm{mf}}\): candidate distance along LOS where IGRF is evaluated to define the BP plane.
+- \(L_0\): distance of the global local minimum of the back-propagated amplitude variance \(V(L)\).
+
+The geolocation is where:
+
+\[
+D(L_{\mathrm{mf}}) = 0
+\]
+
+---
+
+## 3. Required Datasets
+
+### 3.1 COSMIC-2 High-Rate Scintillation Data
+
+Source:
+
+- UCAR COSMIC Data Analysis and Archive Center.
+- DOI: `https://doi.org/10.5065/T353-C093`
+
+Required data products:
+
+- High-rate phase and amplitude from COSMIC-2 POD antennas.
+- Receiver orbit data.
+- Metadata identifying:
+  - GNSS constellation.
+  - Signal type: L1, L2C, L2P, etc.
+  - POD antenna direction: velocity / anti-velocity.
+  - Sampling rate.
+  - Time stamps.
+  - SNR amplitude.
+  - Carrier phase.
+
+Important details from the paper:
+
+- COSMIC-2 has six low-inclination LEO satellites.
+- Orbit inclination: approximately 24°.
+- Orbit height: approximately 520–550 km.
+- HR data are collected from POD antennas.
+- GPS HR sampling: 50 Hz.
+- GLONASS HR sampling: 100 Hz.
+- GPS signals are tracked in closed loop.
+- GLONASS signals are tracked in open loop and require ground removal of data modulation and phase connection.
+- Amplitude is represented by SNR scaled to a 1-Hz band.
+
+### 3.2 GNSS Orbits and Clocks
+
+Source:
+
+- International GNSS Service.
+
+Required for:
+
+- Transmitter positions at each high-rate sample.
+- Possibly clock correction if phase reconstruction requires it.
+
+### 3.3 Receiver Orbits
+
+Source:
+
+- COSMIC-2 CDAAC product.
+
+Required for:
+
+- LEO receiver position and velocity.
+- LOS geometry.
+- Tangent point height.
+- Projection to BP plane.
+
+### 3.4 IGRF-13 Magnetic Field Model
+
+Source:
+
+- IGRF-13 links in Alken et al. 2021.
+
+Required for:
+
+- Magnetic field direction at candidate irregularity positions along LOS.
+- Defining BP plane orientation.
+- Computing scan angle \(\alpha\).
+
+### 3.5 F10.7 Solar Flux Data
+
+Source:
+
+- NASA OMNIWeb: `https://omniweb.gsfc.nasa.gov/form/dx1.html`
+
+Required for reproducing Figure 22-style solar activity comparison.
+
+---
+
+## 4. Preprocessing of COSMIC-2 Observations
+
+### 4.1 Read and Organize Occultation Events
+
+For each COSMIC-2 occultation/scintillation event:
+
+1. Load high-rate phase and amplitude/SNR.
+2. Load receiver position and velocity.
+3. Load transmitter position and velocity.
+4. Identify signal frequency:
+   - L1.
+   - L2C.
+   - Exclude GPS L2P for the L1/L2 comparison, because the paper excludes L2P due to semi-codeless tracking instability.
+5. Segment the record into 10-s intervals.
+
+### 4.2 Determine Sampling Rate
+
+Use metadata or infer from timestamps.
+
+Expected:
+
+- GPS: 50 Hz.
+- GLONASS: 100 Hz.
+
+Each 10-s interval therefore contains approximately:
+
+- 500 samples for GPS.
+- 1000 samples for GLONASS.
+
+### 4.3 Phase Connection and Data Modulation Removal
+
+The paper states:
+
+- GPS phase is already connected onboard in closed-loop tracking.
+- GLONASS open-loop phase requires ground processing:
+  - remove data modulation,
+  - connect/unwind phase.
+
+If COSMIC data product already provides connected phase, use it. Otherwise implement:
+
+1. Remove navigation bit/data modulation.
+2. Unwrap carrier phase.
+3. Remove large-scale trend.
+
+This is an area where exact CDAAC product details need to be verified.
+
+### 4.4 Compute Scintillation Indices in 10-s Windows
+
+For each 10-s interval, compute:
+
+#### Phase Scintillation Index
+
+\[
+\sigma_\phi = \mathrm{std}(\phi_{\mathrm{detrended}})
+\]
+
+The paper uses a threshold:
+
+\[
+\sigma_\phi > 0.25 \ \mathrm{rad}
+\]
+
+Only process intervals exceeding this threshold.
+
+#### Amplitude Scintillation Index
+
+The paper defines amplitude through SNR and intensity-like quantities. Use:
+
+\[
+I = A^2
+\]
+
+Then compute:
+
+\[
+S_4 = \frac{\sqrt{\langle I^2\rangle - \langle I\rangle^2}}{\langle I\rangle}
+\]
+
+where \(A\) is signal amplitude, represented by SNR after suitable normalization.
+
+The paper reports approximate statistics over accepted geolocations:
+
+\[
+\langle \sigma_\phi \rangle \approx 1.65 \ \mathrm{rad}
+\]
+
+\[
+\langle S_4 \rangle \approx 0.32
+\]
+
+\[
+\langle \sigma_\phi/S_4 \rangle \approx 5.25 \ \mathrm{rad}
+\]
+
+These values can be used as sanity checks.
+
+### 4.5 Detrending
+
+The paper shows detrended phase and uses \(\sigma_\phi\), but does not fully specify the detrending filter.
+
+Implementation options to test:
+
+1. Remove linear trend over each 10-s interval.
+2. Remove quadratic trend over each 10-s interval.
+3. Apply a high-pass filter with cutoff similar to common scintillation processing.
+4. Use CDAAC-provided detrended phase if available.
+
+For faithful reproduction, investigate CDAAC documentation. If unspecified, record the detrending choice explicitly and perform sensitivity tests.
+
+### 4.6 Tangent-Point Height Filter
+
+The paper processes scintillation observations where the minimum LOS tangent-point height is between:
+
+\[
+150 \ \mathrm{km}
+\]
+
+and receiver height, approximately:
+
+\[
+520 \ \mathrm{km}
+\]
+
+Before BP, require:
+
+\[
+h_{\mathrm{tan}} > 150 \ \mathrm{km}
+\]
+
+This avoids contamination from sporadic E-layer effects.
+
+---
+
+## 5. Numerical Modeling Experiments
+
+Before processing real COSMIC-2 data, implement the synthetic forward/back propagation models described in Sections 2 and 4 of the paper.
+
+These experiments are essential for validating the BP implementation.
+
+---
+
+# 5.1 Two-Dimensional Forward Propagation
+
+For 2D propagation, use the plane-wave expansion solution.
+
+Incident wave:
+
+\[
+u(x,z) = A_0 \exp(ikx)
+\]
+
+where:
+
+\[
+k = \frac{2\pi}{\lambda}
+\]
+
+The phase screen at \(x=x_0\) imposes random phase fluctuation:
+
+\[
+S_0(z)
+\]
+
+The output immediately after the screen is:
+
+\[
+u_{\mathrm{out}}(z) = A_0 \exp[ikx_0 + ikS_0(z)]
+\]
+
+Expand:
+
+\[
+u_{\mathrm{out}}(z) = \sum_m c_m \exp(ik_{zm} z)
+\]
+
+Then propagate:
+
+\[
+u(x,z) =
+\sum_m c_m
+\exp
+\left[
+ik_{zm}z
++
+i\sqrt{k^2-k_{zm}^2}(x-x_0)
+\right]
+\]
+
+This is equivalent to solving the parabolic wave equation and neglecting backscatter.
+
+### Modeling Wavelengths
+
+Use GNSS carrier wavelengths:
+
+- GPS L1: approximately 0.1903 m.
+- GPS L2: approximately 0.2442 m.
+
+The paper does not explicitly state which wavelength was used in synthetic figures, so start with L1 unless testing L2 effects.
+
+---
+
+# 5.2 Random Phase Screen Spectrum
+
+Generate 1D random phase irregularities using the spectrum:
+
+\[
+\Phi(k_z) \sim (k_0^2 + k_z^2)^{-p/2}
+\]
+
+where:
+
+\[
+k_0 = \frac{2\pi}{l_0}
+\]
+
+Use the paper’s parameters:
+
+\[
+p = 1.5
+\]
+
+\[
+l_0 = 10 \ \mathrm{km}
+\]
+
+The paper estimates:
+
+\[
+\langle l_0 \rangle \approx 9.7 \ \mathrm{km}
+\]
+
+from observed COSMIC-2 scintillation statistics, consistent with \(l_0=10\) km.
+
+### Synthetic Phase Screen Construction
+
+Implementation steps:
+
+1. Define spatial grid \(z\).
+2. Generate Fourier coefficients with random phases.
+3. Scale amplitudes according to \(\Phi(k_z)\).
+4. Enforce Hermitian symmetry for real \(S_0(z)\).
+5. Inverse FFT to obtain \(S_0(z)\).
+6. Normalize to desired \(\sigma_\phi\).
+
+The phase in radians is:
+
+\[
+\phi(z) = k S_0(z)
+\]
+
+Normalize such that:
+
+\[
+\mathrm{std}(\phi) = \sigma_\phi
+\]
+
+Use values:
+
+- \(\sigma_\phi = 1.65\) rad for average observed scintillation.
+- \(\sigma_\phi = 0.25\) rad for threshold/noise sensitivity tests.
+
+---
+
+# 5.3 Back Propagation in Synthetic Modeling
+
+Back propagation uses the same propagation operator, but with the observed field at receiver as the boundary condition and propagation distance reversed.
+
+For each candidate back-propagation distance \(L\), compute complex field \(u_{\mathrm{BP}}(L,z)\).
+
+Then compute normalized amplitude variance:
+
+\[
+V(L) = \frac{\langle A^2\rangle}{\langle A\rangle^2} - 1
+\]
+
+where:
+
+\[
+A = |u_{\mathrm{BP}}|
+\]
+
+The phase screen location should correspond to the minimum of \(V(L)\).
+
+---
+
+# 5.4 Synthetic Experiment A: Single Phase Screen
+
+Purpose:
+
+- Verify that the minimum of \(V(L)\) occurs at the true phase screen distance.
+
+Suggested setup:
+
+- One 1D phase screen.
+- \(p=1.5\).
+- \(l_0=10\) km.
+- Phase screen to receiver distance:
+  - \(L=1900\) km for average observational case.
+  - Also test \(L=2000\) km, used in the noise modeling.
+- \(\sigma_\phi=1.65\) rad.
+
+Expected result:
+
+- BP amplitude fluctuations decrease toward the true screen.
+- \(V(L)\) has a clear minimum at the true screen distance.
+
+---
+
+# 5.5 Synthetic Experiment B: Outer-Scale Estimation
+
+Reproduce the logic of Figure 3.
+
+For a range of outer scales \(l_0\), compute:
+
+\[
+\sigma_\phi/S_4
+\]
+
+for several screen-receiver distances \(L\).
+
+Distances to test:
+
+- The paper’s average value:
+
+\[
+L \approx 1900 \ \mathrm{km}
+\]
+
+- Additional distances similar to Figure 3, unspecified in text. Choose a representative set, e.g.:
+  - 500 km,
+  - 1000 km,
+  - 1900 km,
+  - 3000 km,
+  - 5000 km.
+
+Expected target:
+
+Using:
+
+\[
+\langle \sigma_\phi/S_4 \rangle \approx 5.25 \ \mathrm{rad}
+\]
+
+and:
+
+\[
+\langle L \rangle \approx 1900 \ \mathrm{km}
+\]
+
+should yield:
+
+\[
+l_0 \approx 9.7 \ \mathrm{km}
+\]
+
+---
+
+# 5.6 Synthetic Experiment C: Error Due to Orientation Error
+
+The paper derives:
+
+\[
+\Delta L = 2L\tan(\alpha)\Delta\alpha
+\]
+
+where:
+
+- \(\alpha\): scan angle.
+- \(\Delta\alpha\): error in irregularity orientation.
+- \(L\): true distance from receiver to irregularities.
+
+Use:
+
+\[
+\Delta\alpha \approx 0.6^\circ
+\]
+
+based on an approximate 1% IGRF magnetic-field model error.
+
+Reproduce Table 1 values:
+
+| \(L\) | \(\alpha=15^\circ\) | \(\alpha=45^\circ\) | \(\alpha=75^\circ\) |
+|---:|---:|---:|---:|
+| 1000 km | 6 km | 21 km | 78 km |
+| 3000 km | 17 km | 63 km | 235 km |
+| 5000 km | 28 km | 105 km | 392 km |
+
+Implementation test:
+
+1. Simulate observation trajectory with true projection scaling:
+   \[
+   z = z' \cos\alpha
+   \]
+2. Apply BP using erroneous angles:
+   \[
+   \alpha \pm \Delta\alpha
+   \]
+3. Verify displacement of \(V(L)\) minimum.
+
+---
+
+# 5.7 Synthetic Experiment D: Two Phase Screens, Same Orientation
+
+Purpose:
+
+- Verify that two aligned phase screens are not separately resolvable by BP.
+
+Setup:
+
+- Two phase screens.
+- Same orientation.
+- Separation distance: 1000 km.
+- Same \(\sigma_\phi\) on both screens.
+
+Expected:
+
+- \(V(L)\) does not produce two clearly resolvable minima.
+- Locations of both screens cannot be independently recovered.
+
+Second setup:
+
+- Two screens.
+- Same orientation.
+- One screen has 1.5 times larger \(\sigma_\phi\) than the other.
+
+Expected:
+
+- BP localizes only the screen with larger \(\sigma_\phi\).
+- This is true regardless of whether the stronger screen is closer to or farther from the receiver.
+
+---
+
+# 5.8 Synthetic Experiment E: Two Phase Screens, Different Orientation
+
+This requires 3D forward propagation and 2D back propagation.
+
+Use 3D plane-wave propagation:
+
+\[
+u(x,y,z)
+=
+\sum_{mn} c_{mn}
+\exp
+\left[
+ik_{zm}z
++
+ik_{yn}y
++
+i\sqrt{k^2-k_{zm}^2-k_{yn}^2}(x-x_0)
+\right]
+\]
+
+Use 2D phase-screen spectrum:
+
+\[
+\Phi(k_y,k_z)
+\sim
+[k_0^2 + (k_y\cos\alpha + k_z\sin\alpha)^2]^\nu
+\delta(k_z\cos\alpha - k_y\sin\alpha)
+\]
+
+The paper’s parse does not make the exponent fully clear, but this spectrum imposes 1D irregularities with a specified orientation.
+
+Test cases:
+
+1. \(\alpha_1 = 30^\circ\), \(\alpha_2 = 60^\circ\)
+2. Swap:
+   \[
+   \alpha_1 = 60^\circ,\quad \alpha_2 = 30^\circ
+   \]
+
+Use equal \(\sigma_\phi\) on both screens.
+
+Expected:
+
+- Only the screen with smaller \(\alpha\) is correctly localized.
+- This is true regardless of whether it is closer to or farther from the receiver.
+
+---
+
+# 5.9 Synthetic Experiment F: Thermal Noise
+
+The receiver thermal noise model is additive complex noise:
+
+\[
+u = u_1 + iu_2 = A\exp(i\phi)
+\]
+
+with noise added independently to \(u_1\) and \(u_2\).
+
+The paper states for open-loop tracking:
+
+\[
+\mathrm{SNR} = \frac{A}{\sigma_{u_1}} = \frac{A}{\sigma_{u_2}}
+\]
+
+and:
+
+\[
+\sigma_\phi = \frac{1}{\mathrm{SNR}}
+\]
+
+The reported COSMIC-2 1-Hz SNR statistics:
+
+- Average SNR: approximately 400 V/V.
+- More than 90% of geolocations have SNR between 200 and 600 V/V.
+
+For sampling frequency \(f_s\), the effective SNR is reduced by:
+
+\[
+\sqrt{f_s}
+\]
+
+Example from paper:
+
+- 1-Hz SNR = 400 V/V.
+- \(f_s=100\) Hz.
+- Effective SNR = 40.
+- Thermal phase noise:
+  \[
+  \sigma_\phi = 1/40 = 0.025 \ \mathrm{rad}
+  \]
+
+Model setup:
+
+- Phase screen at:
+  \[
+  L = 2000 \ \mathrm{km}
+  \]
+- Use \(\sigma_\phi=1.65\) rad and \(\sigma_\phi=0.25\) rad.
+- Test SNR values:
+  - 200 V/V,
+  - 400 V/V,
+  - 600 V/V,
+  - possibly noiseless baseline.
+
+Paper-specific spatial sampling:
+
+- Assume:
+  \[
+  dz/dt = 4 \ \mathrm{km/s}
+  \]
+- \(f_s = 100\) Hz gives:
+  \[
+  \Delta z = 40 \ \mathrm{m}
+  \]
+- The paper uses:
+  - 40 km interval in \(z\),
+  - windowed to approximately 35 km to remove end effects,
+  - 10 m internal grid steps,
+  - noise standard deviation increased by factor 2 because of the 10 m modeling grid versus 40 m observational spacing.
+
+Expected:
+
+- Noise shifts the entire \(V(L)\) function upward.
+- The shape of \(V(L)\) remains approximately unchanged.
+- For \(\sigma_\phi=1.65\), minimum remains detectable.
+- For \(\sigma_\phi=0.25\), minimum is marginal or undetectable at low SNR.
+
+---
+
+## 6. Real Observational Back Propagation
+
+The real-data BP differs from synthetic modeling because:
+
+1. Receiver trajectory is not a straight line perpendicular to propagation.
+2. GNSS transmitter moves.
+3. Incident wave is spherical, not planar.
+4. Magnetic-field orientation changes along LOS.
+
+---
+
+# 6.1 Coordinate System for Each 10-s Interval
+
+For each accepted 10-s interval:
+
+1. Select midpoint time \(t_0\).
+2. Get midpoint transmitter position:
+   \[
+   \mathbf{R}_{tx,0}
+   \]
+3. Get midpoint receiver position:
+   \[
+   \mathbf{R}_{rx,0}
+   \]
+4. Define LOS direction.
+
+The paper’s final geolocation uses:
+
+\[
+\mathbf{n}_{rt}
+=
+\frac{\mathbf{R}_{rx} - \mathbf{R}_{tx}}
+{|\mathbf{R}_{rx} - \mathbf{R}_{tx}|}
+\]
+
+and:
+
+\[
+\mathbf{R}_{geo}
+=
+\mathbf{R}_{rx}
++
+L\mathbf{n}_{rt}
+\]
+
+Note: depending on sign convention, this vector should point from receiver toward transmitter. Verify sign carefully during implementation.
+
+---
+
+# 6.2 Candidate Magnetic-Field Distance Loop
+
+Outer loop:
+
+\[
+L_{\mathrm{mf}} = 100, 200, \ldots, 6000 \ \mathrm{km}
+\]
+
+For each \(L_{\mathrm{mf}}\):
+
+1. Compute candidate point along LOS:
+   \[
+   \mathbf{R}_{cand}
+   =
+   \mathbf{R}_{rx,0}
+   +
+   L_{\mathrm{mf}}\mathbf{n}_{rt}
+   \]
+2. Convert to geodetic latitude, longitude, altitude.
+3. Evaluate IGRF-13 magnetic-field vector:
+   \[
+   \mathbf{H}(\mathbf{R}_{cand}, t_0)
+   \]
+4. Use the direction of \(\mathbf{H}\), not its magnitude.
+5. Define the phase-screen plane perpendicular to LOS.
+6. Project \(\mathbf{H}\) onto that phase-screen plane.
+7. Define the irregularity orientation direction from this projection.
+8. Define the BP plane perpendicular to this projected irregularity direction.
+
+---
+
+# 6.3 Scan Angle \(\alpha\)
+
+The scan angle \(\alpha\) is the angle between:
+
+- the LOS scan trajectory on the phase screen, and
+- the BP plane.
+
+The paper uses \(\cos\alpha\) in the QC criterion:
+
+\[
+\cos\alpha > 0.1
+\]
+
+Interpretation:
+
+- If \(\alpha\) is close to \(90^\circ\), then \(\cos\alpha \approx 0\).
+- In this geometry, LOS scans along irregularity direction and induces little useful scintillation along the receiver trajectory.
+- Therefore reject small \(\cos\alpha\).
+
+Implementation requirement:
+
+- For every \(L_{\mathrm{mf}}\), compute \(\cos\alpha(L_{\mathrm{mf}})\).
+- Store it for diagnostics and multi-valued-geolocation analysis.
+
+The paper also discusses angle \(\beta\), the angle between the magnetic field and the projected irregularity direction. If \(\beta\) is close to \(90^\circ\), reduction to 2D becomes invalid. However, the final QC list only explicitly uses \(\cos\alpha>0.1\), not a \(\beta\)-threshold.
+
+---
+
+# 6.4 Projection of Observed Signal into BP Plane
+
+For the current \(L_{\mathrm{mf}}\)-defined BP plane:
+
+1. Project transmitter and receiver positions at each high-rate sample into the 2D BP coordinate system.
+2. Define:
+   - \(x\): along midpoint LOS.
+   - \(z\): direction in BP plane perpendicular to \(x\).
+3. Express sample-wise positions as:
+   - transmitter: \((x_1, z_1)\)
+   - receiver: \((x_2, z_2)\)
+
+The paper uses the phase-screen location as \(x=0\) in the local coordinate system.
+
+---
+
+# 6.5 Stationary-Transmitter Correction
+
+Because GNSS transmitters move during the 10-s interval, the observed wavefield is not stationary. The paper corrects transmitter and receiver positions using a straight-line-ray approximation.
+
+For a given candidate BP distance \(L\), place the phase screen at:
+
+\[
+x = 0
+\]
+
+At each sample:
+
+- Actual transmitter:
+  \[
+  (x_1, z_1)
+  \]
+- Actual receiver:
+  \[
+  (x_2, z_2)
+  \]
+
+The LOS crosses the phase screen at height:
+
+\[
+z_s =
+z_1 -
+x_1
+\frac{z_2-z_1}{x_2-x_1}
+\]
+
+The stationary transmitter is fixed at the midpoint coordinate:
+
+\[
+(x_{10}, 0)
+\]
+
+The corrected receiver coordinates become:
+
+\[
+z_2' = z_s \left(1 - \frac{x_2'}{x_{10}}\right)
+\]
+
+The paper describes two options:
+
+### Option 1
+
+\[
+x_2' = x_2
+\]
+
+- Better for diffraction-integral BP.
+- Minimizes difference in diffraction effects between original and corrected trajectories.
+
+### Option 2
+
+\[
+x_2' = x_{20}
+\]
+
+- Receiver is placed on a trajectory perpendicular to propagation direction.
+- After interpolation onto uniform \(z_2'\), this is suitable for FFT/plane-wave BP.
+
+The paper does not state unambiguously which option was used in the final CDAAC processing. A robust reproduction should implement both options and compare.
+
+---
+
+# 6.6 Phase Correction
+
+Observed excess phase:
+
+\[
+S_{\mathrm{exc}} = S - L_{\mathrm{tr}}
+\]
+
+where:
+
+\[
+L_{\mathrm{tr}}
+=
+\sqrt{(x_2-x_1)^2 + (z_2-z_1)^2}
+\]
+
+Corrected path length:
+
+\[
+L'_{\mathrm{tr}}
+=
+\sqrt{(x_2'-x_{10})^2 + z_2'^2}
+\]
+
+Corrected phase/path quantity:
+
+\[
+S' = S_{\mathrm{exc}} + L'_{\mathrm{tr}}
+\]
+
+Amplitude is not corrected:
+
+\[
+A' = A
+\]
+
+Construct corrected complex signal:
+
+\[
+u'(z_2') = A'\exp(ikS')
+\]
+
+or, if working directly in radians:
+
+\[
+u'(z_2') = A'\exp(i\phi')
+\]
+
+where \(\phi'=kS'\).
+
+---
+
+# 6.7 Wavefront Curvature Correction
+
+Projection into the BP plane assumes a plane incident wave. The actual wave is spherical with curvature radius approximately equal to transmitter-receiver distance \(R\).
+
+Projection changes curvature radius from:
+
+\[
+R
+\]
+
+to:
+
+\[
+R_1 = R\cos^2\alpha
+\]
+
+To restore the curvature, add the quadratic phase/path correction:
+
+\[
+\Delta S_{\mathrm{curv}}
+=
+\frac{z^2\tan^2\alpha}{2R}
+\]
+
+to the phase path before BP.
+
+In radians:
+
+\[
+\Delta \phi_{\mathrm{curv}}
+=
+k\frac{z^2\tan^2\alpha}{2R}
+\]
+
+---
+
+# 6.8 Back Propagation for Real Data
+
+For each \(L_{\mathrm{mf}}\), perform inner-loop BP over distances:
+
+\[
+L = 100, 200, \ldots, 6000 \ \mathrm{km}
+\]
+
+with step:
+
+\[
+\Delta L = 100 \ \mathrm{km}
+\]
+
+At each \(L\):
+
+1. Correct transmitter/receiver geometry for a phase screen at that distance.
+2. Correct phase.
+3. Apply wavefront-curvature correction.
+4. Interpolate corrected complex signal onto a uniform \(z\) grid if using FFT plane-wave BP.
+5. Back-propagate from corrected receiver trajectory to candidate screen.
+6. Compute amplitude:
+   \[
+   A_{\mathrm{BP}}(z,L) = |u_{\mathrm{BP}}(z,L)|
+   \]
+7. Compute:
+   \[
+   V(L) = \frac{\langle A_{\mathrm{BP}}^2\rangle}{\langle A_{\mathrm{BP}}\rangle^2} - 1
+   \]
+
+Important:
+
+- A consistent spatial window should be used across \(L\).
+- Edge effects should be minimized.
+- The paper smooths \(V(L)\), not necessarily the complex field.
+
+---
+
+## 7. Finding the Back-Propagation Minimum
+
+For a fixed \(L_{\mathrm{mf}}\), the inner loop yields \(V(L)\).
+
+### 7.1 Smooth \(V(L)\)
+
+The paper applies:
+
+- second-order sliding polynomial regression,
+- 1000 km window.
+
+Purpose:
+
+- reduce false rejection due to noise,
+- increase robustness of \(Q\),
+- preserve \(L_0\) and \(V_0\) approximately.
+
+Implementation:
+
+1. Given discrete \(V(L)\) at 100 km spacing.
+2. Use a moving 1000 km window, i.e. approximately 11 points.
+3. Fit a quadratic polynomial locally.
+4. Evaluate at the central distance.
+5. Use edge-handling carefully.
+
+The paper compares raw and smoothed \(V(L)\), then uses the smoothed curve for QC depth estimation.
+
+### 7.2 Locate Global Local Minimum
+
+Find the global local minimum:
+
+\[
+V_0 = V(L_0)
+\]
+
+Requirements from paper:
+
+- Minimum must be local, not at an end of the BP interval.
+- Minimum must not be too close to the ends.
+- Specifically, distances \(L_1\) and \(L_2\), defined below, must not be smaller than two 100-km samples.
+
+### 7.3 Define \(L_1\), \(L_2\), \(V_1\), \(V_2\)
+
+Starting from \(L_0\):
+
+- Move toward smaller \(L\) until monotonic increase of \(V(L)\) ends.
+- Distance from \(L_0\) to that point is \(L_1\).
+- Move toward larger \(L\) until monotonic increase of \(V(L)\) ends.
+- Distance from \(L_0\) to that point is \(L_2\).
+
+Then:
+
+\[
+V_1 = V(L_0 - L_1)
+\]
+
+\[
+V_2 = V(L_0 + L_2)
+\]
+
+### 7.4 Define Minimum-Depth Metric \(Q\)
+
+\[
+Q =
+\frac{\min(V_1,V_2)}{V_0}
+\]
+
+QC criterion:
+
+\[
+Q > 1.2
+\]
+
+The paper notes this threshold is partly ad hoc but motivated by noise modeling.
+
+---
+
+## 8. Finding the Final Geolocation
+
+After completing the inner loop for each \(L_{\mathrm{mf}}\), store:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+Then search for zero crossings of \(D\).
+
+### 8.1 Zero-Crossing Requirement
+
+A geolocation occurs where:
+
+\[
+D(L) = 0
+\]
+
+The paper requires:
+
+- \(D(L)\) remains positive on one side and negative on the other side for at least two 100-km steps.
+- If crossing is steep and missed between samples, interpolation may be needed, but the paper states crossing may occur at one or several samples or no sample.
+- The implementation should search sign changes and exact zero samples.
+
+### 8.2 Estimate Slope \(M\)
+
+For accepted crossings, compute:
+
+\[
+M = \left|\frac{\Delta D}{\Delta L}\right|
+\]
+
+using the first samples where \(D>0\) and \(D<0\) around the crossing.
+
+The paper suggests \(M\) may be used as an additional uncertainty measure.
+
+### 8.3 Multi-Valued Geolocations
+
+If more than one valid zero crossing occurs in the full 100–6000 km interval, mark the 10-s interval as multi-valued.
+
+The paper states:
+
+- Approximately 8% of COSMIC-2 cases are multi-valued.
+- Multi-valued geolocations are discarded.
+- They are not interpreted as multiple physical irregularity regions.
+- They are caused by the interaction between receiver trajectory direction and changing magnetic-field/scan-angle geometry along LOS.
+
+QC:
+
+- Keep only single-valued geolocations.
+- Discard all multi-valued cases.
+
+### 8.4 Final Geolocation Vector
+
+Once the accepted distance \(L\) is obtained:
+
+\[
+\mathbf{R}_{geo}
+=
+\mathbf{R}_{rx}
++
+L\mathbf{n}_{rt}
+\]
+
+where:
+
+\[
+\mathbf{n}_{rt}
+=
+\frac{\mathbf{R}_{rx}-\mathbf{R}_{tx}}
+{|\mathbf{R}_{rx}-\mathbf{R}_{tx}|}
+\]
+
+Convert \(\mathbf{R}_{geo}\) to:
+
+- geodetic latitude,
+- longitude,
+- altitude above reference ellipsoid.
+
+Check sign convention carefully using known geometry. The formula in the paper may depend on vector orientation naming; the result should lie between receiver and transmitter along the LOS.
+
+---
+
+## 9. Final Quality Control Criteria
+
+For a 10-s interval to produce a successful geolocation, require all of the following.
+
+### 9.1 Before BP
+
+1. Phase scintillation:
+   \[
+   \sigma_\phi > 0.25 \ \mathrm{rad}
+   \]
+
+2. Tangent point height:
+   \[
+   h_{\mathrm{tan}} > 150 \ \mathrm{km}
+   \]
+
+### 9.2 During BP
+
+3. BP range:
+   \[
+   100 \ \mathrm{km} < L < 6000 \ \mathrm{km}
+   \]
+
+4. Distance step:
+   \[
+   \Delta L = 100 \ \mathrm{km}
+   \]
+
+5. Valid local minimum of \(V(L)\):
+   - not at interval edge,
+   - \(L_1\) and \(L_2\) at least two samples, i.e. at least 200 km.
+
+### 9.3 After BP
+
+6. Single-valued geolocation only.
+
+7. Minimum-depth criterion:
+   \[
+   Q > 1.2
+   \]
+
+8. Scan-angle criterion:
+   \[
+   \cos\alpha > 0.1
+   \]
+
+The paper does not include a final explicit altitude filter for the geolocated point, but because the study focuses on the equatorial F layer, altitude distributions should be examined and outliers flagged.
+
+---
+
+## 10. Main Reproduction Experiments with Real Data
+
+---
+
+# 10.1 Experiment 1: Monthly L1 Geolocation Maps for 2021 and 2023
+
+### Data
+
+Use COSMIC-2 HR L1 data from POD antennas for:
+
+- full year 2021,
+- full year 2023.
+
+### Time Selection
+
+Only post-sunset local time:
+
+\[
+18 \leq \mathrm{LT} < 24
+\]
+
+Compute local time from longitude and UTC:
+
+\[
+\mathrm{LT} = \mathrm{UTC\ hours} + \frac{\mathrm{longitude}}{15^\circ}
+\]
+
+wrapped to 0–24 hr.
+
+The paper does not explicitly state whether LT is computed at tangent point or geolocation. Since maps are geolocations, use the geolocated longitude unless further details indicate otherwise.
+
+### Spatial Binning
+
+Create monthly maps using:
+
+\[
+3^\circ \times 3^\circ
+\]
+
+latitude/longitude bins.
+
+Color scale:
+
+- number of accepted geolocations per bin.
+
+### Expected Results
+
+Reported counts:
+
+- 2021:
+  \[
+  332{,}000
+  \]
+  accepted L1 geolocations.
+
+- 2023:
+  \[
+  1{,}108{,}000
+  \]
+  accepted L1 geolocations.
+
+Expected seasonal morphology:
+
+- December–January:
+  - scintillation mainly in American/Atlantic sector.
+- May–July:
+  - maxima in African and Pacific sectors,
+  - low activity in American sector.
+- September–October:
+  - scintillation at most longitudes.
+- 2023 should have substantially more geolocations than 2021 due to higher solar activity.
+
+---
+
+# 10.2 Experiment 2: F10.7 Comparison
+
+Download daily F10.7 data from 2020 through most of 2024.
+
+Reproduce a time series similar to the paper’s Figure 22.
+
+Expected:
+
+- Average F10.7 roughly doubles from 2021 to 2023.
+- This supports the increase in scintillation/geolocation counts.
+
+---
+
+# 10.3 Experiment 3: L1/L2 Geolocation Comparison
+
+The paper contains a slight inconsistency:
+
+- Abstract says comparison for a “2-month period.”
+- Body text says “between February 19 and 1 March 2021,” which is about 11 days.
+
+For strict reproduction, start with the body-text period:
+
+\[
+2021\text{-}02\text{-}19 \ \text{to} \ 2021\text{-}03\text{-}01
+\]
+
+Signals:
+
+- Use L1.
+- Use L2.
+- For GPS, use L2C only.
+- Exclude GPS L2P.
+
+Expected counts:
+
+- L1 geolocations:
+  \[
+  13{,}000
+  \]
+- L2 geolocations:
+  \[
+  11{,}000
+  \]
+- Common L1/L2 cases:
+  \[
+  8{,}000
+  \]
+
+### Pairing L1 and L2 Geolocations
+
+Pair geolocations from the same:
+
+- occultation event,
+- COSMIC-2 satellite,
+- GNSS transmitter,
+- 10-s interval.
+
+### Zonal Difference
+
+Compute east-west/zonal difference between paired L1 and L2 geolocations.
+
+Options:
+
+1. Longitude difference in degrees:
+   \[
+   \Delta \lambda = \lambda_{L1} - \lambda_{L2}
+   \]
+2. Convert to physical zonal distance:
+   \[
+   \Delta x = R_E \cos(\phi)\Delta\lambda
+   \]
+
+The paper’s histogram uses degrees with 0.5° bins.
+
+Therefore reproduce:
+
+- histogram of L1-L2 zonal geolocation differences,
+- bin width:
+  \[
+  0.5^\circ
+  \]
+
+---
+
+## 11. Validation and Diagnostic Outputs
+
+For reproducibility, save intermediate products.
+
+### 11.1 Per-Interval Diagnostics
+
+For every 10-s interval, store:
+
+- occultation/event ID,
+- COSMIC-2 spacecraft ID,
+- GNSS PRN,
+- constellation,
+- signal type,
+- antenna direction,
+- start/mid/end time,
+- sampling rate,
+- mean SNR,
+- \(\sigma_\phi\),
+- \(S_4\),
+- tangent point height,
+- accepted/rejected status,
+- rejection reason,
+- \(Q\),
+- \(\cos\alpha\),
+- \(M\),
+- number of zero crossings,
+- multi-valued flag,
+- geolocation distance \(L\),
+- geolocation latitude/longitude/altitude.
+
+### 11.2 BP Function Diagnostics
+
+For selected intervals, save:
+
+- \(V(L)\) for each \(L_{\mathrm{mf}}\),
+- smoothed \(V(L)\),
+- \(D(L_{\mathrm{mf}})\),
+- \(\cos\alpha(L_{\mathrm{mf}})\),
+- local minima \(L_0\),
+- zero-crossing locations.
+
+These are needed to reproduce Figures 16–20 style diagnostics.
+
+### 11.3 Aggregate Statistics
+
+Compute:
+
+- total number of 10-s intervals,
+- intervals passing \(\sigma_\phi\),
+- intervals passing tangent-height check,
+- intervals with valid BP minima,
+- intervals rejected by \(Q\),
+- intervals rejected by \(\cos\alpha\),
+- multi-valued intervals,
+- final accepted geolocations.
+
+Compare multi-valued rate to paper:
+
+\[
+\sim 8\%
+\]
+
+---
+
+## 12. Suggested Implementation Architecture
+
+Although no code is requested yet, the codebase should be modular.
+
+### 12.1 Data Modules
+
+1. `cosmic_reader`
+   - Load HR phase/SNR.
+   - Load metadata.
+   - Segment into 10-s intervals.
+
+2. `orbit_reader`
+   - Load receiver orbits.
+   - Interpolate receiver state to HR timestamps.
+   - Load/interpolate GNSS transmitter orbits.
+
+3. `igrf_interface`
+   - Evaluate IGRF-13 at candidate geolocations and times.
+
+4. `f107_reader`
+   - Download/read F10.7 data.
+
+### 12.2 Geometry Modules
+
+1. `los_geometry`
+   - Compute LOS vectors.
+   - Compute tangent point height.
+   - Compute candidate points along LOS.
+
+2. `bp_plane`
+   - Define local \(x,z\) coordinates.
+   - Project magnetic field.
+   - Compute scan angle \(\alpha\).
+   - Project receiver/transmitter trajectories.
+
+3. `stationary_correction`
+   - Apply moving-transmitter correction.
+   - Implement Option 1 and Option 2.
+
+4. `curvature_correction`
+   - Add quadratic phase/path correction.
+
+### 12.3 Signal Modules
+
+1. `scintillation_indices`
+   - Compute detrended phase.
+   - Compute \(\sigma_\phi\).
+   - Compute \(S_4\).
+
+2. `complex_signal`
+   - Convert amplitude and phase to complex signal.
+   - Normalize amplitude if needed.
+
+3. `detrending`
+   - Linear/quadratic/high-pass detrending alternatives.
+
+### 12.4 Propagation Modules
+
+1. `fft_propagator_2d`
+   - Plane-wave forward/back propagation.
+   - Used for synthetic modeling.
+   - Possibly used for real BP with corrected uniform receiver trajectory.
+
+2. `kirchhoff_propagator`
+   - Diffraction integral for arbitrary trajectories.
+   - Important because the paper describes this option, though equation parsing is incomplete.
+   - Use for cross-checking.
+
+3. `propagator_3d`
+   - 3D forward propagation for misaligned two-screen synthetic tests.
+
+### 12.5 Geolocation Modules
+
+1. `compute_V`
+   - Calculate normalized amplitude variance.
+
+2. `smooth_V`
+   - Second-order sliding polynomial regression with 1000 km window.
+
+3. `find_local_minimum`
+   - Find global local minimum and \(L_0\).
+
+4. `compute_Q`
+   - Compute \(L_1,L_2,V_1,V_2,Q\).
+
+5. `find_D_zero_crossings`
+   - Determine single or multiple geolocation solutions.
+
+6. `apply_qc`
+   - Apply all thresholds.
+
+7. `make_geolocation`
+   - Convert distance to lat/lon/alt.
+
+### 12.6 Plotting and Evaluation Modules
+
+1. `plot_synthetic_figures`
+2. `plot_bp_diagnostics`
+3. `plot_monthly_maps`
+4. `plot_l1_l2_comparison`
+5. `plot_f107`
+
+---
+
+## 13. Key Hyperparameters and Settings
+
+| Quantity | Value from Paper |
+|---|---:|
+| COSMIC-2 GPS HR sampling | 50 Hz |
+| COSMIC-2 GLONASS HR sampling | 100 Hz |
+| Processing interval | 10 s |
+| BP distance range | 100–6000 km |
+| BP distance step | 100 km |
+| Magnetic-field candidate distance step | 100 km |
+| Phase scintillation threshold | \(\sigma_\phi > 0.25\) rad |
+| Tangent point threshold | \(h_{\tan} > 150\) km |
+| \(V(L)\) smoothing | 2nd-order sliding polynomial |
+| Smoothing window | 1000 km |
+| Minimum depth threshold | \(Q > 1.2\) |
+| Scan angle threshold | \(\cos\alpha > 0.1\) |
+| Monthly map bin size | \(3^\circ \times 3^\circ\) |
+| Post-sunset LT range | 18–24 hr |
+| Synthetic spectral index | \(p=1.5\) |
+| Synthetic outer scale | \(l_0=10\) km |
+| Average observed \(\sigma_\phi\) | 1.65 rad |
+| Average observed \(S_4\) | 0.32 |
+| Average observed \(\sigma_\phi/S_4\) | 5.25 rad |
+| Average geolocation distance | 1900 km |
+| Typical SNR | 400 V/V |
+| Typical SNR range for >90% cases | 200–600 V/V |
+| Multi-valued fraction | about 8% |
+
+---
+
+## 14. Important Unclear or Ambiguous Details
+
+The following must be resolved or documented during implementation.
+
+### 14.1 Exact Detrending Method
+
+The paper does not specify exactly how phase is detrended before computing \(\sigma_\phi\).
+
+Need to determine from:
+
+- CDAAC documentation,
+- related COSMIC-2 scintillation processing papers,
+- or sensitivity tests.
+
+### 14.2 Exact Back-Propagation Numerical Method Used Operationally
+
+The paper describes:
+
+1. Kirchhoff diffraction integral for arbitrary trajectories.
+2. FFT/plane-wave expansion after correcting to a perpendicular receiver trajectory.
+
+It does not clearly state which was used for the final large-scale processing.
+
+Recommendation:
+
+- Implement FFT/plane-wave BP first because it is computationally efficient and aligns with Option 2.
+- Implement Kirchhoff integral later as a validation tool for selected cases.
+
+### 14.3 Kirchhoff Integral Equation Missing in Parse
+
+The parsed paper omits the actual diffraction integral equation.
+
+Need to retrieve from PDF or standard Born & Wolf/Sommerfeld formulation.
+
+### 14.4 Exact Definition of Amplitude
+
+COSMIC-2 amplitude is represented by SNR scaled to 1-Hz band.
+
+Need to determine whether BP uses:
+
+- raw SNR,
+- normalized SNR,
+- square root of intensity,
+- detrended amplitude,
+- or amplitude with slow trend removed.
+
+The paper appears to use SNR directly as amplitude, but normalization choices may affect \(V(L)\).
+
+### 14.5 Local Time Reference
+
+For post-sunset filtering, the paper does not explicitly say whether local time is computed at:
+
+- geolocation,
+- tangent point,
+- receiver,
+- or sub-ionospheric point.
+
+Most consistent choice: geolocation longitude.
+
+### 14.6 L1/L2 Test Period
+
+Abstract mentions a 2-month comparison, but body text states February 19 to March 1, 2021.
+
+Use body-text period first, then optionally test a longer two-month interval if needed.
+
+### 14.7 Treatment of GLONASS Open-Loop Signals
+
+The paper states GLONASS needs ground removal of data modulation and phase connection.
+
+If using CDAAC-processed connected phase, this may already be done. Confirm product contents.
+
+### 14.8 Geolocation Vector Sign Convention
+
+The paper’s formula should be checked carefully against actual geometry to ensure \(L\) places the irregularity between receiver and transmitter, not away from transmitter.
+
+Use simple geometric tests.
+
+---
+
+## 15. Recommended Development Sequence
+
+### Phase 1: Synthetic Propagation Validation
+
+1. Implement 1D random phase screen generator.
+2. Implement 2D FFT forward propagation.
+3. Implement 2D FFT back propagation.
+4. Validate single-screen \(V(L)\) minimum.
+5. Reproduce orientation-error relation.
+6. Reproduce two-screen aligned experiments.
+7. Implement 3D forward propagation for misaligned screens.
+8. Implement noise experiments.
+9. Implement multi-valued synthetic tests.
+
+### Phase 2: COSMIC-2 Data Ingestion
+
+1. Download small sample of HR COSMIC-2 files.
+2. Parse phase, SNR, sampling rate, signal type.
+3. Parse receiver orbit.
+4. Load GNSS orbit/clock.
+5. Compute \(\sigma_\phi\), \(S_4\), tangent height.
+6. Verify against example-like values.
+
+### Phase 3: Real-Geometry BP for Selected Events
+
+1. Select one strong scintillation event.
+2. Implement local coordinate construction.
+3. Implement IGRF-based BP plane.
+4. Implement position/phase corrections.
+5. Compute \(V(L)\), \(D(L)\), \(\cos\alpha(L)\).
+6. Reproduce diagnostic plots similar to Figures 16–19.
+7. Compare Option 1 vs Option 2 propagation.
+
+### Phase 4: Full QC and Geolocation
+
+1. Implement zero-crossing logic.
+2. Implement multi-valued detection.
+3. Implement QC thresholds.
+4. Generate per-interval geolocation table.
+5. Validate accepted/rejected proportions.
+
+### Phase 5: Large-Scale Processing
+
+1. Process full 2021 L1.
+2. Process full 2023 L1.
+3. Generate monthly 3° × 3° maps.
+4. Compare total accepted counts to:
+   - 332k for 2021,
+   - 1,108k for 2023.
+5. Process L1/L2 comparison period.
+6. Generate paired zonal-difference histogram.
+
+---
+
+## 16. Final Reproduction Targets
+
+A successful reproduction should approximately match:
+
+1. Synthetic behavior:
+   - \(V(L)\) minimum at phase screen.
+   - orientation error scales as \(2L\tan\alpha\Delta\alpha\).
+   - two aligned screens not separately resolvable.
+   - stronger aligned screen dominates localization.
+   - smaller scan-angle misaligned screen dominates localization.
+   - noise raises \(V(L)\) baseline.
+
+2. Real COSMIC-2 results:
+   - monthly maps showing known seasonal morphology.
+   - 2023 substantially more active than 2021.
+   - accepted geolocation counts close to:
+     - 332k in 2021,
+     - 1,108k in 2023.
+   - multi-valued cases around 8%.
+   - L1/L2 common geolocations around 8k for the specified test period.
+   - L1/L2 zonal-difference histogram centered near zero.
+
+3. Diagnostic consistency:
+   - average accepted \(\sigma_\phi\) around 1.65 rad.
+   - average accepted \(S_4\) around 0.32.
+   - average accepted geolocation distance around 1900 km.
+   - typical SNR 200–600 V/V.
+
+This plan should provide a strong foundation for implementing the method faithfully while explicitly tracking the paper’s assumptions, numerical choices, QC thresholds, and unresolved ambiguities.

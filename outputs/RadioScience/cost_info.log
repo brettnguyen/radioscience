@@ -1,0 +1,770 @@
+🌟 Usage Summary 🌟
+[Planning] Overall plan
+🛠️ Model: o3-mini
+📥 Input tokens: 17686 (Cost: $0.01945460)
+📦 Cached input tokens: 0 (Cost: $0.00000000)
+📤 Output tokens: 6876 (Cost: $0.03025440)
+💵 Current total cost: $0.04970900
+🪙 Accumulated total cost so far: $0.04970900
+============================================
+
+🌟 Usage Summary 🌟
+[Planning] Architecture design
+🛠️ Model: o3-mini
+📥 Input tokens: 4708 (Cost: $0.00517880)
+📦 Cached input tokens: 17408 (Cost: $0.00957440)
+📤 Output tokens: 2451 (Cost: $0.01078440)
+💵 Current total cost: $0.02553760
+🪙 Accumulated total cost so far: $0.07524660
+============================================
+
+🌟 Usage Summary 🌟
+[Planning] Logic design
+🛠️ Model: o3-mini
+📥 Input tokens: 2324 (Cost: $0.00255640)
+📦 Cached input tokens: 21376 (Cost: $0.01175680)
+📤 Output tokens: 2015 (Cost: $0.00886600)
+💵 Current total cost: $0.02317920
+🪙 Accumulated total cost so far: $0.09842580
+============================================
+
+🌟 Usage Summary 🌟
+[Planning] Configuration file generation
+🛠️ Model: o3-mini
+📥 Input tokens: 1108 (Cost: $0.00121880)
+📦 Cached input tokens: 23552 (Cost: $0.01295360)
+📤 Output tokens: 1924 (Cost: $0.00846560)
+💵 Current total cost: $0.02263800
+🪙 Accumulated total cost so far: $0.12106380
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] dataset_loader.py
+🛠️ Model: o3-mini
+📥 Input tokens: 23737 (Cost: $0.02611070)
+📦 Cached input tokens: 0 (Cost: $0.00000000)
+📤 Output tokens: 3519 (Cost: $0.01548360)
+💵 Current total cost: $0.04159430
+🪙 Accumulated total cost so far: $0.16265810
+============================================
+
+🌟 Usage Summary 🌟
+[Planning] Overall plan
+🛠️ Model: o3-mini
+📥 Input tokens: 278 (Cost: $0.00030580)
+📦 Cached input tokens: 17408 (Cost: $0.00957440)
+📤 Output tokens: 7104 (Cost: $0.03125760)
+💵 Current total cost: $0.04113780
+🪙 Accumulated total cost so far: $0.04113780
+============================================
+
+🌟 Usage Summary 🌟
+[Planning] Architecture design
+🛠️ Model: o3-mini
+📥 Input tokens: 4680 (Cost: $0.00514800)
+📦 Cached input tokens: 17408 (Cost: $0.00957440)
+📤 Output tokens: 2695 (Cost: $0.01185800)
+💵 Current total cost: $0.02658040
+🪙 Accumulated total cost so far: $0.06771820
+============================================
+
+🌟 Usage Summary 🌟
+[Planning] Logic design
+🛠️ Model: o3-mini
+📥 Input tokens: 2284 (Cost: $0.00251240)
+📦 Cached input tokens: 21376 (Cost: $0.01175680)
+📤 Output tokens: 1630 (Cost: $0.00717200)
+💵 Current total cost: $0.02144120
+🪙 Accumulated total cost so far: $0.08915940
+============================================
+
+🌟 Usage Summary 🌟
+[Planning] Configuration file generation
+🛠️ Model: o3-mini
+📥 Input tokens: 1195 (Cost: $0.00131450)
+📦 Cached input tokens: 23552 (Cost: $0.01295360)
+📤 Output tokens: 2401 (Cost: $0.01056440)
+💵 Current total cost: $0.02483250
+🪙 Accumulated total cost so far: $0.11399190
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] dataset_loader.py
+🛠️ Model: o3-mini
+📥 Input tokens: 6190 (Cost: $0.00680900)
+📦 Cached input tokens: 17408 (Cost: $0.00957440)
+📤 Output tokens: 4104 (Cost: $0.01805760)
+💵 Current total cost: $0.03444100
+🪙 Accumulated total cost so far: $0.14843290
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] model.py
+🛠️ Model: o3-mini
+📥 Input tokens: 282 (Cost: $0.00031020)
+📦 Cached input tokens: 23424 (Cost: $0.01288320)
+📤 Output tokens: 6265 (Cost: $0.02756600)
+💵 Current total cost: $0.04075940
+🪙 Accumulated total cost so far: $0.18919230
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] trainer.py
+🛠️ Model: o3-mini
+📥 Input tokens: 196 (Cost: $0.00021560)
+📦 Cached input tokens: 23424 (Cost: $0.01288320)
+📤 Output tokens: 5260 (Cost: $0.02314400)
+💵 Current total cost: $0.03624280
+🪙 Accumulated total cost so far: $0.22543510
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] evaluation.py
+🛠️ Model: o3-mini
+📥 Input tokens: 165 (Cost: $0.00018150)
+📦 Cached input tokens: 23424 (Cost: $0.01288320)
+📤 Output tokens: 3731 (Cost: $0.01641640)
+💵 Current total cost: $0.02948110
+🪙 Accumulated total cost so far: $0.25491620
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] main.py
+🛠️ Model: o3-mini
+📥 Input tokens: 177 (Cost: $0.00019470)
+📦 Cached input tokens: 23424 (Cost: $0.01288320)
+📤 Output tokens: 2598 (Cost: $0.01143120)
+💵 Current total cost: $0.02450910
+🪙 Accumulated total cost so far: $0.27942530
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] dataset_loader.py
+🛠️ Model: o3-mini
+📥 Input tokens: 25190 (Cost: $0.02770900)
+📦 Cached input tokens: 0 (Cost: $0.00000000)
+📤 Output tokens: 8192 (Cost: $0.03604480)
+💵 Current total cost: $0.06375380
+🪙 Accumulated total cost so far: $0.34317910
+============================================
+
+Usage Summary
+[Planning] Overall plan
+Model: gpt-5.5
+Input tokens: 17686
+Cached input tokens: 0
+Output tokens: 12494
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[Planning] Architecture design
+Model: gpt-5.5
+Input tokens: 11749
+Cached input tokens: 17152
+Output tokens: 4370
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[Planning] Logic design
+Model: gpt-5.5
+Input tokens: 5536
+Cached input tokens: 28416
+Output tokens: 3413
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[Planning] Configuration file generation
+Model: gpt-5.5
+Input tokens: 3949
+Cached input tokens: 33536
+Output tokens: 2278
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[Planning] Overall plan
+Model: gpt-5.5
+Input tokens: 534
+Cached input tokens: 17152
+Output tokens: 12195
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[Planning] Architecture design
+Model: gpt-5.5
+Input tokens: 12217
+Cached input tokens: 17152
+Output tokens: 5588
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[Planning] Logic design
+Model: gpt-5.5
+Input tokens: 6710
+Cached input tokens: 28928
+Output tokens: 4572
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[Planning] Configuration file generation
+Model: gpt-5.5
+Input tokens: 5262
+Cached input tokens: 35072
+Output tokens: 2392
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] requirements.txt
+Model: gpt-5.5
+Input tokens: 41226
+Cached input tokens: 0
+Output tokens: 2718
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] README.md
+Model: gpt-5.5
+Input tokens: 513
+Cached input tokens: 40704
+Output tokens: 7267
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] config/default.yaml
+Model: gpt-5.5
+Input tokens: 574
+Cached input tokens: 40704
+Output tokens: 6100
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/core/constants.py
+Model: gpt-5.5
+Input tokens: 526
+Cached input tokens: 40704
+Output tokens: 7736
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/core/types.py
+Model: gpt-5.5
+Input tokens: 521
+Cached input tokens: 40704
+Output tokens: 9169
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/config.py
+Model: gpt-5.5
+Input tokens: 483
+Cached input tokens: 40704
+Output tokens: 6079
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/io/writers.py
+Model: gpt-5.5
+Input tokens: 497
+Cached input tokens: 40704
+Output tokens: 4518
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/geometry/coordinates.py
+Model: gpt-5.5
+Input tokens: 514
+Cached input tokens: 40704
+Output tokens: 5960
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/geometry/los.py
+Model: gpt-5.5
+Input tokens: 526
+Cached input tokens: 40704
+Output tokens: 7345
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/geometry/magnetic_field.py
+Model: gpt-5.5
+Input tokens: 527
+Cached input tokens: 40704
+Output tokens: 4286
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/geometry/bp_plane.py
+Model: gpt-5.5
+Input tokens: 572
+Cached input tokens: 40704
+Output tokens: 8844
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/signal/preprocessing.py
+Model: gpt-5.5
+Input tokens: 536
+Cached input tokens: 40704
+Output tokens: 4945
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/signal/scintillation.py
+Model: gpt-5.5
+Input tokens: 529
+Cached input tokens: 40704
+Output tokens: 5462
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/data/orbit_loader.py
+Model: gpt-5.5
+Input tokens: 536
+Cached input tokens: 40704
+Output tokens: 5703
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/data/cosmic_loader.py
+Model: gpt-5.5
+Input tokens: 546
+Cached input tokens: 40704
+Output tokens: 6506
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/data/f107_loader.py
+Model: gpt-5.5
+Input tokens: 497
+Cached input tokens: 40704
+Output tokens: 3431
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/propagation/phase_screen.py
+Model: gpt-5.5
+Input tokens: 536
+Cached input tokens: 40704
+Output tokens: 8225
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/propagation/fft_propagator.py
+Model: gpt-5.5
+Input tokens: 576
+Cached input tokens: 40704
+Output tokens: 6382
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/propagation/kirchhoff.py
+Model: gpt-5.5
+Input tokens: 506
+Cached input tokens: 40704
+Output tokens: 5458
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/geolocation/stationary_correction.py
+Model: gpt-5.5
+Input tokens: 596
+Cached input tokens: 40704
+Output tokens: 9809
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/geolocation/qc.py
+Model: gpt-5.5
+Input tokens: 596
+Cached input tokens: 40704
+Output tokens: 7985
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/geolocation/backprop_processor.py
+Model: gpt-5.5
+Input tokens: 589
+Cached input tokens: 40704
+Output tokens: 8754
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/geolocation/geolocator.py
+Model: gpt-5.5
+Input tokens: 545
+Cached input tokens: 40704
+Output tokens: 7274
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/experiments/synthetic_experiments.py
+Model: gpt-5.5
+Input tokens: 571
+Cached input tokens: 40704
+Output tokens: 10863
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/experiments/real_data_experiments.py
+Model: gpt-5.5
+Input tokens: 574
+Cached input tokens: 40704
+Output tokens: 8305
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] src/visualization/plots.py
+Model: gpt-5.5
+Input tokens: 510
+Cached input tokens: 40704
+Output tokens: 8592
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[ANALYSIS] main.py
+Model: gpt-5.5
+Input tokens: 521
+Cached input tokens: 40704
+Output tokens: 5337
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] requirements.txt
+Model: gpt-5.5
+Input tokens: 43513
+Cached input tokens: 0
+Output tokens: 188
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] README.md
+Model: gpt-5.5
+Input tokens: 48121
+Cached input tokens: 0
+Output tokens: 6757
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] config/default.yaml
+Model: gpt-5.5
+Input tokens: 46157
+Cached input tokens: 0
+Output tokens: 3015
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/core/constants.py
+Model: gpt-5.5
+Input tokens: 48320
+Cached input tokens: 0
+Output tokens: 6767
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/core/types.py
+Model: gpt-5.5
+Input tokens: 55818
+Cached input tokens: 0
+Output tokens: 6333
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/config.py
+Model: gpt-5.5
+Input tokens: 57218
+Cached input tokens: 0
+Output tokens: 8274
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/io/writers.py
+Model: gpt-5.5
+Input tokens: 63554
+Cached input tokens: 0
+Output tokens: 6122
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/geometry/coordinates.py
+Model: gpt-5.5
+Input tokens: 67903
+Cached input tokens: 0
+Output tokens: 3788
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/geometry/los.py
+Model: gpt-5.5
+Input tokens: 72434
+Cached input tokens: 0
+Output tokens: 7272
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/geometry/magnetic_field.py
+Model: gpt-5.5
+Input tokens: 77131
+Cached input tokens: 0
+Output tokens: 5753
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/geometry/bp_plane.py
+Model: gpt-5.5
+Input tokens: 83492
+Cached input tokens: 0
+Output tokens: 6666
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/signal/preprocessing.py
+Model: gpt-5.5
+Input tokens: 88177
+Cached input tokens: 0
+Output tokens: 7577
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/signal/scintillation.py
+Model: gpt-5.5
+Input tokens: 94501
+Cached input tokens: 0
+Output tokens: 2855
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/data/orbit_loader.py
+Model: gpt-5.5
+Input tokens: 96553
+Cached input tokens: 0
+Output tokens: 17080
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/data/cosmic_loader.py
+Model: gpt-5.5
+Input tokens: 114223
+Cached input tokens: 0
+Output tokens: 17136
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/data/f107_loader.py
+Model: gpt-5.5
+Input tokens: 126801
+Cached input tokens: 0
+Output tokens: 8182
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/propagation/phase_screen.py
+Model: gpt-5.5
+Input tokens: 136155
+Cached input tokens: 0
+Output tokens: 5082
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/propagation/fft_propagator.py
+Model: gpt-5.5
+Input tokens: 141885
+Cached input tokens: 0
+Output tokens: 5770
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/propagation/kirchhoff.py
+Model: gpt-5.5
+Input tokens: 144521
+Cached input tokens: 0
+Output tokens: 6501
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/geolocation/stationary_correction.py
+Model: gpt-5.5
+Input tokens: 152209
+Cached input tokens: 0
+Output tokens: 11815
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/geolocation/qc.py
+Model: gpt-5.5
+Input tokens: 162080
+Cached input tokens: 0
+Output tokens: 8756
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/geolocation/backprop_processor.py
+Model: gpt-5.5
+Input tokens: 171467
+Cached input tokens: 0
+Output tokens: 5835
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/geolocation/geolocator.py
+Model: gpt-5.5
+Input tokens: 175300
+Cached input tokens: 0
+Output tokens: 7242
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/experiments/synthetic_experiments.py
+Model: gpt-5.5
+Input tokens: 183069
+Cached input tokens: 0
+Output tokens: 12444
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/experiments/real_data_experiments.py
+Model: gpt-5.5
+Input tokens: 190612
+Cached input tokens: 0
+Output tokens: 9929
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] src/visualization/plots.py
+Model: gpt-5.5
+Input tokens: 200913
+Cached input tokens: 0
+Output tokens: 12477
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+
+Usage Summary
+[CODING] main.py
+Model: gpt-5.5
+Input tokens: 210471
+Cached input tokens: 0
+Output tokens: 8799
+[WARNING] Cost not calculated because this model is not in the local price table.
+Accumulated total cost so far: $0.00000000
+============================================
+

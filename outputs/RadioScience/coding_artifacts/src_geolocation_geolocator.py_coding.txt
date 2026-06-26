@@ -1,0 +1,737 @@
+## Code: src/geolocation/geolocator.py
+```python
+"""High-level COSMIC-2 BP geolocation orchestration.
+
+This module implements the per-window processing sequence described in the
+paper for geolocation of ionospheric irregularities by back propagation of
+COSMIC-2 high-rate GNSS radio-occultation scintillation signals.
+
+The ``Geolocator`` class is intentionally an orchestration layer. It delegates
+all scientific sub-algorithms to the modules responsible for them:
+
+* signal preparation -> ``SignalPreprocessor``
+* scintillation metrics -> ``ScintillationCalculator``
+* tangent height and final LOS geolocation -> ``LosGeometry``
+* nested BP loops and D-curve construction -> ``BackpropProcessor``
+* pre-BP and final QC -> ``QualityController``
+
+The implemented operational chain is:
+
+1. preprocess phase and amplitude/SNR;
+2. compute ``sigma_phi`` and ``S4``;
+3. apply strict pre-BP QC:
+   ``sigma_phi > 0.25 rad`` and tangent height ``> 150 km`` via config/QC;
+4. compute the BP decision curve ``D(L_mf) = L0 - L_mf``;
+5. reject no-solution and multi-valued cases;
+6. convert the single crossing to geodetic latitude/longitude/altitude;
+7. populate diagnostics ``Q``, ``cos(alpha)``, and D-curve slope;
+8. apply final QC:
+   single-valued, ``Q > 1.2``, ``cos(alpha) > 0.1`` via config/QC.
+
+Every input ``SignalWindow`` produces exactly one ``GeolocationResult``.
+Rejected windows preserve as many diagnostic fields as are available.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import logging
+import math
+from typing import Iterator
+
+import numpy as np
+from numpy.typing import NDArray
+from tqdm import tqdm
+
+from src.config import AppConfig
+from src.core.types import (
+    DCurve,
+    GeolocationResult,
+    ScintillationMetrics,
+    SignalWindow,
+)
+from src.geometry.los import LosGeometry
+from src.geolocation.backprop_processor import BackpropProcessor
+from src.geolocation.qc import QualityController
+from src.signal.preprocessing import SignalPreprocessor
+from src.signal.scintillation import ScintillationCalculator
+
+
+_LOGGER = logging.getLogger(__name__)
+
+_DEG_PER_LOCAL_TIME_HOUR: float = 15.0
+_HOURS_PER_DAY: float = 24.0
+_SECONDS_PER_HOUR: float = 3600.0
+_MICROSECONDS_PER_HOUR: float = 3.6e9
+_ZERO_TOLERANCE_SCALE: float = 64.0 * float(np.finfo(np.float64).eps)
+
+
+class Geolocator:
+    """High-level per-window BP geolocation API.
+
+    Args:
+        config: Validated application configuration.
+        preprocessor: Signal preprocessing component.
+        scintillation: Scintillation-index calculator.
+        los_geometry: LOS geometry/geodetic conversion component.
+        processor: Nested-loop back-propagation processor.
+        qc: Quality-control component.
+
+    Public methods follow the project design:
+        * ``process_window(window, wavelength_m)``
+        * ``process_many(windows, wavelength_m)``
+        * ``make_result(window, d_curve, crossing_km, metrics)``
+    """
+
+    def __init__(
+        self,
+        config: AppConfig,
+        preprocessor: SignalPreprocessor,
+        scintillation: ScintillationCalculator,
+        los_geometry: LosGeometry,
+        processor: BackpropProcessor,
+        qc: QualityController,
+    ) -> None:
+        """Initialize the geolocation orchestration layer.
+
+        No scientific computation is performed in the constructor.
+
+        Args:
+            config: Application configuration.
+            preprocessor: Signal preprocessing component.
+            scintillation: Scintillation calculator.
+            los_geometry: LOS geometry component.
+            processor: Back-propagation processor.
+            qc: Quality controller.
+
+        Raises:
+            TypeError: If any dependency has an invalid type.
+        """
+        if not isinstance(config, AppConfig):
+            raise TypeError(
+                f"config must be an AppConfig, got {type(config).__name__}."
+            )
+        if not isinstance(preprocessor, SignalPreprocessor):
+            raise TypeError(
+                "preprocessor must be a SignalPreprocessor, got "
+                f"{type(preprocessor).__name__}."
+            )
+        if not isinstance(scintillation, ScintillationCalculator):
+            raise TypeError(
+                "scintillation must be a ScintillationCalculator, got "
+                f"{type(scintillation).__name__}."
+            )
+        if not isinstance(los_geometry, LosGeometry):
+            raise TypeError(
+                f"los_geometry must be a LosGeometry, got {type(los_geometry).__name__}."
+            )
+        if not isinstance(processor, BackpropProcessor):
+            raise TypeError(
+                f"processor must be a BackpropProcessor, got {type(processor).__name__}."
+            )
+        if not isinstance(qc, QualityController):
+            raise TypeError(f"qc must be a QualityController, got {type(qc).__name__}.")
+
+        self.config: AppConfig = config
+        self.preprocessor: SignalPreprocessor = preprocessor
+        self.scintillation: ScintillationCalculator = scintillation
+        self.los_geometry: LosGeometry = los_geometry
+        self.processor: BackpropProcessor = processor
+        self.qc: QualityController = qc
+
+    def process_window(
+        self,
+        window: SignalWindow,
+        wavelength_m: float,
+    ) -> GeolocationResult:
+        """Process one 10-second signal window into one geolocation result.
+
+        Args:
+            window: One high-rate COSMIC-2 signal window.
+            wavelength_m: Carrier wavelength in meters for the signal being
+                processed.
+
+        Returns:
+            Accepted or rejected ``GeolocationResult``. This method catches
+            expected per-window failures and converts them to rejected results
+            with explicit reasons.
+        """
+        if not isinstance(window, SignalWindow):
+            raise TypeError(
+                f"window must be a SignalWindow, got {type(window).__name__}."
+            )
+
+        wavelength_value_m: float = float(wavelength_m)
+        if not math.isfinite(wavelength_value_m) or wavelength_value_m <= 0.0:
+            return self._rejected_result(
+                window=window,
+                reason="invalid_wavelength",
+                metrics=None,
+            )
+
+        try:
+            prepared_window: SignalWindow = self.preprocessor.prepare_window(window)
+        except Exception as exc:
+            _LOGGER.debug(
+                "Preprocessing failed for event=%s: %s",
+                getattr(window, "event_id", ""),
+                exc,
+            )
+            return self._rejected_result(
+                window=window,
+                reason="preprocessing_failed",
+                metrics=None,
+            )
+
+        try:
+            metrics: ScintillationMetrics = self.scintillation.compute(prepared_window)
+        except Exception as exc:
+            _LOGGER.debug(
+                "Scintillation metric computation failed for event=%s: %s",
+                getattr(prepared_window, "event_id", ""),
+                exc,
+            )
+            return self._rejected_result(
+                window=prepared_window,
+                reason="scintillation_metrics_failed",
+                metrics=None,
+            )
+
+        tangent_height_km: float = self._tangent_height_for_qc(prepared_window)
+
+        try:
+            passed_pre_bp, pre_bp_reason = self.qc.passes_pre_bp(
+                metrics,
+                tangent_height_km,
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "Pre-BP QC failed unexpectedly for event=%s: %s",
+                getattr(prepared_window, "event_id", ""),
+                exc,
+            )
+            return self._rejected_result(
+                window=prepared_window,
+                reason="pre_bp_qc_failed",
+                metrics=metrics,
+            )
+
+        if not passed_pre_bp:
+            return self._rejected_result(
+                window=prepared_window,
+                reason=pre_bp_reason,
+                metrics=metrics,
+            )
+
+        try:
+            d_curve: DCurve = self.processor.compute_d_curve(
+                prepared_window,
+                wavelength_value_m,
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "Back-propagation D-curve computation failed for event=%s: %s",
+                getattr(prepared_window, "event_id", ""),
+                exc,
+            )
+            return self._rejected_result(
+                window=prepared_window,
+                reason="backpropagation_failed",
+                metrics=metrics,
+            )
+
+        zero_crossings_km: list[float] = [
+            float(crossing)
+            for crossing in d_curve.zero_crossings_km
+            if math.isfinite(float(crossing))
+        ]
+
+        if not zero_crossings_km:
+            return self._rejected_result(
+                window=prepared_window,
+                reason="no_d_curve_zero_crossing",
+                metrics=metrics,
+                d_curve=d_curve,
+            )
+
+        if bool(d_curve.is_multivalued) or len(zero_crossings_km) > 1:
+            return self._rejected_result(
+                window=prepared_window,
+                reason="multivalued_geolocation",
+                metrics=metrics,
+                d_curve=d_curve,
+                is_multivalued=True,
+            )
+
+        crossing_km: float = float(zero_crossings_km[0])
+        if not self._distance_in_configured_range(crossing_km):
+            return self._rejected_result(
+                window=prepared_window,
+                reason="invalid_d_curve_zero_crossing",
+                metrics=metrics,
+                d_curve=d_curve,
+                distance_km=crossing_km,
+            )
+
+        try:
+            result: GeolocationResult = self.make_result(
+                window=prepared_window,
+                d_curve=d_curve,
+                crossing_km=crossing_km,
+                metrics=metrics,
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "Geolocation result construction failed for event=%s, "
+                "crossing=%.3f km: %s",
+                getattr(prepared_window, "event_id", ""),
+                crossing_km,
+                exc,
+            )
+            return self._rejected_result(
+                window=prepared_window,
+                reason="geolocation_conversion_failed",
+                metrics=metrics,
+                d_curve=d_curve,
+                distance_km=crossing_km,
+            )
+
+        try:
+            passed_final, final_reason = self.qc.passes_final(result)
+        except Exception as exc:
+            _LOGGER.debug(
+                "Final QC failed unexpectedly for event=%s: %s",
+                getattr(prepared_window, "event_id", ""),
+                exc,
+            )
+            passed_final = False
+            final_reason = "final_qc_failed"
+
+        if passed_final:
+            result.accepted = True
+            result.rejection_reason = ""
+        else:
+            result.accepted = False
+            result.rejection_reason = final_reason or "final_qc_failed"
+
+        return result
+
+    def process_many(
+        self,
+        windows: Iterator[SignalWindow],
+        wavelength_m: float,
+    ) -> list[GeolocationResult]:
+        """Process many windows with progress reporting.
+
+        Args:
+            windows: Iterator of ``SignalWindow`` objects.
+            wavelength_m: Carrier wavelength in meters for this processing
+                batch.
+
+        Returns:
+            List of accepted and rejected ``GeolocationResult`` objects.
+        """
+        results: list[GeolocationResult] = []
+
+        for window in tqdm(windows, desc="BP geolocating windows", unit="window"):
+            try:
+                result: GeolocationResult = self.process_window(
+                    window=window,
+                    wavelength_m=wavelength_m,
+                )
+            except Exception as exc:
+                if isinstance(window, SignalWindow):
+                    _LOGGER.debug(
+                        "Unexpected window-level processing failure for event=%s: %s",
+                        getattr(window, "event_id", ""),
+                        exc,
+                    )
+                    result = self._rejected_result(
+                        window=window,
+                        reason="processing_failed",
+                        metrics=None,
+                    )
+                else:
+                    raise
+
+            results.append(result)
+
+        return results
+
+    def make_result(
+        self,
+        window: SignalWindow,
+        d_curve: DCurve,
+        crossing_km: float,
+        metrics: ScintillationMetrics,
+    ) -> GeolocationResult:
+        """Convert a single D-curve crossing into a geolocation result.
+
+        This method does not rerun BP and does not apply final acceptance QC.
+
+        Args:
+            window: Prepared signal window.
+            d_curve: D-curve returned by the BP processor.
+            crossing_km: Single zero crossing distance in kilometers.
+            metrics: Scintillation metrics for the prepared window.
+
+        Returns:
+            Candidate ``GeolocationResult`` with diagnostics populated.
+
+        Raises:
+            TypeError: If inputs have invalid types.
+            ValueError: If crossing, geodetic coordinates, or diagnostics are
+                numerically invalid.
+        """
+        if not isinstance(window, SignalWindow):
+            raise TypeError(
+                f"window must be a SignalWindow, got {type(window).__name__}."
+            )
+        if not isinstance(d_curve, DCurve):
+            raise TypeError(
+                f"d_curve must be a DCurve, got {type(d_curve).__name__}."
+            )
+        if not isinstance(metrics, ScintillationMetrics):
+            raise TypeError(
+                "metrics must be a ScintillationMetrics, got "
+                f"{type(metrics).__name__}."
+            )
+
+        crossing_value_km: float = float(crossing_km)
+        if not math.isfinite(crossing_value_km) or crossing_value_km <= 0.0:
+            raise ValueError(
+                f"crossing_km must be finite and positive, got {crossing_km!r}."
+            )
+
+        latitude_deg, longitude_deg, altitude_km = (
+            self.los_geometry.geolocation_from_distance(
+                window,
+                crossing_value_km,
+            )
+        )
+
+        if not self._valid_geodetic(latitude_deg, longitude_deg, altitude_km):
+            raise ValueError(
+                "LosGeometry.geolocation_from_distance returned invalid geodetic "
+                f"coordinates: lat={latitude_deg!r}, lon={longitude_deg!r}, "
+                f"alt={altitude_km!r}."
+            )
+
+        local_time_hr: float = self._local_time_hr(
+            time=window.mid_time,
+            longitude_deg=float(longitude_deg),
+        )
+
+        nearest_index: int | None = self._nearest_lmf_index(
+            d_curve=d_curve,
+            crossing_km=crossing_value_km,
+        )
+
+        q_value: float = math.nan
+        cos_alpha_value: float = math.nan
+        if nearest_index is not None:
+            q_value = self._safe_array_value(d_curve.q, nearest_index)
+            cos_alpha_value = self._safe_array_value(d_curve.cos_alpha, nearest_index)
+
+        d_slope: float = self._d_curve_slope(
+            d_curve=d_curve,
+            crossing_km=crossing_value_km,
+        )
+
+        return GeolocationResult(
+            event_id=window.event_id,
+            leo_id=window.leo_id,
+            gnss_id=window.gnss_id,
+            signal_name=window.signal_name,
+            mid_time=window.mid_time,
+            accepted=False,
+            rejection_reason="",
+            distance_km=crossing_value_km,
+            latitude_deg=float(latitude_deg),
+            longitude_deg=float(longitude_deg),
+            altitude_km=float(altitude_km),
+            local_time_hr=local_time_hr,
+            sigma_phi_rad=float(metrics.sigma_phi_rad),
+            s4=float(metrics.s4),
+            mean_snr_vv=float(metrics.mean_snr_vv),
+            q=q_value,
+            cos_alpha=cos_alpha_value,
+            d_slope=d_slope,
+            is_multivalued=bool(d_curve.is_multivalued),
+        )
+
+    def _tangent_height_for_qc(self, window: SignalWindow) -> float:
+        """Return tangent height for pre-BP QC.
+
+        ``SignalWindow.tangent_height_km`` is used when finite. Otherwise, the
+        public LOS geometry method is used to compute it from Tx/Rx states.
+        """
+        tangent_height_km: float = float(window.tangent_height_km)
+        if math.isfinite(tangent_height_km):
+            return tangent_height_km
+
+        try:
+            return float(self.los_geometry.tangent_height(window))
+        except Exception as exc:
+            _LOGGER.debug(
+                "Tangent-height computation failed for event=%s: %s",
+                getattr(window, "event_id", ""),
+                exc,
+            )
+            return math.nan
+
+    def _rejected_result(
+        self,
+        window: SignalWindow,
+        reason: str,
+        metrics: ScintillationMetrics | None,
+        d_curve: DCurve | None = None,
+        distance_km: float = math.nan,
+        is_multivalued: bool = False,
+    ) -> GeolocationResult:
+        """Construct a rejected result while preserving available diagnostics."""
+        sigma_phi_rad: float = math.nan
+        s4: float = math.nan
+        mean_snr_vv: float = math.nan
+
+        if metrics is not None:
+            sigma_phi_rad = float(metrics.sigma_phi_rad)
+            s4 = float(metrics.s4)
+            mean_snr_vv = float(metrics.mean_snr_vv)
+
+        q_value: float = math.nan
+        cos_alpha_value: float = math.nan
+        d_slope: float = math.nan
+
+        if d_curve is not None and math.isfinite(float(distance_km)):
+            nearest_index: int | None = self._nearest_lmf_index(
+                d_curve=d_curve,
+                crossing_km=float(distance_km),
+            )
+            if nearest_index is not None:
+                q_value = self._safe_array_value(d_curve.q, nearest_index)
+                cos_alpha_value = self._safe_array_value(
+                    d_curve.cos_alpha,
+                    nearest_index,
+                )
+            d_slope = self._d_curve_slope(d_curve=d_curve, crossing_km=float(distance_km))
+
+        return GeolocationResult(
+            event_id=getattr(window, "event_id", ""),
+            leo_id=getattr(window, "leo_id", ""),
+            gnss_id=getattr(window, "gnss_id", ""),
+            signal_name=getattr(window, "signal_name", ""),
+            mid_time=getattr(window, "mid_time"),
+            accepted=False,
+            rejection_reason=str(reason or "rejected"),
+            distance_km=float(distance_km),
+            latitude_deg=math.nan,
+            longitude_deg=math.nan,
+            altitude_km=math.nan,
+            local_time_hr=math.nan,
+            sigma_phi_rad=sigma_phi_rad,
+            s4=s4,
+            mean_snr_vv=mean_snr_vv,
+            q=q_value,
+            cos_alpha=cos_alpha_value,
+            d_slope=d_slope,
+            is_multivalued=bool(is_multivalued or (d_curve.is_multivalued if d_curve else False)),
+        )
+
+    def _distance_in_configured_range(self, distance_km: float) -> bool:
+        """Return whether a crossing lies inside the configured BP range."""
+        distance_value_km: float = float(distance_km)
+        if not math.isfinite(distance_value_km):
+            return False
+
+        min_km: float = float(getattr(self.config, "bp_min_distance_km", math.nan))
+        max_km: float = float(getattr(self.config, "bp_max_distance_km", math.nan))
+
+        if not math.isfinite(min_km) or not math.isfinite(max_km):
+            return distance_value_km > 0.0
+
+        tolerance_km: float = max(
+            1.0e-9,
+            1.0e-6 * float(getattr(self.config, "bp_step_km", 100.0)),
+        )
+        return (min_km - tolerance_km) <= distance_value_km <= (max_km + tolerance_km)
+
+    @staticmethod
+    def _valid_geodetic(
+        latitude_deg: float,
+        longitude_deg: float,
+        altitude_km: float,
+    ) -> bool:
+        """Validate geodetic coordinates returned by LOS geometry."""
+        latitude_value_deg: float = float(latitude_deg)
+        longitude_value_deg: float = float(longitude_deg)
+        altitude_value_km: float = float(altitude_km)
+
+        return (
+            math.isfinite(latitude_value_deg)
+            and math.isfinite(longitude_value_deg)
+            and math.isfinite(altitude_value_km)
+            and -90.0 <= latitude_value_deg <= 90.0
+            and -180.0 <= longitude_value_deg < 180.0
+        )
+
+    @staticmethod
+    def _local_time_hr(time: datetime, longitude_deg: float) -> float:
+        """Compute longitude-based local solar time in hours.
+
+        The configuration states that monthly post-sunset filtering uses
+        geolocation longitude. This method populates the result diagnostic
+        ``local_time_hr`` accordingly.
+        """
+        if not isinstance(time, datetime):
+            return math.nan
+
+        if time.tzinfo is None:
+            utc_time: datetime = time.replace(tzinfo=timezone.utc)
+        else:
+            utc_time = time.astimezone(timezone.utc)
+
+        longitude_value_deg: float = float(longitude_deg)
+        if not math.isfinite(longitude_value_deg):
+            return math.nan
+
+        utc_decimal_hour: float = (
+            float(utc_time.hour)
+            + float(utc_time.minute) / 60.0
+            + float(utc_time.second) / _SECONDS_PER_HOUR
+            + float(utc_time.microsecond) / _MICROSECONDS_PER_HOUR
+        )
+
+        local_time_hr: float = (
+            utc_decimal_hour + longitude_value_deg / _DEG_PER_LOCAL_TIME_HOUR
+        ) % _HOURS_PER_DAY
+
+        if math.isclose(local_time_hr, _HOURS_PER_DAY, abs_tol=1.0e-12):
+            local_time_hr = 0.0
+        if math.isclose(local_time_hr, 0.0, abs_tol=1.0e-14):
+            local_time_hr = 0.0
+
+        return float(local_time_hr)
+
+    @staticmethod
+    def _nearest_lmf_index(d_curve: DCurve, crossing_km: float) -> int | None:
+        """Find index of the L_mf grid point nearest to a crossing."""
+        l_mf_km: NDArray[np.float64] = np.asarray(d_curve.l_mf_km, dtype=np.float64)
+        if l_mf_km.ndim != 1 or l_mf_km.size == 0:
+            return None
+        if not np.any(np.isfinite(l_mf_km)):
+            return None
+
+        crossing_value_km: float = float(crossing_km)
+        if not math.isfinite(crossing_value_km):
+            return None
+
+        differences: NDArray[np.float64] = np.abs(l_mf_km - crossing_value_km)
+        if not np.any(np.isfinite(differences)):
+            return None
+
+        return int(np.nanargmin(differences))
+
+    @staticmethod
+    def _safe_array_value(values: NDArray[np.float64], index: int) -> float:
+        """Return a finite array value or NaN."""
+        try:
+            array: NDArray[np.float64] = np.asarray(values, dtype=np.float64)
+            value: float = float(array[int(index)])
+        except (IndexError, TypeError, ValueError):
+            return math.nan
+
+        return value if math.isfinite(value) else math.nan
+
+    @staticmethod
+    def _d_curve_slope(d_curve: DCurve, crossing_km: float) -> float:
+        """Compute paper diagnostic slope M = |Delta D / Delta L|.
+
+        The slope is computed from the nearest positive and negative D samples
+        that bracket the selected crossing. If no such bracketing pair exists,
+        NaN is returned.
+        """
+        l_values_km: NDArray[np.float64] = np.asarray(d_curve.l_mf_km, dtype=np.float64)
+        d_values_km: NDArray[np.float64] = np.asarray(d_curve.d_km, dtype=np.float64)
+        crossing_value_km: float = float(crossing_km)
+
+        if (
+            l_values_km.ndim != 1
+            or d_values_km.ndim != 1
+            or l_values_km.size != d_values_km.size
+            or l_values_km.size < 2
+            or not math.isfinite(crossing_value_km)
+        ):
+            return math.nan
+
+        finite_mask: NDArray[np.bool_] = np.isfinite(l_values_km) & np.isfinite(d_values_km)
+        if int(np.count_nonzero(finite_mask)) < 2:
+            return math.nan
+
+        l_finite_km: NDArray[np.float64] = l_values_km[finite_mask]
+        d_finite_km: NDArray[np.float64] = d_values_km[finite_mask]
+
+        order: NDArray[np.int64] = np.argsort(l_finite_km)
+        l_sorted_km: NDArray[np.float64] = l_finite_km[order]
+        d_sorted_km: NDArray[np.float64] = d_finite_km[order]
+
+        zero_tolerance: float = _ZERO_TOLERANCE_SCALE * max(
+            1.0,
+            float(np.nanmax(np.abs(d_sorted_km))) if d_sorted_km.size else 1.0,
+        )
+
+        positive_indices: NDArray[np.int64] = np.flatnonzero(d_sorted_km > zero_tolerance)
+        negative_indices: NDArray[np.int64] = np.flatnonzero(d_sorted_km < -zero_tolerance)
+
+        if positive_indices.size == 0 or negative_indices.size == 0:
+            return math.nan
+
+        best_pair: tuple[int, int] | None = None
+        best_score: float = math.inf
+
+        for positive_index in positive_indices:
+            l_positive_km: float = float(l_sorted_km[positive_index])
+            d_positive_km: float = float(d_sorted_km[positive_index])
+
+            for negative_index in negative_indices:
+                l_negative_km: float = float(l_sorted_km[negative_index])
+                d_negative_km: float = float(d_sorted_km[negative_index])
+
+                lower_l_km: float = min(l_positive_km, l_negative_km)
+                upper_l_km: float = max(l_positive_km, l_negative_km)
+
+                if not (lower_l_km <= crossing_value_km <= upper_l_km):
+                    continue
+
+                delta_l_km: float = l_positive_km - l_negative_km
+                delta_d_km: float = d_positive_km - d_negative_km
+                if delta_l_km == 0.0:
+                    continue
+
+                score: float = (
+                    abs(l_positive_km - crossing_value_km)
+                    + abs(l_negative_km - crossing_value_km)
+                )
+                if score < best_score:
+                    best_score = score
+                    best_pair = (int(positive_index), int(negative_index))
+
+        if best_pair is None:
+            return math.nan
+
+        positive_index, negative_index = best_pair
+        l_positive_km = float(l_sorted_km[positive_index])
+        l_negative_km = float(l_sorted_km[negative_index])
+        d_positive_km = float(d_sorted_km[positive_index])
+        d_negative_km = float(d_sorted_km[negative_index])
+
+        denominator_km: float = l_positive_km - l_negative_km
+        if denominator_km == 0.0 or not math.isfinite(denominator_km):
+            return math.nan
+
+        slope: float = abs((d_positive_km - d_negative_km) / denominator_km)
+        return float(slope) if math.isfinite(slope) else math.nan
+
+
+__all__ = ["Geolocator"]
+```

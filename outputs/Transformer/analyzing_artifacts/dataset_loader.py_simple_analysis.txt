@@ -1,0 +1,112 @@
+Below is the detailed logic analysis for dataset_loader.py. This module is responsible for loading and preprocessing datasets for both the translation and parsing experiments. It leverages Hugging Face’s tokenizers for fast tokenization and PyTorch’s DataLoader for batching, using configuration values (e.g., batch token counts) from the config file.
+
+──────────────────────────────
+1. Class Initialization
+
+• The DatasetLoader class will be initialized with a configuration dictionary (loaded from config.py that in turn parses config.yaml).  
+• In __init__(config: dict), store the configuration (for example, parameters under training.batch_token_size, dataset paths if provided, and model or tokenizer settings such as vocabulary size or tokenizer type).  
+• Optionally, load or initialize the tokenizers (one shared tokenizer for translation tasks and possibly separate settings for parsing tasks) using Hugging Face’s tokenizers library.  
+  – For translation, the paper uses a shared vocabulary (~37K tokens for English–German and ~32K tokens for English–French); if the tokenizer’s configuration is not fully specified in the config file, include a comment/note that this should be confirmed.  
+  – For parsing, note that the vocabulary should be either 16K tokens for WSJ-only or 32K for a semi-supervised setting.
+
+──────────────────────────────
+2. Method: load_translation_data()
+
+This method is intended to load and preprocess data for the machine translation tasks.
+
+Steps:
+ a. Data Source Retrieval  
+  – Retrieve file paths/names for the WMT 2014 translation datasets (both English–German and English–French, if supported) from the configuration (or use default preset paths if not explicitly provided).  
+  – Ensure that the dataset contains approximately 4.5M sentence pairs for English–German (or as appropriate) and apply any available filtering rules.
+
+ b. Tokenization  
+  – Use the Hugging Face tokenizer (shared for source and target as per the paper) to process each sentence in the dataset.  
+  – For every sentence pair, perform tokenization to convert raw text into a sequence of integer token IDs.  
+  – Save these tokenized sequences (e.g., as a list of (source_tokens, target_tokens) pairs).
+
+ c. Batching Strategy – Dynamic Batching Based on Token Count  
+  – The configuration specifies that each batch should approximate 25,000 tokens for the source and 25,000 for the target.  
+  – To achieve this:
+   * Compute the length (number of tokens) for each source and target sequence.
+   * Group or “bucket” sentence pairs with similar lengths to minimize padding.
+   * A custom collate_fn may be implemented to accumulate examples until the sum of tokens (for either source or target) nears the threshold (25000 tokens).  
+  Note: The exact bucketing strategy is not fully specified in the paper, so document your chosen implementation.
+
+ d. DataLoader Creation  
+  – Create a PyTorch DataLoader that wraps the dataset.
+  – Use the custom collate function to pad batches (typically using a pad token id provided by the tokenizer) so that all sequences in a batch are of equal length.
+  – Configure additional DataLoader properties (e.g., shuffle for training, num_workers as needed).
+
+ e. Return Value  
+  – Return a tuple containing (train_data_loader, validation_data_loader), so that downstream modules (like Trainer) can iterate over the data.
+
+──────────────────────────────
+3. Method: load_parsing_data()
+
+This method is intended to load and preprocess data for English constituency parsing (WSJ dataset).
+
+Steps:
+ a. Data Source Retrieval  
+  – Retrieve the file paths/names for the WSJ portion of the Penn Treebank from the configuration or default settings.  
+  – Depending on the mode (WSJ-only or semi-supervised), select the appropriate dataset and set the vocabulary size (16K for WSJ-only; 32K for semi-supervised).
+
+ b. Tokenization  
+  – Initialize the tokenizer for the parsing task. (It may be similar to the translation tokenizer but with vocabulary settings as above.)  
+  – For each example, convert the source sentence into tokens; also process the target parse representation (which may involve converting bracketed trees into a sequence format) into token IDs.
+  – Ensure that any special tokens required for structured outputs are added.
+
+ c. Batching Strategy  
+  – Similar to translation, the parsing loader may group samples into dynamic batches.  
+  – Although the test-time inference will later use a maximum output length defined as “input_length + 300” (in Evaluation), the DataLoader only needs to correctly pad sequences.
+  – Use a custom collate_fn to pad both source and target sequences appropriately.
+
+ d. DataLoader Creation  
+  – Wrap the preprocessed parsing dataset in a PyTorch DataLoader.  
+  – Include any necessary options (e.g., shuffling the training data, setting num_workers).
+
+ e. Return Value  
+  – Return a tuple containing (train_data_loader, validation_data_loader) for parsing data.
+
+──────────────────────────────
+4. Dependency and Configuration Integration
+
+• Imports:  
+ – torch and torch.utils.data for Dataset and DataLoader functionalities.  
+ – tokenizers (Hugging Face’s library) for constructing and using the tokenizer pipelines.  
+ – Configuration data (from config.py that reads config.yaml) to ensure that hyperparameters such as batch token size, dropout, vocabulary sizes (if specified), tokenizer type, and dataset paths remain consistent.
+
+• Key Configuration Parameters Used:  
+ – training.batch_token_size.source and target (both set to 25000 tokens).  
+ – Any tokenizer configuration parameters (e.g., vocabulary size) that may be either embedded in config.py or passed as separate parameters.  
+ – (Optionally) paths for training and validation data.
+
+──────────────────────────────
+5. Error Handling and Ambiguities
+
+• Since some details remain ambiguous (e.g., exact number of merge operations for the tokenizer or precise bucketing method), include detailed comments in the code indicating where assumptions are made and what parameters may need adjustment.
+
+• Handle FileNotFound errors or data format mismatches gracefully, with clear error messages guiding the user to adjust dataset file paths or formatting.
+
+• Ensure that tokenized sequences are corroborated with expected lengths; raise warnings if exceptionally short or long sequences are encountered, as these may affect batching.
+
+──────────────────────────────
+6. Summary of Interfaces
+
+• DatasetLoader class has two main public methods:
+ – load_translation_data() returns a tuple (train_loader, val_loader) for the translation task.  
+ – load_parsing_data() returns a tuple (train_loader, val_loader) for the parsing task.
+
+• Both methods ensure that the output batches are composed on dynamically grouped token counts (not a fixed number of samples) as defined in the configuration, and that batches are properly padded using a collate function.
+
+• The preprocessing logic is fully reproducible, relying on the same configuration extracted from config.yaml, which centralizes hyperparameters and dataset specifications.
+
+──────────────────────────────
+Conclusion
+
+This detailed logic analysis for dataset_loader.py covers:
+ – Class initialization and configuration handling.
+ – Methods for loading translation and parsing datasets.
+ – Use of Hugging Face’s tokenizers to tokenize and encode input sentences.
+ – Implementation of dynamic batching based on token count using PyTorch DataLoader.
+ – Integration of configuration parameters (like batch token sizes and vocabulary sizes) as dictated by the experimental setup in the paper.
+All these steps guarantee that the data passed to the TransformerModel (and eventually to the Trainer and Evaluation modules) complies with the architecture’s requirements and the experimental design outlined in “Attention Is All You Need.”

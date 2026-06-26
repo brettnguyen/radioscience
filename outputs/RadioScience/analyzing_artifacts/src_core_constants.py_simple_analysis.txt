@@ -1,0 +1,1243 @@
+## Logic Analysis: `src/core/constants.py`
+
+### Purpose
+
+`src/core/constants.py` should provide project-wide physical constants, GNSS carrier definitions, unit-conversion helpers, and paper/configuration default method values used by multiple modules.
+
+This module must be dependency-light and must not import any internal project modules, because it will be imported by propagation, signal processing, geometry, geolocation, quality control, and experiment modules. It should avoid circular dependencies.
+
+The file should distinguish between:
+
+1. **Physical constants**  
+   Stable values such as speed of light, WGS84 ellipsoid constants, and GNSS carrier frequencies.
+
+2. **Paper/config defaults**  
+   Default values matching `config.yaml` and the paper, used primarily as fallback values for `AppConfig` validation or synthetic experiments.
+
+3. **Runtime configuration values**  
+   Operational processing should use `AppConfig` values loaded from `config.yaml`, not hard-coded constants scattered across the codebase.
+
+---
+
+## 1. Dependency Rules
+
+`src/core/constants.py` should only depend on:
+
+- Python standard library, preferably `math`.
+
+It should not import:
+
+- `numpy`
+- `pandas`
+- `pyproj`
+- project modules such as `src.config`, `src.core.types`, etc.
+
+Reason:
+
+- This file is a foundational dependency.
+- Importing project modules here would create circular dependency risk.
+- NumPy is unnecessary for scalar constants.
+
+---
+
+## 2. Unit Conventions
+
+All constants should use explicit unit suffixes in their names.
+
+Recommended naming convention:
+
+| Quantity type | Suffix |
+|---|---|
+| meters | `_M` |
+| kilometers | `_KM` |
+| seconds | `_S` |
+| hertz | `_HZ` |
+| megahertz | `_MHZ` if used |
+| radians | `_RAD` |
+| degrees | `_DEG` |
+| dimensionless | no unit suffix or descriptive suffix |
+
+This matches the project’s shared convention:
+
+- ECEF positions are in meters.
+- BP/geolocation distances are usually in kilometers in public APIs.
+- Wavelengths are in meters.
+- Phase is in radians.
+- Frequencies are in hertz.
+
+---
+
+## 3. Physical Constants
+
+### 3.1 Speed of Light
+
+Required for GNSS wavelength calculation and propagation wave number:
+
+\[
+\lambda = \frac{c}{f}
+\]
+
+\[
+k = \frac{2\pi}{\lambda}
+\]
+
+Use:
+
+```text
+SPEED_OF_LIGHT_MPS = 299792458.0
+```
+
+This is exact in SI units.
+
+Used by:
+
+- `src/core/constants.py` wavelength definitions
+- `src/propagation/fft_propagator.py`
+- `src/propagation/phase_screen.py`
+- `src/geolocation/stationary_correction.py`
+
+---
+
+## 4. Earth Reference Ellipsoid Constants
+
+Although `pyproj` or `pymap3d` should perform primary geodetic transformations, basic WGS84 constants are useful for fallback calculations, diagnostics, and tests.
+
+Recommended constants:
+
+```text
+WGS84_A_M = 6378137.0
+WGS84_F = 1 / 298.257223563
+WGS84_B_M = WGS84_A_M * (1 - WGS84_F)
+WGS84_E2 = WGS84_F * (2 - WGS84_F)
+```
+
+Purpose:
+
+- Tangent-height sanity checks.
+- Fallback geodetic conversions if external libraries are unavailable.
+- Unit tests for coordinate transformations.
+
+Important:
+
+- Real coordinate conversion logic belongs in `src/geometry/coordinates.py`, not here.
+- This file should only expose constants.
+
+---
+
+## 5. Angle Conversion Constants
+
+The task explicitly requests radians/degrees conversion helpers.
+
+Recommended scalar constants:
+
+```text
+DEG_TO_RAD = math.pi / 180.0
+RAD_TO_DEG = 180.0 / math.pi
+TWO_PI = 2.0 * math.pi
+```
+
+Used by:
+
+- `src/geometry/bp_plane.py`
+- `src/propagation/fft_propagator.py`
+- `src/propagation/phase_screen.py`
+- `src/experiments/synthetic_experiments.py`
+- `src/geolocation/stationary_correction.py`
+
+Avoid defining many trigonometric wrapper functions here unless needed. Scalar constants are enough for most modules.
+
+---
+
+## 6. GNSS Carrier Frequencies and Wavelengths
+
+The paper uses GNSS RO high-rate scintillation data from COSMIC-2, with GPS and GLONASS sampling rates specified in `config.yaml`:
+
+```yaml
+data:
+  cosmic2:
+    sampling_rates_hz:
+      gps: 50
+      glonass: 100
+```
+
+The synthetic experiments use a default signal:
+
+```yaml
+synthetic_experiments:
+  wavelength:
+    default_signal: "L1"
+```
+
+Therefore `constants.py` should expose GNSS frequency and wavelength definitions.
+
+---
+
+### 6.1 GPS Frequencies
+
+GPS L1:
+
+\[
+f_{L1} = 1575.42 \text{ MHz}
+\]
+
+GPS L2 / L2C:
+
+\[
+f_{L2} = 1227.60 \text{ MHz}
+\]
+
+Recommended constants:
+
+```text
+GPS_L1_FREQUENCY_HZ = 1575.42e6
+GPS_L2_FREQUENCY_HZ = 1227.60e6
+GPS_L2C_FREQUENCY_HZ = GPS_L2_FREQUENCY_HZ
+```
+
+Corresponding wavelengths:
+
+```text
+GPS_L1_WAVELENGTH_M = SPEED_OF_LIGHT_MPS / GPS_L1_FREQUENCY_HZ
+GPS_L2_WAVELENGTH_M = SPEED_OF_LIGHT_MPS / GPS_L2_FREQUENCY_HZ
+GPS_L2C_WAVELENGTH_M = GPS_L2_WAVELENGTH_M
+```
+
+Approximate values:
+
+| Signal | Frequency | Wavelength |
+|---|---:|---:|
+| GPS L1 | 1575.42 MHz | 0.1902936728 m |
+| GPS L2/L2C | 1227.60 MHz | 0.2442102134 m |
+
+Use in:
+
+- `main.py` when choosing `wavelength_m`
+- `src/experiments/synthetic_experiments.py`
+- `src/geolocation/geolocator.py`
+- `src/propagation/fft_propagator.py`
+
+---
+
+### 6.2 GLONASS Frequencies
+
+GLONASS uses FDMA frequencies depending on channel number \(k\). Therefore, unlike GPS, a single fixed L1 or L2 wavelength is not always correct.
+
+Carrier definitions:
+
+\[
+f_{L1,k} = 1602.0\text{ MHz} + k \cdot 0.5625\text{ MHz}
+\]
+
+\[
+f_{L2,k} = 1246.0\text{ MHz} + k \cdot 0.4375\text{ MHz}
+\]
+
+Recommended constants:
+
+```text
+GLONASS_L1_BASE_FREQUENCY_HZ = 1602.0e6
+GLONASS_L1_CHANNEL_SPACING_HZ = 0.5625e6
+
+GLONASS_L2_BASE_FREQUENCY_HZ = 1246.0e6
+GLONASS_L2_CHANNEL_SPACING_HZ = 0.4375e6
+```
+
+Recommended helper logic:
+
+- A helper can compute GLONASS frequency from channel number.
+- A helper can compute GLONASS wavelength from channel number.
+
+Conceptually:
+
+```text
+glonass_l1_frequency_hz(k) = GLONASS_L1_BASE_FREQUENCY_HZ + k * GLONASS_L1_CHANNEL_SPACING_HZ
+glonass_l2_frequency_hz(k) = GLONASS_L2_BASE_FREQUENCY_HZ + k * GLONASS_L2_CHANNEL_SPACING_HZ
+```
+
+Important:
+
+- If COSMIC-2 metadata provides exact GLONASS frequency or channel number, use that.
+- Do not silently use a fixed nominal GLONASS wavelength for scientific processing unless channel information is unavailable and the approximation is explicitly logged.
+- The paper does not specify GLONASS channel handling, so this should remain transparent and configurable.
+
+---
+
+### 6.3 Signal Name Mapping
+
+It is useful to define a dictionary mapping common signal names to wavelengths.
+
+Recommended conceptual mapping:
+
+```text
+GNSS_WAVELENGTHS_M = {
+    "GPS_L1": GPS_L1_WAVELENGTH_M,
+    "L1": GPS_L1_WAVELENGTH_M,
+    "GPS_L2": GPS_L2_WAVELENGTH_M,
+    "GPS_L2C": GPS_L2C_WAVELENGTH_M,
+    "L2": GPS_L2_WAVELENGTH_M,
+    "L2C": GPS_L2C_WAVELENGTH_M,
+}
+```
+
+Caution:
+
+- `"L1"` defaults to GPS L1 because the synthetic configuration specifies default signal `"L1"` and the paper’s synthetic wavelength is not explicitly stated.
+- For real GLONASS data, signal-specific wavelength should be resolved using metadata where possible.
+
+---
+
+## 7. Default Processing Constants from Paper and `config.yaml`
+
+The paper and `config.yaml` define the operational method settings. These should be available as defaults but should not replace runtime configuration.
+
+The central runtime source is:
+
+```yaml
+processing:
+back_propagation:
+real_data_experiments:
+synthetic_experiments:
+```
+
+`constants.py` may define matching defaults for:
+
+- `AppConfig` fallback values
+- tests
+- synthetic experiment defaults
+- documentation consistency
+
+Downstream modules should still consume `AppConfig`.
+
+---
+
+### 7.1 Window Length
+
+From `config.yaml`:
+
+```yaml
+processing:
+  window_seconds: 10
+```
+
+Paper:
+
+- COSMIC-2 high-rate phase and SNR are processed in 10-s intervals.
+
+Default constant:
+
+```text
+DEFAULT_WINDOW_SECONDS = 10
+```
+
+Used by:
+
+- `CosmicLoader.segment_to_windows`
+- `RealDataExperiments`
+- tests
+
+---
+
+### 7.2 Scintillation Threshold
+
+From `config.yaml`:
+
+```yaml
+processing:
+  scintillation_indices:
+    sigma_phi_threshold_rad: 0.25
+```
+
+Paper:
+
+\[
+\sigma_\phi > 0.25 \ \mathrm{rad}
+\]
+
+Default constant:
+
+```text
+DEFAULT_SIGMA_PHI_THRESHOLD_RAD = 0.25
+```
+
+Used by:
+
+- `AppConfig`
+- `QualityController.passes_pre_bp`
+
+But runtime processing must use:
+
+```text
+config.sigma_phi_threshold_rad
+```
+
+---
+
+### 7.3 Tangent-Point Height Threshold
+
+From `config.yaml`:
+
+```yaml
+processing:
+  tangent_point_filter:
+    min_height_km: 150
+```
+
+Paper:
+
+- BP is applied only when LOS tangent point is above 150 km.
+
+Default constant:
+
+```text
+DEFAULT_TANGENT_HEIGHT_MIN_KM = 150.0
+```
+
+Used by:
+
+- `QualityController.passes_pre_bp`
+- `LosGeometry.tangent_height` tests
+
+---
+
+### 7.4 Back-Propagation Distance Grid
+
+From `config.yaml`:
+
+```yaml
+back_propagation:
+  distance_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+Paper:
+
+- BP is performed for:
+
+\[
+100 \ \mathrm{km} < L < 6000 \ \mathrm{km}
+\]
+
+with 100 km step.
+
+The text says “100 km < L < 6,000 km,” but algorithmically the paper describes discrete checks over 100 km samples. The implementation should follow the configured grid exactly.
+
+Default constants:
+
+```text
+DEFAULT_BP_MIN_DISTANCE_KM = 100.0
+DEFAULT_BP_MAX_DISTANCE_KM = 6000.0
+DEFAULT_BP_STEP_KM = 100.0
+```
+
+Used by:
+
+- `AppConfig`
+- `BackpropProcessor`
+- `QualityController`
+- synthetic diagnostics
+
+Runtime source:
+
+```text
+config.bp_min_distance_km
+config.bp_max_distance_km
+config.bp_step_km
+```
+
+---
+
+### 7.5 Magnetic-Field Candidate Distance Grid
+
+From `config.yaml`:
+
+```yaml
+back_propagation:
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+Paper:
+
+- Outer loop cycles through \(L_{\mathrm{mf}}\) with 100 km step.
+
+Default constants:
+
+```text
+DEFAULT_MF_MIN_DISTANCE_KM = 100.0
+DEFAULT_MF_MAX_DISTANCE_KM = 6000.0
+DEFAULT_MF_STEP_KM = 100.0
+```
+
+The current `AppConfig` interface includes only:
+
+```text
+bp_min_distance_km
+bp_max_distance_km
+bp_step_km
+mf_step_km
+```
+
+Therefore, unless `AppConfig` is extended later, magnetic-field candidate min/max should mirror BP min/max.
+
+Do not introduce new public config fields outside the design unless the design is updated.
+
+---
+
+### 7.6 V-Curve Smoothing
+
+From `config.yaml`:
+
+```yaml
+back_propagation:
+  v_curve:
+    smoothing:
+      window_km: 1000
+      polynomial_order: 2
+```
+
+Paper:
+
+- Smooth \(V(L)\) using second-order sliding polynomial regression in a 1000 km window.
+
+Default constants:
+
+```text
+DEFAULT_SMOOTHING_WINDOW_KM = 1000.0
+DEFAULT_SMOOTHING_POLY_ORDER = 2
+```
+
+Used by:
+
+- `QualityController.smooth_v_curve`
+
+Runtime source:
+
+```text
+config.smoothing_window_km
+config.smoothing_poly_order
+```
+
+---
+
+### 7.7 Minimum Detection Defaults
+
+From `config.yaml`:
+
+```yaml
+back_propagation:
+  minimum_detection:
+    min_l1_samples: 2
+    min_l2_samples: 2
+    sample_spacing_km: 100
+```
+
+Paper:
+
+- Valid local minimum requires \(L_1\) and \(L_2\) not smaller than two 100-km samples.
+
+Default constants:
+
+```text
+DEFAULT_MIN_L1_SAMPLES = 2
+DEFAULT_MIN_L2_SAMPLES = 2
+DEFAULT_MINIMUM_SAMPLE_SPACING_KM = 100.0
+```
+
+The current `AppConfig` design does not expose `min_l1_samples` or `min_l2_samples` directly. Therefore:
+
+- Either `QualityController` should derive this from constants and `config.bp_step_km`, or
+- future configuration expansion can expose these fields.
+
+For now, use the constants as paper defaults and keep them centralized here.
+
+---
+
+### 7.8 Quality-Control Thresholds
+
+From `config.yaml`:
+
+```yaml
+back_propagation:
+  quality_control:
+    q_threshold: 1.2
+    cos_alpha_threshold: 0.1
+    require_single_valued_geolocation: true
+    discard_multivalued_geolocations: true
+```
+
+Paper:
+
+\[
+Q > 1.2
+\]
+
+\[
+\cos \alpha > 0.1
+\]
+
+Only single-valued geolocations are accepted.
+
+Default constants:
+
+```text
+DEFAULT_Q_THRESHOLD = 1.2
+DEFAULT_COS_ALPHA_THRESHOLD = 0.1
+DEFAULT_REQUIRE_SINGLE_VALUED = True
+DEFAULT_DISCARD_MULTIVALUED = True
+```
+
+Runtime source:
+
+```text
+config.q_threshold
+config.cos_alpha_threshold
+```
+
+---
+
+### 7.9 Monthly Map Binning
+
+From `config.yaml`:
+
+```yaml
+real_data_experiments:
+  monthly_l1_maps:
+    bin_size_deg:
+      latitude: 3
+      longitude: 3
+```
+
+Paper:
+
+- Monthly maps use 3° × 3° latitude/longitude bins.
+
+Default constant:
+
+```text
+DEFAULT_MAP_BIN_DEG = 3.0
+```
+
+Runtime source:
+
+```text
+config.map_bin_deg
+```
+
+---
+
+### 7.10 Post-Sunset Local-Time Filter
+
+From `config.yaml`:
+
+```yaml
+processing:
+  local_time_filter:
+    start_hour: 18
+    end_hour: 24
+```
+
+Paper:
+
+- Monthly maps are made for post-sunset hours:
+
+\[
+18 \leq LT < 24
+\]
+
+Default constants:
+
+```text
+DEFAULT_POSTSUNSET_START_HOUR = 18.0
+DEFAULT_POSTSUNSET_END_HOUR = 24.0
+```
+
+Used by:
+
+- `RealDataExperiments.make_monthly_bins`
+
+The local-time reference is configured as:
+
+```yaml
+reference: "geolocation_longitude"
+```
+
+The paper does not explicitly state the reference longitude, so this is a documented reproduction assumption.
+
+---
+
+## 8. Synthetic Experiment Defaults
+
+Synthetic constants should match `config.yaml` and the paper.
+
+---
+
+### 8.1 Phase-Screen Spectrum
+
+From `config.yaml`:
+
+```yaml
+synthetic_experiments:
+  phase_screen:
+    spectral_index_p: 1.5
+    outer_scale_km: 10
+    spectrum_1d: "(k0^2 + kz^2)^(-p/2)"
+    k0_definition: "2*pi / outer_scale"
+```
+
+Paper:
+
+\[
+\Phi(k_z) \sim (k_0^2 + k_z^2)^{-p/2}
+\]
+
+\[
+k_0 = \frac{2\pi}{l_0}
+\]
+
+with:
+
+\[
+p = 1.5
+\]
+
+\[
+l_0 = 10 \ \mathrm{km}
+\]
+
+Default constants:
+
+```text
+DEFAULT_SYNTHETIC_SPECTRAL_INDEX_P = 1.5
+DEFAULT_SYNTHETIC_OUTER_SCALE_KM = 10.0
+```
+
+Useful derived value:
+
+```text
+DEFAULT_SYNTHETIC_OUTER_SCALE_M = 10000.0
+```
+
+The actual \(k_0\) should usually be computed inside `PhaseScreenGenerator.generate_1d` because it depends on meter units:
+
+\[
+k_0 = \frac{2\pi}{l_0 \cdot 1000}
+\]
+
+---
+
+### 8.2 Observed Average Values for Sanity Checks
+
+From `config.yaml`:
+
+```yaml
+synthetic_experiments:
+  observed_average_values:
+    sigma_phi_rad: 1.65
+    s4: 0.32
+    sigma_phi_over_s4_rad: 5.25
+    distance_from_phase_screen_to_receiver_km: 1900
+    estimated_outer_scale_km: 9.7
+```
+
+Paper reports:
+
+\[
+\langle \sigma_\phi \rangle \approx 1.65 \ \mathrm{rad}
+\]
+
+\[
+\langle S_4 \rangle \approx 0.32
+\]
+
+\[
+\langle \sigma_\phi/S_4 \rangle \approx 5.25 \ \mathrm{rad}
+\]
+
+\[
+\langle L \rangle \approx 1900 \ \mathrm{km}
+\]
+
+\[
+\langle l_0 \rangle \approx 9.7 \ \mathrm{km}
+\]
+
+Recommended constants:
+
+```text
+DEFAULT_OBSERVED_SIGMA_PHI_RAD = 1.65
+DEFAULT_OBSERVED_S4 = 0.32
+DEFAULT_OBSERVED_SIGMA_PHI_OVER_S4_RAD = 5.25
+DEFAULT_OBSERVED_SCREEN_DISTANCE_KM = 1900.0
+DEFAULT_ESTIMATED_OUTER_SCALE_KM = 9.7
+```
+
+These are not QC thresholds. They are validation targets.
+
+Used by:
+
+- `SyntheticExperiments.outer_scale_estimation`
+- reporting and README sanity checks
+
+---
+
+### 8.3 Orientation Error Experiment
+
+From `config.yaml`:
+
+```yaml
+synthetic_experiments:
+  modeled_cases:
+    orientation_error:
+      delta_alpha_deg: 0.6
+      formula: "DeltaL = 2 * L * tan(alpha) * DeltaAlpha"
+```
+
+Paper:
+
+\[
+\Delta L = 2L\tan(\alpha)\Delta\alpha
+\]
+
+with:
+
+\[
+\Delta\alpha \approx 0.6^\circ
+\]
+
+Default constant:
+
+```text
+DEFAULT_ORIENTATION_ERROR_DELTA_ALPHA_DEG = 0.6
+```
+
+Also useful:
+
+```text
+DEFAULT_ORIENTATION_ERROR_ALPHA_CASES_DEG = (15.0, 45.0, 75.0)
+DEFAULT_ORIENTATION_ERROR_DISTANCE_CASES_KM = (1000.0, 3000.0, 5000.0)
+```
+
+These reproduce Table 1.
+
+Expected Table 1 values:
+
+| \(L\) | \(\alpha=15^\circ\) | \(\alpha=45^\circ\) | \(\alpha=75^\circ\) |
+|---:|---:|---:|---:|
+| 1000 km | 6 km | 21 km | 78 km |
+| 3000 km | 17 km | 63 km | 235 km |
+| 5000 km | 28 km | 105 km | 392 km |
+
+---
+
+### 8.4 Two-Screen Synthetic Defaults
+
+From `config.yaml`:
+
+```yaml
+two_phase_screens_same_orientation:
+  separation_km: 1000
+  sigma_phi_ratio_stronger_to_weaker: 1.5
+```
+
+Paper:
+
+- Two aligned screens separated by 1000 km.
+- Unequal-strength case uses 1.5× larger \(\sigma_\phi\) on one screen.
+
+Recommended constants:
+
+```text
+DEFAULT_TWO_SCREEN_SEPARATION_KM = 1000.0
+DEFAULT_TWO_SCREEN_SIGMA_RATIO = 1.5
+```
+
+---
+
+### 8.5 Misaligned Two-Screen Defaults
+
+From `config.yaml`:
+
+```yaml
+two_phase_screens_different_orientation:
+  alpha_cases_deg:
+    - [30, 60]
+    - [60, 30]
+```
+
+Paper:
+
+- Test cases use \(\alpha_1 = 30^\circ, \alpha_2 = 60^\circ\), then swapped.
+
+Recommended constant:
+
+```text
+DEFAULT_MISALIGNED_ALPHA_CASES_DEG = ((30.0, 60.0), (60.0, 30.0))
+```
+
+Used by:
+
+- `SyntheticExperiments.two_screens_misaligned`
+
+---
+
+### 8.6 Thermal Noise Defaults
+
+From `config.yaml`:
+
+```yaml
+thermal_noise:
+  phase_screen_distance_km: 2000
+  sigma_phi_cases_rad:
+    - 1.65
+    - 0.25
+  snr_1hz_cases_vv:
+    - 200
+    - 400
+    - 600
+  average_snr_1hz_vv: 400
+  assumed_sampling_rate_hz: 100
+  assumed_projected_scan_velocity_km_s: 4
+  modeled_spatial_interval_km: 40
+  windowed_spatial_interval_km: 35
+  internal_grid_step_m: 10
+```
+
+Paper:
+
+- Noise modeling uses a phase screen at 2000 km.
+- Uses \(\sigma_\phi=1.65\) rad and \(\sigma_\phi=0.25\) rad.
+- Typical 1-Hz SNR values are 200–600 V/V, average 400 V/V.
+- For \(f_s = 100\) Hz, effective SNR is reduced by \(\sqrt{100}=10\).
+- For 1-Hz SNR = 400 V/V, effective SNR = 40 and thermal phase noise is:
+
+\[
+\sigma_\phi = \frac{1}{40} = 0.025 \ \mathrm{rad}
+\]
+
+Recommended constants:
+
+```text
+DEFAULT_NOISE_SCREEN_DISTANCE_KM = 2000.0
+DEFAULT_NOISE_SIGMA_PHI_CASES_RAD = (1.65, 0.25)
+DEFAULT_NOISE_SNR_1HZ_CASES_VV = (200.0, 400.0, 600.0)
+DEFAULT_AVERAGE_SNR_1HZ_VV = 400.0
+DEFAULT_NOISE_SAMPLING_RATE_HZ = 100.0
+DEFAULT_PROJECTED_SCAN_VELOCITY_KM_S = 4.0
+DEFAULT_NOISE_MODELED_INTERVAL_KM = 40.0
+DEFAULT_NOISE_WINDOWED_INTERVAL_KM = 35.0
+DEFAULT_NOISE_INTERNAL_GRID_STEP_M = 10.0
+```
+
+These are experiment defaults, not real-data QC thresholds.
+
+---
+
+## 9. L1/L2 Comparison Constants
+
+From `config.yaml`:
+
+```yaml
+real_data_experiments:
+  l1_l2_comparison:
+    start_date: "2021-02-19"
+    end_date: "2021-03-01"
+    expected_counts:
+      l1_geolocations: 13000
+      l2_geolocations: 11000
+      common_l1_l2_cases: 8000
+    zonal_difference_histogram_bin_deg: 0.5
+```
+
+Paper body text specifies February 19 to March 1, 2021, while the abstract says “2-month period.”
+
+Recommended constants:
+
+```text
+DEFAULT_L1_L2_START_DATE = "2021-02-19"
+DEFAULT_L1_L2_END_DATE = "2021-03-01"
+DEFAULT_L1_L2_HISTOGRAM_BIN_DEG = 0.5
+```
+
+Expected validation targets:
+
+```text
+EXPECTED_L1_L2_L1_COUNT = 13000
+EXPECTED_L1_L2_L2_COUNT = 11000
+EXPECTED_L1_L2_COMMON_COUNT = 8000
+```
+
+These should be treated as reporting targets, not strict assertions.
+
+---
+
+## 10. Monthly Map Expected Counts
+
+From `config.yaml`:
+
+```yaml
+real_data_experiments:
+  monthly_l1_maps:
+    expected_total_geolocations:
+      2021: 332000
+      2023: 1108000
+```
+
+Paper reports:
+
+- 2021 L1 accepted geolocations: 332k.
+- 2023 L1 accepted geolocations: 1,108k.
+
+Recommended constants:
+
+```text
+EXPECTED_L1_GEOLOCATIONS_2021 = 332000
+EXPECTED_L1_GEOLOCATIONS_2023 = 1108000
+```
+
+Again, these are validation targets, not hard QC constraints.
+
+---
+
+## 11. Core Formula Constants and Documentation
+
+Some equations should be documented in comments near related constants, although actual computation belongs elsewhere.
+
+---
+
+### 11.1 Normalized BP Amplitude Variance
+
+Paper:
+
+\[
+V(L) = \frac{\langle A^2\rangle}{\langle A\rangle^2} - 1
+\]
+
+This should be implemented in:
+
+```text
+FftPropagator.amplitude_variance(field)
+```
+
+No constant is needed, but the formula should be referenced in comments.
+
+---
+
+### 11.2 Geolocation Criterion
+
+Paper:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+Geolocation is where:
+
+\[
+D(L_{\mathrm{mf}}) = 0
+\]
+
+Implemented in:
+
+```text
+BackpropProcessor.compute_d_curve
+QualityController.find_zero_crossings
+```
+
+No constant is needed, but the sign convention should be documented.
+
+---
+
+### 11.3 Wavefront Curvature Correction
+
+From `config.yaml`:
+
+```yaml
+correction_path_term: "z^2 * tan(alpha)^2 / (2R)"
+```
+
+Paper:
+
+\[
+\Delta S_{\mathrm{curv}} = \frac{z^2\tan^2\alpha}{2R}
+\]
+
+Implemented in:
+
+```text
+StationaryCorrector.apply_curvature_correction
+```
+
+No constant is needed beyond `TWO_PI`.
+
+---
+
+## 12. Signal Sampling Defaults
+
+From `config.yaml`:
+
+```yaml
+data:
+  cosmic2:
+    sampling_rates_hz:
+      gps: 50
+      glonass: 100
+```
+
+Recommended constants:
+
+```text
+DEFAULT_GPS_HR_SAMPLING_RATE_HZ = 50.0
+DEFAULT_GLONASS_HR_SAMPLING_RATE_HZ = 100.0
+```
+
+Used by:
+
+- `CosmicLoader` only as fallback if metadata is missing.
+- Synthetic noise experiments.
+
+Real data should prefer sampling rate from file metadata.
+
+---
+
+## 13. Random Seed
+
+From `config.yaml`:
+
+```yaml
+reproducibility:
+  random_seed: 42
+```
+
+Recommended constant:
+
+```text
+DEFAULT_RANDOM_SEED = 42
+```
+
+Used by:
+
+- `AppConfig`
+- `PhaseScreenGenerator`
+- `SyntheticExperiments`
+
+Runtime source:
+
+```text
+config.random_seed
+```
+
+---
+
+## 14. What Should Not Be in `constants.py`
+
+Do not include:
+
+1. Project dataclasses  
+   These belong in `src/core/types.py`.
+
+2. YAML loading logic  
+   This belongs in `src/config.py`.
+
+3. Coordinate-transform functions  
+   These belong in `src/geometry/coordinates.py`.
+
+4. IGRF model calls  
+   These belong in `src/geometry/magnetic_field.py`.
+
+5. Propagation algorithms  
+   These belong in `src/propagation/fft_propagator.py`.
+
+6. Quality-control procedures  
+   These belong in `src/geolocation/qc.py`.
+
+7. Plotting constants tied to figure appearance  
+   These belong in `src/visualization/plots.py`.
+
+8. Runtime path values  
+   Paths are configured in `config.yaml` and loaded by `AppConfig`.
+
+---
+
+## 15. Recommended Constant Groups
+
+The file should be organized into clear sections:
+
+1. Module docstring
+2. Mathematical constants
+3. Unit conversion constants
+4. Physical constants
+5. Earth ellipsoid constants
+6. GNSS carrier constants
+7. COSMIC-2 sampling defaults
+8. Paper method defaults
+9. Synthetic experiment defaults
+10. Real-data validation target defaults
+
+This organization will make it easy for later modules to import only what they need.
+
+---
+
+## 16. Validation Expectations
+
+When this file is implemented, unit tests should verify:
+
+1. GPS L1 wavelength:
+
+\[
+\lambda_{L1} \approx 0.1902936728 \ \mathrm{m}
+\]
+
+2. GPS L2 wavelength:
+
+\[
+\lambda_{L2} \approx 0.2442102134 \ \mathrm{m}
+\]
+
+3. Degree/radian conversions:
+
+\[
+180^\circ = \pi \ \mathrm{rad}
+\]
+
+4. WGS84 semi-minor axis is approximately:
+
+\[
+6356752.314245 \ \mathrm{m}
+\]
+
+5. Synthetic outer scale conversion:
+
+\[
+10 \ \mathrm{km} = 10000 \ \mathrm{m}
+\]
+
+6. Orientation-error table values are reproducible using:
+
+\[
+\Delta L = 2L\tan(\alpha)\Delta\alpha
+\]
+
+with:
+
+\[
+\Delta\alpha = 0.6^\circ
+\]
+
+---
+
+## 17. Key Implementation Principle
+
+`src/core/constants.py` should encode the paper/configuration defaults in one place, but scientific processing should still be driven by `AppConfig`.
+
+In other words:
+
+- `constants.py` provides stable defaults.
+- `config.yaml` provides experiment/runtime values.
+- `AppConfig` mediates between the two.
+- Processing modules should avoid hard-coding thresholds directly.
+
+This preserves reproducibility while allowing sensitivity tests for unclear paper details such as detrending method, BP propagation method, and amplitude normalization.

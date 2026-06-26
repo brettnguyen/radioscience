@@ -1,0 +1,114 @@
+# config.py – Logic Analysis and Configuration
+
+"""
+This file serves as the central configuration hub for the Transformer experiments, ensuring all modules (data loading, model, trainer, evaluation, etc.)
+consume the same hyperparameters, training settings, and architectural details. The configuration parameters below are strictly derived from the "Attention Is All You Need" paper, the reproduction plan, and the provided config.yaml.
+
+Overview of the Logic Analysis:
+--------------------------------
+
+1. Training Settings:
+   • total_steps: We set the total training steps to 100,000 for the base model (as specified in config.yaml) which corresponds to approximately 12 hours of training on 8 NVIDIA P100 GPUs.
+   • batch_token_size: Instead of fixed sample counts, batches are created by token count (roughly 25,000 tokens on both the source and target sides). This aligns with the paper’s mention of approximate token counts per batch.
+   • warmup_steps: 4000 warmup steps are used to linearly increase the learning rate before decaying it based on an inverse square-root schedule.
+   • checkpoint_interval: Checkpoints are saved every 10 minutes for later averaging (last 5 checkpoints for base, and different settings may apply for the big model).
+
+2. Optimizer and Learning Rate Schedule:
+   • Optimizer Type: Adam, with hyperparameters beta1 = 0.9, beta2 = 0.98, and epsilon = 1e-9.
+   • Learning Rate Schedule: We follow the schedule:
+         lr = d_model^(-0.5) * min(step_num^(-0.5), step_num * warmup_steps^(-1.5))
+     Here, d_model is 512 for the base model. This schedule implements a linear warmup for the first 4000 steps, then decays proportional to the inverse square root of the step number.
+
+3. Model Architecture:
+   • Model Type: "transformer_base" indicates we are initially reproducing the base model.
+   • Encoder and Decoder Layers: Both are set to 6 layers, matching the architecture in the paper.
+   • d_model: The overall dimension is set to 512 so that all embeddings and sub-layer outputs (including residual connections) have this dimensionality.
+   • d_ff: The inner dimension of the feed-forward sub-layer is 2048.
+   • num_heads, d_k, d_v: Using 8 attention heads, each with a key/query dimension of 64 (since 512/8 = 64) and a value dimension of 64.
+   • Dropout: A rate of 0.1 is applied to sub-layer outputs (after attention and feed-forward modules) and to the sum of embeddings and positional encodings.
+   • Label Smoothing: 0.1 is used to regularize the softmax target distribution.
+   • share_embeddings: The weight matrix from the embedding layers is shared with the pre-softmax linear transformation on the decoder.
+   • positional_encoding: Set as “sinusoidal”, meaning that positional embeddings are generated using sine and cosine functions at varying frequencies as described in the paper.
+
+4. Evaluation Settings:
+   • For Translation:
+       - beam_size: Set to 4 for beam search during inference.
+       - length_penalty: A value of 0.6 is used to penalize longer outputs.
+       - max_output_length: Defined as “input_length + 50” to restrict the target sequence length.
+       - Metric: BLEU score is computed using sacreBLEU to assess translation quality.
+   • For Constituency Parsing:
+       - Although parsing settings like beam size (21) and increased max output length (input_length + 300) are described in the paper,
+         the default evaluation parameters in this config pertain to translation; however, parsing evaluation (using F1 score) is supported via the Evaluation module.
+         (Task-specific overrides can be provided via additional configuration if needed.)
+
+5. Hardware Settings:
+   • gpus: The experiments are set up to run on 8 GPUs.
+   • gpu_type: Specified as “P100”, in line with the original experimental setup.
+
+6. Additional Notes:
+   • The config also documents that for the “big” model, parameters such as total_steps, d_model, and d_ff should be adjusted accordingly (e.g., total_steps increased to 300,000).
+   • Batching is token-based rather than a fixed number of samples, which is central to handling the variable-length inputs effectively.
+   • Tokenization specifics (BPE for English–German with a vocabulary of ~37K tokens versus word-piece for English–French with a vocabulary of ~32K tokens) are not defined here but should be handled in the dataset loader using Hugging Face’s tokenizers library.
+   • This configuration file is imported by all modules (dataset_loader.py, model.py, trainer.py, evaluation.py, etc.) to ensure consistency and reproducibility.
+   • The learning rate schedule, dropout application, label smoothing, and checkpointing details are all explicitly referenced from the paper and the plan, ensuring a faithful implementation of the Transformer model as described.
+
+By structuring the configuration in this manner, we guarantee that any changes to experimental parameters (e.g., during ablation studies or model variant experiments) can be made in a single location without requiring code changes across multiple modules.
+
+Below is a dictionary structure that reflects the config.yaml specifications and the detailed logic analysis above.
+"""
+
+config = {
+    "training": {
+        "total_steps": 100000,  # Base model training steps (~12 hours on 8 P100 GPUs); increase to 300000 for the big model.
+        "batch_token_size": {
+            "source": 25000,    # Approximately 25,000 source tokens per batch.
+            "target": 25000     # Approximately 25,000 target tokens per batch.
+        },
+        "warmup_steps": 4000,     # Linear warmup period for the learning rate.
+        "checkpoint_interval": "Every 10 minutes"  # Frequency of checkpointing (used for checkpoint averaging).
+    },
+    "optimizer": {
+        "type": "adam",
+        "beta1": 0.9,
+        "beta2": 0.98,
+        "epsilon": 1e-9,
+        "learning_rate_schedule": "lr = d_model^(-0.5) * min(step_num^(-0.5), step_num * warmup_steps^(-1.5))"
+        # The learning rate depends on d_model (512 for the base model) and warmup_steps.
+    },
+    "model": {
+        "type": "transformer_base",
+        "encoder_layers": 6,      # 6 identical encoder layers.
+        "decoder_layers": 6,      # 6 identical decoder layers.
+        "d_model": 512,           # Model dimension for embeddings and sub-layers.
+        "d_ff": 2048,             # Inner dimension for the feed-forward network.
+        "num_heads": 8,           # Number of parallel attention heads.
+        "d_k": 64,                # Dimension per head for keys and queries (512/8).
+        "d_v": 64,                # Dimension per head for values (512/8).
+        "dropout": 0.1,           # Dropout rate for residual and embedding dropout.
+        "label_smoothing": 0.1,   # Label smoothing value.
+        "share_embeddings": True, # Share weights across encoder embedding, decoder embedding, and the output projection.
+        "positional_encoding": "sinusoidal"  # Use sinusoidal positional encoding. Optionally can be set to 'learned'.
+    },
+    "evaluation": {
+        "beam_size": 4,               # Beam search size for decoding in translation.
+        "length_penalty": 0.6,        # Length penalty factor.
+        "max_output_length": "input_length + 50",  # Maximum output length specification during inference.
+        "metrics": {
+            "translation": "bleu",  # Use BLEU for machine translation evaluation.
+            "parsing": "f1"         # Use F1 score for constituency parsing evaluation.
+        }
+    },
+    "hardware": {
+        "gpus": 8,                  # Number of GPUs available for training.
+        "gpu_type": "P100"          # GPU type as per the original experiments.
+    },
+    "notes": [
+        "For the big model configuration, update total_steps to 300000 and adjust d_model and d_ff accordingly.",
+        "Batching is performed based on token counts rather than fixed sample numbers to account for variable sequence lengths.",
+        "Tokenizer configuration (BPE vs. word-piece, vocabulary sizes) should be set in the tokenizer module in dataset_loader.py according to the task.",
+        "Training checkpoint averaging (last 5 checkpoints for base models; last 20 for bigger variants) should be managed via the trainer's checkpoint manager."
+    ]
+}
+
+# End of config.py logic analysis.
+# All modules in the codebase will import this configuration to enforce consistency and reproducibility.

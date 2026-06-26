@@ -1,0 +1,333 @@
+## Logic Analysis: `requirements.txt`
+
+### Purpose
+
+`requirements.txt` defines the Python environment needed to reproduce the paper’s synthetic back-propagation validation experiments and COSMIC-2 real-data geolocation processing pipeline.
+
+This file should be created first because every later module depends on a consistent scientific Python stack. It has **no internal project dependencies** and should contain only external Python packages.
+
+The dependency set must support the configuration in `config.yaml`, especially:
+
+- COSMIC-2 high-rate phase/SNR file I/O.
+- GNSS/LEO orbit loading and interpolation.
+- IGRF-13 magnetic-field direction evaluation.
+- FFT-based wave propagation and optional Kirchhoff validation.
+- 10-s scintillation processing.
+- 100–6000 km back-propagation grids with 100 km spacing.
+- Monthly 3° × 3° geolocation maps.
+- L1/L2 comparison products.
+- F10.7 solar-flux plotting.
+- Reproducible synthetic experiments using `random_seed: 42`.
+
+---
+
+## Required Dependency Groups
+
+### 1. Core Numerical and Scientific Computing
+
+These packages support the mathematical core of the paper:
+
+- FFT plane-wave forward/back propagation.
+- Random phase-screen generation.
+- Amplitude variance computation:
+  \[
+  V = \frac{\langle A^2\rangle}{\langle A\rangle^2} - 1
+  \]
+- Sliding polynomial smoothing of \(V(L)\).
+- Geometry-heavy operations over 100–6000 km candidate grids.
+
+Required packages:
+
+```text
+numpy>=1.26.0
+scipy>=1.11.0
+numba>=0.59.0
+```
+
+Logic:
+
+- `numpy` is required throughout the project for arrays, vector operations, FFT-compatible grids, and numerical statistics.
+- `scipy` is required for interpolation, detrending, polynomial filtering, FFT utilities if needed, and signal-processing support.
+- `numba` is optional scientifically but included because the real-data BP loop is computationally expensive: for each 10-s window the design loops over \(L_{\mathrm{mf}}\) and \(L\), both configured from 100 to 6000 km at 100 km spacing in `config.yaml`.
+
+---
+
+### 2. Tabular Data, Diagnostics, and Output Storage
+
+The pipeline stores interval-level geolocation results, diagnostics, monthly bins, and L1/L2 pairs.
+
+Required packages:
+
+```text
+pandas>=2.1.0
+pyarrow>=14.0.0
+```
+
+Logic:
+
+- `pandas` is used by `RealDataExperiments`, `F107Loader`, plotting routines, and result aggregation.
+- `pyarrow` is needed for efficient Parquet output from `ResultWriter`.
+- This supports `config.yaml` output requirements:
+  - `save_interval_results: true`
+  - `save_diagnostics: true`
+  - `save_monthly_maps: true`
+  - `save_l1_l2_histogram: true`
+
+---
+
+### 3. COSMIC-2 and Orbit File I/O
+
+The paper uses COSMIC-2 high-rate phase and amplitude/SNR data from POD antennas, plus receiver orbits and GNSS orbit/clock products.
+
+Required packages:
+
+```text
+xarray>=2023.12.0
+netCDF4>=1.6.5
+h5py>=3.10.0
+astropy>=6.0.0
+```
+
+Logic:
+
+- `xarray`, `netCDF4`, and `h5py` support reading CDAAC-style NetCDF/HDF scientific files.
+- `astropy` supports time handling and may assist with orbit/coordinate handling.
+- These are required by:
+  - `src/data/cosmic_loader.py`
+  - `src/data/orbit_loader.py`
+- They support the data configuration:
+  - `data.cosmic2.source`
+  - `data.cosmic2.data_type`
+  - `data.gnss.orbit_clock_source`
+  - `paths.cosmic2_hr_data_dir`
+  - `paths.receiver_orbit_dir`
+  - `paths.gnss_orbit_clock_dir`
+
+No package here should encode assumptions about exact CDAAC field names, because `config.yaml` explicitly lists those details as unclear from the paper.
+
+---
+
+### 4. Configuration and Validation
+
+The design requires `AppConfig.from_yaml(path)` and validated runtime settings.
+
+Required packages:
+
+```text
+pyyaml>=6.0.1
+pydantic>=2.5.0
+```
+
+Logic:
+
+- `pyyaml` reads `config.yaml`.
+- `pydantic` validates `AppConfig` fields such as:
+  - `sigma_phi_threshold_rad`
+  - `tangent_height_min_km`
+  - `bp_min_distance_km`
+  - `bp_max_distance_km`
+  - `bp_step_km`
+  - `mf_step_km`
+  - `q_threshold`
+  - `cos_alpha_threshold`
+  - `smoothing_window_km`
+  - `smoothing_poly_order`
+  - `map_bin_deg`
+  - `random_seed`
+
+This is important because downstream modules must not hard-code paper parameters that are already defined in `config.yaml`.
+
+---
+
+### 5. Coordinate and Geodetic Transformations
+
+The real-data method requires ECEF/geodetic conversions, local-time calculation, candidate LOS positions, tangent-point height, and final geolocation conversion.
+
+Required packages:
+
+```text
+pyproj>=3.6.0
+pymap3d>=3.0.0
+```
+
+Logic:
+
+- `pyproj` provides robust ellipsoid/geodetic transformations.
+- `pymap3d` provides convenient ECEF/geodetic and local-frame utilities.
+- These support:
+  - `CoordinateTransformer`
+  - `LosGeometry`
+  - `MagneticFieldModel`
+  - `BpPlaneBuilder`
+  - final conversion of:
+    \[
+    \mathbf{R}_{geo} = \mathbf{R}_{rx} + L\mathbf{n}_{rt}
+    \]
+    into latitude, longitude, and altitude.
+
+The sign convention of this equation is marked unclear in `config.yaml`; these packages support verification but should not decide the convention.
+
+---
+
+### 6. Magnetic-Field Model Support
+
+The paper uses IGRF-13 to define field-aligned irregularity orientation.
+
+Required package:
+
+```text
+ppigrf>=1.0.0
+```
+
+Logic:
+
+- `ppigrf` is used by `MagneticFieldModel`.
+- It supports:
+  - `data.magnetic_field.model: IGRF-13`
+  - `data.magnetic_field.use_field_direction_only: true`
+- The code should isolate the external API inside `src/geometry/magnetic_field.py` so that another IGRF-13-compatible package can replace it if needed.
+
+Only magnetic-field **direction** is needed for the BP plane. The magnitude must not affect geolocation logic.
+
+---
+
+### 7. Visualization
+
+The paper’s outputs include synthetic diagnostics, \(V(L)\), \(D(L)\), monthly maps, L1/L2 histograms, and F10.7 time series.
+
+Required packages:
+
+```text
+matplotlib>=3.8.0
+cartopy>=0.22.0
+```
+
+Logic:
+
+- `matplotlib` supports all diagnostic and result figures.
+- `cartopy` supports global geolocation maps analogous to the paper’s monthly 3° × 3° maps.
+- These are used by `src/visualization/plots.py`.
+- The plotting code should not perform scientific computation beyond displaying already-computed results.
+
+---
+
+### 8. Progress Reporting
+
+Large-scale COSMIC-2 processing may involve many high-rate occultation windows.
+
+Required package:
+
+```text
+tqdm>=4.66.0
+```
+
+Logic:
+
+- `tqdm` is used by `Geolocator.process_many` and real-data experiment loops.
+- This supports processing full 2021 and 2023 datasets specified in `config.yaml`.
+
+---
+
+### 9. Testing and Code Quality
+
+Required packages:
+
+```text
+pytest>=7.4.0
+ruff>=0.1.0
+```
+
+Logic:
+
+- `pytest` supports unit and regression tests for:
+  - phase-screen generation,
+  - propagation,
+  - \(V(L)\) minimum detection,
+  - \(Q\) computation,
+  - zero-crossing detection,
+  - coordinate/geolocation sign checks.
+- `ruff` supports linting and formatting consistency.
+
+These are important because the paper’s method contains several ambiguous implementation details, and tests should lock down the chosen reproducible behavior.
+
+---
+
+## Packages Not Required
+
+The configuration explicitly states:
+
+```yaml
+training:
+  applicable: false
+```
+
+Therefore `requirements.txt` should not include machine-learning packages such as:
+
+- `torch`
+- `tensorflow`
+- `jax`
+- `scikit-learn`
+
+The paper describes no training procedure, no optimizer, no neural model, and no learned parameters.
+
+The task also states:
+
+```text
+Required Other language third-party packages: No third-party dependencies required
+```
+
+Therefore no non-Python package list should be added to this project specification.
+
+---
+
+## Proposed `requirements.txt` Content
+
+The file should contain exactly the required Python dependencies with version lower bounds:
+
+```text
+numpy>=1.26.0
+scipy>=1.11.0
+pandas>=2.1.0
+pyarrow>=14.0.0
+xarray>=2023.12.0
+netCDF4>=1.6.5
+h5py>=3.10.0
+pyyaml>=6.0.1
+pydantic>=2.5.0
+tqdm>=4.66.0
+matplotlib>=3.8.0
+cartopy>=0.22.0
+pyproj>=3.6.0
+pymap3d>=3.0.0
+astropy>=6.0.0
+ppigrf>=1.0.0
+numba>=0.59.0
+pytest>=7.4.0
+ruff>=0.1.0
+```
+
+---
+
+## Reproducibility Notes
+
+1. The requirements file should not encode scientific constants such as:
+   - \(\sigma_\phi > 0.25\) rad,
+   - \(Q > 1.2\),
+   - \(\cos\alpha > 0.1\),
+   - BP range 100–6000 km,
+   - 100 km BP step,
+   - 10-s window length,
+   - synthetic \(p=1.5\),
+   - synthetic outer scale 10 km.
+
+   Those belong in `config.yaml` and `src/core/constants.py`.
+
+2. The dependency versions are lower bounds, not exact pins. This supports installation flexibility while preserving modern APIs.
+
+3. For fully frozen reproducibility, a later implementation may generate a lock file, but that is outside the current design and task scope.
+
+4. The requirements must support both run modes described by the design:
+   - synthetic validation mode,
+   - real COSMIC-2 processing mode.
+
+5. No project-internal modules should be referenced from `requirements.txt`.

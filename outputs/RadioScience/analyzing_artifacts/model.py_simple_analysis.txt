@@ -1,0 +1,135 @@
+Below is a detailed logic analysis—annotated in plain text—that explains how the BPModel class (in model.py) will be implemented. This analysis breaks down each method according to the paper’s methodology, the overall design, and the configuration provided in config.yaml. Use this as a guide when writing the actual code.
+
+──────────────────────────────
+1. BPModel Class – Overview
+
+The BPModel class is responsible for simulating radio wave propagation both in the forward direction (FP) and in the reverse “back‐propagation” (BP) mode. It also computes the normalized amplitude variance V(L) at different assumed distances L and applies geometry corrections to the observed COSMIC‑2 signal. It will use parameters from the configuration (e.g., spectral index p, outer scale l₀, sampling rate, rx_velocity, and integration parameters) and assume that the complex input signal is already preprocessed to be on a uniform spatial grid.
+
+The main instance variables (populated during initialization) include:
+• spectral_index (p) and outer_scale (l₀) – from config.simulation.phase_screen  
+• wave_number – computed as 2π/λ (the config string “2*pi / wavelength” must eventually be evaluated using a proper numerical value for wavelength, for example 0.19 m for L1)  
+• sampling_rate and rx_velocity (to determine spatial grid spacing)  
+• BP integration parameters (L_min_km, L_max_km, L_step_km)  
+• tx_rx_correction option (option 1 or 2) and any other constants
+
+──────────────────────────────
+2. forward_propagation(signal: np.ndarray) → np.ndarray
+
+Purpose:
+ Simulate the forward (FP) propagation of an incident plane wave through a phase screen having random phase fluctuations following a specified power spectrum.
+
+Logic Steps:
+ a. Define the incident wave:
+  – Assume a plane wave: u(x, z) = A₀ exp(i·k·x). Here “signal” may be the seed field or could be generated internally.
+ b. Generate a random phase screen S₀(z):
+  • Create a 1D spatial grid in z (the receiver coordinate) using the sampling_rate and the receiver velocity (rx_velocity km/s) to determine grid spacing (e.g., 40 m per sample when using 100 Hz and 4 km/s).
+  • Use an FFT‐based method:
+   – Compute the spatial frequencies (k_z) corresponding to the z grid.
+   – Define the power spectrum as: Φ(k_z) ∼ [k₀² + k_z²]^(–p/2), where k₀ = 2π/l₀ (with l₀ in km converted to the same length units as the grid).
+   – Generate random complex numbers (with appropriate Gaussian statistics) in the frequency domain scaled by √Φ(k_z).
+   – Apply an inverse FFT to obtain S₀(z) in the spatial domain.
+ c. Apply the phase screen to create the output field at x = x₀:
+  – Multiply the incident field by exp(i·k·S₀(z)); if needed, include any constant phase offset (e.g., add k·x₀).
+ d. Propagate the output field to the Rx position:
+  – Use the expansion of the wave field into plane waves. This can be done with a Fourier-based propagator:
+   • Compute FFT of u_out(z).
+   • Multiply by a propagation kernel (transfer function) that depends on L (the distance from the phase screen to Rx) and k_z. For example, using the Fresnel (parabolic) approximation kernel:
+    H(L, k_z) = exp[i·(k – sqrt(k² – k_z²))·L]  
+    (or an equivalent form; note approximations may be used)
+   • Inverse FFT to get the propagated field u(x, z) at Rx.
+ e. Return the simulated field (an np.ndarray of complex numbers) representing the FP result.
+
+──────────────────────────────
+3. back_propagation(signal: np.ndarray, L_range: np.ndarray) → np.ndarray
+
+Purpose:
+ For a given “corrected” observed signal (after geometry corrections), back propagate the field from Rx toward Tx through free space. Compute the field for a set of trial distances L in L_range so that later the minimum in the normalized amplitude variance V(L) indicates the location of the phase screen.
+
+Logic Steps:
+ a. The input “signal” is assumed to be the corrected complex field (after geometry corrections and on a uniform spatial (z) grid).
+ b. For each candidate propagation distance L (each value in L_range):
+  – Compute the “back-propagation” kernel. In the parabolic or Fresnel approximation, the kernel is similar to the FP kernel but with the propagation distance replaced by L:
+   H_bp(L, k_z) = exp[–i·(k – sqrt(k² – k_z²))·L]
+   (The negative sign indicates propagation “backward”.)
+  – Compute the FFT of the input signal.
+  – Multiply the FFT by H_bp(L, k_z) to simulate back propagation.
+  – Perform the inverse FFT to obtain the back propagated field at that distance L.
+ c. Store the back propagated field (or directly the computed amplitude, if that suffices) for each distance.
+ d. Return an array (or dictionary mapping L → field values) that represents the BP amplitude (complex field) as a function of L. This data will be used to compute V(L) (see compute_V).
+
+──────────────────────────────
+4. compute_V(signal: np.ndarray, L: float) → float
+
+Purpose:
+ Compute the normalized amplitude variance V(L) for a given back-propagated field at a particular trial distance L.
+
+Logic Steps:
+ a. From the back propagated complex field (for the chosen L), compute the amplitude A for each sample:
+  A = |u(z)| = abs(signal)
+ b. Compute the mean of the amplitude: mean_A = average(A)  
+ c. Compute the mean square of the amplitude: mean_A2 = average(A²)
+ d. Compute the normalized amplitude variance:
+  Option 1: V(L) = mean_A2 / (mean_A)²  
+  Option 2: In some formulations a “variance” might be defined as V(L) – 1; check the paper’s definition.
+ e. Return the computed V(L) as a float.
+
+Note: The paper uses the minimum in V(L) (after smoothing) as the indicator of the phase screen’s location.
+
+──────────────────────────────
+5. apply_geometry_corrections(signal: np.ndarray, tx: np.ndarray, rx: np.ndarray) → np.ndarray
+
+Purpose:
+ Apply the necessary geometric corrections to the observed COSMIC‑2 signal to account for the nonideal geometry (curved LEO trajectory, moving Tx, and wavefront curvature) so that the resulting signal is approximately “stationary” and can be used for BP.
+
+Logic Steps:
+ a. Input Parameters:
+  – “signal”: The observed (complex) signal.
+  – “tx”: Transmitter position vector [x₁, z₁] (or in full 3D if needed).
+  – “rx”: Receiver position vector [x₂, z₂] (or in full 3D).
+ b. Determine the reference (stationary) Tx position:
+  – Fix Tx at (x₁₀, 0) as described in the paper.
+ c. Compute the intersection point zₛ of the line joining Tx and Rx with the phase screen plane (set at x = 0):
+  – Use the relation (from the paper) that connects the Tx/Rx coordinates to the intersection height zₛ.
+ d. Apply one of two Tx/Rx correction options (controlled by config.tx_rx_correction.option):
+  Option 1: Keep x₂ unchanged.
+  Option 2: Replace x₂ with a fixed mid-point position (x₂₀) corresponding to the mid-interval Rx position.
+ e. Correct the z-coordinate:
+  – Replace z₂ by z₂′ computed as zₛ * (x₂′/x₁₀), where x₂′ is either x₂ (option 1) or x₂₀ (option 2).
+ f. Phase Correction:
+  – Compute the correction term to account for the finite Tx‑Rx distance and the associated wavefront curvature. According to the paper, add a quadratic phase term:
+   phase_correction = (z² * tan²(α)) / (2 * R)
+   where α is the scan angle (determined from the magnetic field and LOS geometry) and R is the Tx‑Rx distance.
+  – Add this phase term to the observed phase (i.e., adjust the complex exponential’s argument).
+ g. Projection onto the BP plane:
+  – Using the IGRF‑13 magnetic field information (assumed to be provided from an external module or utility), determine the orientation of the plasma irregularities.
+  – Project the corrected positions (and the corresponding signal) onto the BP plane. This involves scaling the spatial coordinate (e.g., z′ = z * cos(α)) to correctly represent the signal in the BP coordinate system.
+ h. Return the corrected signal (complex np.ndarray) that will serve as input for the BP processing.
+
+──────────────────────────────
+6. Additional Considerations
+
+• Numerical Integration & FFT Grid:
+ – In both forward_propagation and back_propagation, properly construct the spatial grid (using the rx_velocity and sampling_rate) and the corresponding FFT frequency bins for the z-dimension.
+ – Ensure that units are consistent (e.g., if outer_scale_km is given in km, convert to meters if needed alongside the wavelength).
+ – The integration step size and range in L (from config.integration) are used in the BP method to sample the propagation distance.
+
+• Smoothing and Noise:
+ – Although the smoothing of V(L) is applied later in Trainer (by way of the quality metric Q), pinpoint here that the computed V(L) for each candidate L might be noisy if the input signal has added thermal noise.
+ – The code should allow for parameter tuning (using config values) to control how many points or the width of the averaging window for computing mean amplitude moments.
+
+• Parameterization:
+ – All numerical constants, correction options, and integration ranges must be obtained from config.yaml.
+ – The BPModel should expose a transparent interface so that the Trainer and Evaluation modules can rely on correct outputs from each method.
+
+──────────────────────────────
+Summary
+
+In summary, the BPModel class will:
+ 1. Use forward_propagation to simulate how a plane wave is altered after passing through a phase screen with random phase fluctuations (with the power spectrum defined by p = 1.5 and l₀ = 10 km).  
+ 2. Use back_propagation to “invert” the propagation, computing the propagated field at various distances L using an FFT-based convolution with an appropriate kernel (adjusting the phase sign to effect back propagation).  
+ 3. Use compute_V to calculate the normalized amplitude variance V(L) from the amplitude of the back propagated field; the minimum of V(L) marks the estimated screen location.  
+ 4. Use apply_geometry_corrections to transform a real COSMIC‑2 HR signal into a form that is aligned to the BP plane. This includes Tx/Rx positional corrections, projection using the magnetic field orientation from IGRF‑13, and quadratic phase corrections for wavefront curvature.
+
+This structured, modular design follows the paper’s methodology and experimental setup and uses the configuration file as the sole source for tunable parameters, ensuring fidelity to the original study while allowing later adjustments through parameter tuning.
+
+Use the above analysis as inline documentation in model.py before writing actual Python code.

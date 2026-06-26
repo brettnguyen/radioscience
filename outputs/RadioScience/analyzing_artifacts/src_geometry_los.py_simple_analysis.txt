@@ -1,0 +1,921 @@
+## Logic Analysis: `src/geometry/los.py`
+
+### 1. Role of `LosGeometry`
+
+`src/geometry/los.py` implements the line-of-sight geometry layer used by both the magnetic-field BP-plane construction and the final geolocation conversion.
+
+According to the design, this module provides the class:
+
+```text
+class LosGeometry {
+    +__init__(transformer: CoordinateTransformer)
+    +midpoint_los(window: SignalWindow) Vector3
+    +candidate_position(window: SignalWindow, distance_km: float) Vector3
+    +tangent_height(window: SignalWindow) float
+    +geolocation_from_distance(window: SignalWindow, distance_km: float) tuple
+}
+```
+
+It depends only on:
+
+- `CoordinateTransformer`
+- shared core types:
+  - `Vector3`
+  - `StateVector`
+  - `SignalWindow`
+
+It should **not** perform BP, QC, magnetic-field evaluation, signal processing, or plotting.
+
+Its outputs are consumed by:
+
+- `BpPlaneBuilder.build(...)`
+- `Geolocator.make_result(...)`
+- `QualityController.passes_pre_bp(...)`, indirectly through the tangent height value.
+
+---
+
+## 2. Paper Alignment
+
+The paper’s real-data BP algorithm requires the following LOS operations:
+
+1. Use the Tx/Rx geometry at the midpoint of each 10-second interval.
+2. Define the line connecting GNSS transmitter and LEO receiver.
+3. Step along this LOS by candidate distances:
+   - BP distance grid: 100–6000 km
+   - magnetic-field candidate grid: 100–6000 km
+   - both with 100 km spacing, from `config.yaml`.
+4. Use candidate positions along the LOS to evaluate IGRF-13 magnetic-field direction.
+5. Reject intervals where the LOS tangent point is below 150 km, according to:
+
+```yaml
+processing:
+  tangent_point_filter:
+    min_height_km: 150
+```
+
+6. Convert the accepted BP distance into geodetic latitude, longitude, and altitude.
+
+The paper gives the final geolocation relation as:
+
+\[
+\mathbf{R}_{geo} = \mathbf{R}_{rx} + L \mathbf{n}_{rt}
+\]
+
+but the parsed text defines:
+
+\[
+\mathbf{n}_{rt} =
+\frac{\mathbf{R}_{rx} - \mathbf{R}_{tx}}
+{|\mathbf{R}_{rx} - \mathbf{R}_{tx}|}
+\]
+
+That vector points from transmitter to receiver, so adding it to receiver position would move the geolocation away from the transmitter. The configuration explicitly warns:
+
+```yaml
+back_propagation:
+  geolocation:
+    note: >
+      The sign convention must be verified during implementation so that the
+      geolocation lies along the receiver-transmitter line of sight.
+```
+
+Therefore, this module should implement the physically correct receiver-to-transmitter LOS unit vector:
+
+\[
+\hat{\mathbf{u}}_{rx\rightarrow tx}
+=
+\frac{\mathbf{R}_{tx} - \mathbf{R}_{rx}}
+{|\mathbf{R}_{tx} - \mathbf{R}_{rx}|}
+\]
+
+and use:
+
+\[
+\mathbf{R}_{candidate}
+=
+\mathbf{R}_{rx}
++
+L \hat{\mathbf{u}}_{rx\rightarrow tx}
+\]
+
+This ensures candidate points lie between receiver and transmitter for valid \(L\).
+
+---
+
+## 3. Unit Conventions
+
+This module must strictly follow the shared project convention:
+
+| Quantity | Unit |
+|---|---|
+| ECEF position vectors | meters |
+| StateVector position | meters |
+| StateVector velocity | meters per second |
+| Input `distance_km` | kilometers |
+| Internal LOS distance | meters |
+| Output tangent height | kilometers |
+| Output geodetic altitude | kilometers |
+| Latitude / longitude | degrees |
+
+Implementation must convert:
+
+\[
+L_m = 1000 \times L_{km}
+\]
+
+before applying distances to ECEF vectors.
+
+No BP-grid constants should be hard-coded inside `LosGeometry`; those are configured in:
+
+```yaml
+back_propagation:
+  distance_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+`LosGeometry` only receives a `distance_km` value and computes geometry.
+
+---
+
+## 4. Internal Geometry Convention
+
+### 4.1 Midpoint Receiver and Transmitter Positions
+
+For a `SignalWindow`, the midpoint time is:
+
+```text
+window.mid_time
+```
+
+The midpoint Tx and Rx positions should be derived from:
+
+```text
+window.rx_states
+window.tx_states
+```
+
+Each state contains:
+
+```text
+StateVector.time
+StateVector.position_m
+StateVector.velocity_mps
+```
+
+Recommended internal logic:
+
+1. If state vectors bracket `window.mid_time`, linearly interpolate the ECEF position to `mid_time`.
+2. If interpolation is not possible, select the state closest to `window.mid_time`.
+3. If no usable states are available, raise a clear error or return failure to the caller, depending on project-wide error policy.
+
+This method should be implemented internally as a private helper, not as an additional public API, because the design does not expose a public midpoint-position method.
+
+### 4.2 LOS Unit Vector
+
+The public method:
+
+```text
+midpoint_los(window: SignalWindow) Vector3
+```
+
+should return:
+
+\[
+\hat{\mathbf{u}} =
+\frac{
+\mathbf{R}_{tx,mid} - \mathbf{R}_{rx,mid}
+}{
+|\mathbf{R}_{tx,mid} - \mathbf{R}_{rx,mid}|
+}
+\]
+
+This is the receiver-to-transmitter LOS direction.
+
+This convention must be used consistently by:
+
+- `candidate_position(...)`
+- `geolocation_from_distance(...)`
+- `BpPlaneBuilder.build(...)`
+
+The implementation should avoid using the ambiguous parsed paper expression directly.
+
+---
+
+## 5. Method-by-Method Logic
+
+---
+
+# 5.1 `__init__(transformer: CoordinateTransformer)`
+
+### Purpose
+
+Store the coordinate transformer used for:
+
+- ECEF to geodetic conversion.
+- Potential geodetic altitude evaluation during tangent-height calculation.
+
+### Dependencies
+
+Uses:
+
+```text
+CoordinateTransformer.ecef_to_geodetic(position_m: Vector3) -> tuple
+```
+
+No configuration object is required by the design.
+
+### Logic
+
+- Save `transformer` as an instance attribute.
+- Do not initialize magnetic-field models, propagators, or config-derived QC thresholds here.
+
+---
+
+# 5.2 `midpoint_los(window: SignalWindow) -> Vector3`
+
+### Purpose
+
+Return the unit LOS vector at the midpoint of a 10-second interval.
+
+### Paper Relevance
+
+The paper defines the BP coordinate system using Tx and Rx positions at the midpoint of the interval used for BP.
+
+The configured processing interval is:
+
+```yaml
+processing:
+  window_seconds: 10
+```
+
+### Required Calculation
+
+1. Obtain midpoint receiver ECEF position:
+
+\[
+\mathbf{R}_{rx,mid}
+\]
+
+2. Obtain midpoint transmitter ECEF position:
+
+\[
+\mathbf{R}_{tx,mid}
+\]
+
+3. Compute:
+
+\[
+\mathbf{d}
+=
+\mathbf{R}_{tx,mid} - \mathbf{R}_{rx,mid}
+\]
+
+4. Normalize:
+
+\[
+\hat{\mathbf{u}} =
+\frac{\mathbf{d}}{|\mathbf{d}|}
+\]
+
+5. Return as `Vector3`.
+
+### Validation
+
+The norm of \(\mathbf{d}\) must be nonzero.
+
+If the Tx/Rx midpoint positions are identical or invalid, the method should raise a clear geometry error.
+
+### Sign Convention Check
+
+The returned vector must satisfy:
+
+\[
+\mathbf{R}_{rx,mid} + L\hat{\mathbf{u}}
+\]
+
+moves from receiver toward transmitter for positive \(L\).
+
+This is critical because candidate magnetic-field locations and final geolocations depend directly on this sign.
+
+---
+
+# 5.3 `candidate_position(window: SignalWindow, distance_km: float) -> Vector3`
+
+### Purpose
+
+Compute the ECEF position at distance \(L\) from the receiver toward the transmitter.
+
+Used by:
+
+```text
+BpPlaneBuilder.build(window, l_mf_km)
+```
+
+to evaluate IGRF-13 magnetic-field direction at candidate irregularity locations.
+
+### Required Calculation
+
+Using the midpoint receiver position and midpoint LOS unit vector:
+
+\[
+\mathbf{R}_{cand}
+=
+\mathbf{R}_{rx,mid}
++
+1000 L_{km} \hat{\mathbf{u}}_{rx\rightarrow tx}
+\]
+
+where:
+
+\[
+\hat{\mathbf{u}}_{rx\rightarrow tx}
+=
+\frac{\mathbf{R}_{tx,mid} - \mathbf{R}_{rx,mid}}
+{|\mathbf{R}_{tx,mid} - \mathbf{R}_{rx,mid}|}
+\]
+
+### Distance Source
+
+The `distance_km` input will normally come from:
+
+```yaml
+back_propagation:
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+But the method should not hard-code those values.
+
+### Segment Validity
+
+For physical validity, if:
+
+\[
+0 \le L_m \le |\mathbf{R}_{tx,mid} - \mathbf{R}_{rx,mid}|
+\]
+
+then the candidate lies between receiver and transmitter.
+
+Recommended validation:
+
+- Compute the Tx/Rx midpoint separation.
+- If `distance_km` is negative, reject immediately.
+- If `distance_km` exceeds the Tx/Rx separation, flag or raise an error because the candidate would lie beyond the transmitter.
+
+Because the configured maximum candidate distance is 6000 km, this should normally remain within the GNSS–LEO link distance, but the implementation should still verify the geometry rather than assume it.
+
+### Output
+
+Return the candidate ECEF position as `Vector3`.
+
+---
+
+# 5.4 `tangent_height(window: SignalWindow) -> float`
+
+### Purpose
+
+Estimate the minimum LOS tangent-point height for the 10-second interval.
+
+This value is used for pre-BP filtering.
+
+The configured threshold is:
+
+```yaml
+processing:
+  tangent_point_filter:
+    min_height_km: 150
+```
+
+The actual pass/fail check belongs in:
+
+```text
+QualityController.passes_pre_bp(...)
+```
+
+`LosGeometry.tangent_height(...)` should only compute the height.
+
+---
+
+## 5.4.1 Paper Requirement
+
+The paper states that COSMIC-2 scintillation observations are processed when the LOS tangent point height is above 150 km to avoid accidental tracking through the sporadic E layer.
+
+Therefore, this method should return the minimum tangent height over the 10-second window, not merely the receiver altitude or geolocation altitude.
+
+---
+
+## 5.4.2 Preferred Geometric Definition
+
+For each Tx/Rx state pair in the window, define the straight-line segment:
+
+\[
+\mathbf{P}(s)
+=
+\mathbf{R}_{rx}
++
+s(\mathbf{R}_{tx} - \mathbf{R}_{rx}),
+\qquad
+0 \le s \le 1
+\]
+
+The tangent point is the point along this segment with minimum altitude above the reference ellipsoid.
+
+The altitude is computed by:
+
+```text
+CoordinateTransformer.ecef_to_geodetic(Vector3)
+```
+
+which returns geodetic altitude.
+
+For each sample:
+
+\[
+h_{tan,sample}
+=
+\min_{0 \le s \le 1}
+h(\mathbf{P}(s))
+\]
+
+For the full 10-second window:
+
+\[
+h_{tan,window}
+=
+\min_{\text{samples}}
+h_{tan,sample}
+\]
+
+Return this value in kilometers.
+
+---
+
+## 5.4.3 Practical Implementation Options
+
+### Accurate option
+
+Use a bounded one-dimensional minimization over \(s \in [0,1]\) for each available Tx/Rx state pair.
+
+This is most faithful because the tangent height should be relative to the ellipsoid, not a perfect sphere.
+
+### Faster approximation
+
+Use an analytic closest-approach point to Earth center as an initial estimate, then evaluate geodetic altitude near that point.
+
+However, because the 150 km threshold is scientifically important, the accurate ellipsoid-based minimization is preferable unless performance becomes limiting.
+
+---
+
+## 5.4.4 State Pairing
+
+If `rx_states` and `tx_states` are aligned sample-by-sample, pair them by index.
+
+If they are not aligned, use nearest-time matching or interpolate before tangent-height calculation. Ideally this alignment should already be handled by `OrbitLoader.interpolate_rx_states(...)` and `OrbitLoader.interpolate_tx_states(...)`.
+
+### Expected Input State
+
+`CosmicLoader` / `OrbitLoader` should provide:
+
+```text
+window.rx_states
+window.tx_states
+```
+
+at the high-rate sample times or at least sufficiently dense times for each 10-second window.
+
+---
+
+## 5.4.5 Fallback Behavior
+
+If state vectors are missing but `window.tangent_height_km` already contains a finite value from the data product, the method may return that value.
+
+If neither state vectors nor a valid precomputed tangent height are available, the method should fail explicitly rather than silently returning an arbitrary value.
+
+---
+
+# 5.5 `geolocation_from_distance(window: SignalWindow, distance_km: float) -> tuple`
+
+### Purpose
+
+Convert an accepted BP geolocation distance into geodetic coordinates.
+
+Used by:
+
+```text
+Geolocator.make_result(...)
+```
+
+after `BackpropProcessor` and `QualityController` have identified a single accepted zero crossing of:
+
+\[
+D(L_{mf}) = L_0 - L_{mf}
+\]
+
+### Required Calculation
+
+Use the same physical convention as `candidate_position(...)`:
+
+\[
+\mathbf{R}_{geo}
+=
+\mathbf{R}_{rx,mid}
++
+1000 L_{km}
+\hat{\mathbf{u}}_{rx\rightarrow tx}
+\]
+
+where:
+
+\[
+\hat{\mathbf{u}}_{rx\rightarrow tx}
+=
+\frac{
+\mathbf{R}_{tx,mid} - \mathbf{R}_{rx,mid}
+}{
+|\mathbf{R}_{tx,mid} - \mathbf{R}_{rx,mid}|
+}
+\]
+
+Then convert:
+
+```text
+lat_deg, lon_deg, alt_m = CoordinateTransformer.ecef_to_geodetic(R_geo)
+```
+
+Return:
+
+```text
+(latitude_deg, longitude_deg, altitude_km)
+```
+
+where:
+
+\[
+altitude_{km} = altitude_m / 1000
+\]
+
+### Local Time
+
+This method should not compute local time unless the design is later expanded.
+
+The design places local time calculation in `CoordinateTransformer.local_time(...)`, used by `Geolocator` or real-data experiments.
+
+Monthly map filtering uses:
+
+```yaml
+processing:
+  local_time_filter:
+    enabled_for_monthly_maps: true
+    start_hour: 18
+    end_hour: 24
+    reference: "geolocation_longitude"
+```
+
+So `geolocation_from_distance(...)` must return longitude accurately for later local-time calculation.
+
+---
+
+## 6. Sign Convention Resolution
+
+This is the most important logic issue in this module.
+
+### Parsed Paper Expression
+
+The paper parse gives:
+
+\[
+\mathbf{n}_{rt}
+=
+\frac{\mathbf{R}_{rx} - \mathbf{R}_{tx}}
+{|\mathbf{R}_{rx} - \mathbf{R}_{tx}|}
+\]
+
+and:
+
+\[
+\mathbf{R}_{geo}
+=
+\mathbf{R}_{rx}
++
+L\mathbf{n}_{rt}
+\]
+
+Taken literally, this moves the point away from the transmitter.
+
+### Required Physical Convention
+
+The BP distance \(L\) is described throughout the paper as the distance from Rx to Tx along the LOS.
+
+Therefore, positive \(L\) must move from receiver toward transmitter:
+
+\[
+\mathbf{n}_{rx\rightarrow tx}
+=
+\frac{\mathbf{R}_{tx} - \mathbf{R}_{rx}}
+{|\mathbf{R}_{tx} - \mathbf{R}_{rx}|}
+\]
+
+### Implementation Rule
+
+Use:
+
+```text
+los_unit = (tx_mid - rx_mid).unit()
+candidate = rx_mid + distance_m * los_unit
+```
+
+### Validation Rule
+
+For any candidate point with \(0 < L < |\mathbf{R}_{tx} - \mathbf{R}_{rx}|\):
+
+\[
+(\mathbf{R}_{candidate} - \mathbf{R}_{rx})
+\cdot
+(\mathbf{R}_{tx} - \mathbf{R}_{rx})
+> 0
+\]
+
+and:
+
+\[
+|\mathbf{R}_{candidate} - \mathbf{R}_{rx}| \approx L
+\]
+
+Also:
+
+\[
+|\mathbf{R}_{candidate} - \mathbf{R}_{tx}|
+<
+|\mathbf{R}_{rx} - \mathbf{R}_{tx}|
+\]
+
+This confirms the candidate moved toward the transmitter.
+
+---
+
+## 7. Interaction with `BpPlaneBuilder`
+
+`BpPlaneBuilder.build(window, l_mf_km)` will call:
+
+```text
+LosGeometry.candidate_position(window, l_mf_km)
+```
+
+The returned candidate position is where:
+
+- IGRF-13 is evaluated.
+- The magnetic-field direction is projected onto the screen plane.
+- The BP plane orientation is defined.
+
+Therefore, if the LOS sign is wrong, the magnetic-field vector will be evaluated on the wrong side of the receiver, causing incorrect:
+
+- `BpPlaneGeometry.magnetic_unit`
+- `BpPlaneGeometry.z_axis`
+- `BpPlaneGeometry.cos_alpha`
+- final \(D(L_{mf})\) zero crossings.
+
+Thus, the sign convention must be validated before real-data processing.
+
+---
+
+## 8. Interaction with `Geolocator`
+
+`Geolocator.make_result(...)` will call:
+
+```text
+LosGeometry.geolocation_from_distance(window, distance_km)
+```
+
+The returned geodetic coordinates populate:
+
+```text
+GeolocationResult.latitude_deg
+GeolocationResult.longitude_deg
+GeolocationResult.altitude_km
+```
+
+Those values are later used for:
+
+- monthly 3° × 3° maps,
+- local-time filtering from 18–24 hr,
+- L1/L2 zonal difference comparison,
+- altitude diagnostics.
+
+The configured monthly map experiment expects:
+
+```yaml
+real_data_experiments:
+  monthly_l1_maps:
+    years:
+      - 2021
+      - 2023
+    bin_size_deg:
+      latitude: 3
+      longitude: 3
+```
+
+So longitude wrapping must be consistent with the plotting/binning convention.
+
+---
+
+## 9. Longitude Handling
+
+`LosGeometry` should rely on `CoordinateTransformer.ecef_to_geodetic(...)` to return longitude.
+
+However, the project should standardize longitude convention, likely either:
+
+- \([-180^\circ, 180^\circ)\), or
+- \([0^\circ, 360^\circ)\)
+
+For global monthly maps and L1/L2 zonal differences, \([-180^\circ, 180^\circ)\) is usually more convenient.
+
+If wrapping is needed, it should use the coordinate transformer’s existing longitude wrapping logic rather than implementing a separate convention inside `LosGeometry`.
+
+---
+
+## 10. Error Handling and Edge Cases
+
+### 10.1 Missing State Vectors
+
+If `window.rx_states` or `window.tx_states` are empty:
+
+1. If `window.tangent_height_km` is available and the caller only requested tangent height, return that value.
+2. For LOS, candidate position, or geolocation, fail explicitly because midpoint Tx/Rx positions are required.
+
+### 10.2 Invalid Distance
+
+Reject or flag:
+
+- negative `distance_km`,
+- NaN distance,
+- infinite distance,
+- distance larger than Tx/Rx separation.
+
+### 10.3 Degenerate Tx/Rx Geometry
+
+If:
+
+\[
+|\mathbf{R}_{tx} - \mathbf{R}_{rx}| = 0
+\]
+
+or numerically too small, the LOS unit vector is undefined.
+
+This should raise a geometry error.
+
+### 10.4 Tangent Minimum at Endpoint
+
+Sometimes the closest point on the Tx/Rx segment may occur at the receiver endpoint or transmitter endpoint, especially outside occultation geometry.
+
+This should not be treated as an error.
+
+The method should still return the minimum altitude over the segment.
+
+The QC stage will decide whether the tangent height passes the configured 150 km threshold.
+
+### 10.5 Geolocation Altitude Outliers
+
+The paper does not specify a final altitude QC filter. Therefore, `LosGeometry` should not reject geolocations based on altitude.
+
+Altitude outliers should be stored and analyzed downstream.
+
+---
+
+## 11. Recommended Internal Helper Logic
+
+The public design must not be changed, but private helpers are acceptable.
+
+Useful private helpers:
+
+### `_midpoint_positions(window)`
+
+Returns:
+
+```text
+(rx_mid: Vector3, tx_mid: Vector3)
+```
+
+by interpolating or selecting nearest states to `window.mid_time`.
+
+### `_position_at_time(states, target_time)`
+
+Returns a `Vector3`.
+
+### `_line_point(rx, tx, s)`
+
+Returns:
+
+\[
+rx + s(tx-rx)
+\]
+
+### `_altitude_km(position_m)`
+
+Uses:
+
+```text
+CoordinateTransformer.ecef_to_geodetic(...)
+```
+
+and converts altitude to km.
+
+### `_minimum_altitude_on_segment(rx, tx)`
+
+Computes:
+
+\[
+\min_{0 \le s \le 1} h(rx + s(tx-rx))
+\]
+
+These helpers should remain private to preserve the designed public interface.
+
+---
+
+## 12. Validation Tests for This Module
+
+Although tests are not part of the current file, the implementation should be written to satisfy these checks.
+
+### 12.1 LOS Unit Norm
+
+For a valid window:
+
+\[
+|\texttt{midpoint_los(window)}| = 1
+\]
+
+within numerical tolerance.
+
+### 12.2 Candidate Distance
+
+For a test distance \(L\):
+
+\[
+|\mathbf{R}_{cand} - \mathbf{R}_{rx,mid}| = 1000L
+\]
+
+### 12.3 Candidate Lies Toward Tx
+
+For valid \(L\):
+
+\[
+(\mathbf{R}_{cand} - \mathbf{R}_{rx,mid})
+\cdot
+(\mathbf{R}_{tx,mid} - \mathbf{R}_{rx,mid})
+> 0
+\]
+
+### 12.4 Candidate Between Rx and Tx
+
+If \(L\) is less than the midpoint Tx/Rx range:
+
+\[
+|\mathbf{R}_{cand} - \mathbf{R}_{tx,mid}|
+<
+|\mathbf{R}_{rx,mid} - \mathbf{R}_{tx,mid}|
+\]
+
+### 12.5 Geolocation Matches Candidate Position
+
+`geolocation_from_distance(...)` should internally use the same ECEF point as `candidate_position(...)`, followed by geodetic conversion.
+
+### 12.6 Tangent Height Consistency
+
+For a synthetic straight LOS with known closest approach, `tangent_height(...)` should recover the expected minimum altitude.
+
+### 12.7 Config Threshold Compatibility
+
+For windows with tangent height below:
+
+```yaml
+processing.tangent_point_filter.min_height_km = 150
+```
+
+`LosGeometry.tangent_height(...)` should return the low value, while `QualityController` performs the rejection.
+
+---
+
+## 13. Summary of Required Scientific Behavior
+
+`src/geometry/los.py` must implement the LOS geometry in a way that supports the paper’s BP geolocation algorithm:
+
+1. Use midpoint Tx/Rx geometry for each 10-second window.
+2. Define positive LOS distance from receiver toward transmitter.
+3. Compute candidate magnetic-field evaluation positions along that LOS.
+4. Estimate the minimum tangent-point height for sporadic-E avoidance.
+5. Convert accepted BP distance to geodetic latitude, longitude, and altitude.
+6. Preserve units:
+   - ECEF in meters,
+   - BP distances in kilometers,
+   - output altitude in kilometers.
+7. Resolve the paper’s sign ambiguity by enforcing that candidate geolocations lie between receiver and transmitter.
+
+This module is small but foundational: an incorrect LOS sign or tangent-height calculation would invalidate the magnetic-field orientation, scan-angle calculation, \(D(L_{mf})\) zero crossings, and final geolocation maps.

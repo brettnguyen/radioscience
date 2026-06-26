@@ -1,0 +1,919 @@
+## Logic Analysis: `src/experiments/real_data_experiments.py`
+
+### 1. Module Purpose
+
+`src/experiments/real_data_experiments.py` implements the paper’s real COSMIC-2 data experiments, not the synthetic propagation validation. It is the orchestration layer for applying the already-implemented geolocation pipeline to real high-rate COSMIC-2 scintillation windows.
+
+This module should contain the `RealDataExperiments` class exactly as specified in the design:
+
+```text
+class RealDataExperiments {
+    +__init__(config: AppConfig, loader: CosmicLoader, geolocator: Geolocator)
+    +process_year(year: int, signal: str) DataFrame
+    +process_l1_l2_period(start: date, end: date) DataFrame
+    +make_monthly_bins(results: DataFrame) DataFrame
+    +pair_l1_l2(l1_results: DataFrame, l2_results: DataFrame) DataFrame
+}
+```
+
+It must not implement low-level COSMIC-2 parsing, orbit interpolation, phase detrending, back propagation, magnetic-field geometry, or quality control directly. Those responsibilities belong to `CosmicLoader`, `Geolocator`, and the lower-level modules already defined in the design.
+
+Its scientific responsibilities are:
+
+1. Process annual COSMIC-2 high-rate data for a selected signal.
+2. Generate accepted geolocation tables for the paper’s monthly L1 map experiment.
+3. Filter accepted geolocations to post-sunset local time.
+4. Bin accepted geolocations into monthly `3° × 3°` latitude/longitude maps.
+5. Process the L1/L2 comparison period.
+6. Pair common L1/L2 geolocations.
+7. Compute L1–L2 zonal longitude differences in degrees.
+
+All values must come from `config.yaml` through `AppConfig` or from method arguments passed by `main.py` using `config.yaml`.
+
+---
+
+### 2. Paper and Configuration Alignment
+
+This module supports the paper’s Section 5 real-data experiments.
+
+#### 2.1 Monthly L1 Maps
+
+From `config.yaml`:
+
+```yaml
+real_data_experiments:
+  monthly_l1_maps:
+    enabled: true
+    years:
+      - 2021
+      - 2023
+    signal: "L1"
+    local_time_hours:
+      - 18
+      - 24
+    bin_size_deg:
+      latitude: 3
+      longitude: 3
+    expected_total_geolocations:
+      2021: 332000
+      2023: 1108000
+```
+
+The module must reproduce:
+
+- Full-year L1 processing for 2021.
+- Full-year L1 processing for 2023.
+- Accepted geolocations only.
+- Post-sunset local time only:
+  \[
+  18 \leq LT < 24
+  \]
+- Monthly maps binned into:
+  \[
+  3^\circ \times 3^\circ
+  \]
+- Expected accepted L1 geolocation counts:
+  - 2021: approximately `332000`
+  - 2023: approximately `1108000`
+
+The expected seasonal morphology is not enforced in code, but the output should allow downstream plotting and validation against the paper.
+
+#### 2.2 L1/L2 Comparison
+
+From `config.yaml`:
+
+```yaml
+signals:
+  l1_l2_comparison:
+    enabled: true
+    start_date: "2021-02-19"
+    end_date: "2021-03-01"
+    gps_l2_allowed:
+      - "L2C"
+    gps_l2_excluded:
+      - "L2P"
+```
+
+and:
+
+```yaml
+real_data_experiments:
+  l1_l2_comparison:
+    expected_counts:
+      l1_geolocations: 13000
+      l2_geolocations: 11000
+      common_l1_l2_cases: 8000
+    zonal_difference_histogram_bin_deg: 0.5
+```
+
+The module should process the body-text period:
+
+```text
+2021-02-19 to 2021-03-01
+```
+
+The abstract mentions a “2-month” comparison, but the body text provides the explicit dates. The configuration follows the body text, so this module should also follow the configuration.
+
+For GPS L2, the paper excludes L2P because semi-codeless tracking may become unstable under strong scintillation. Therefore:
+
+- Include GPS L2C.
+- Exclude GPS L2P.
+- Include other configured L2 signals only if they are available from `CosmicLoader` and are not excluded by configuration.
+
+Expected accepted counts:
+
+- L1 geolocations: approximately `13000`
+- L2 geolocations: approximately `11000`
+- Common paired L1/L2 cases: approximately `8000`
+
+The L1/L2 zonal difference histogram should use longitude differences in degrees with `0.5°` bins during plotting. This module should compute and return the longitude differences; plotting belongs to `Plotter.plot_l1_l2_histogram`.
+
+---
+
+### 3. Dependencies
+
+This module should depend only on:
+
+- `pandas`
+- `numpy` if needed for binning and longitude wrapping
+- `datetime.date`
+- `AppConfig`
+- `CosmicLoader`
+- `Geolocator`
+- `GeolocationResult` indirectly through `Geolocator`
+- GNSS wavelength constants from `src/core/constants.py`
+
+It must not call lower-level classes directly, such as:
+
+- `BackpropProcessor`
+- `StationaryCorrector`
+- `QualityController`
+- `BpPlaneBuilder`
+- `MagneticFieldModel`
+- `FftPropagator`
+
+Those are already composed inside `Geolocator`.
+
+---
+
+### 4. Class Initialization
+
+#### Method
+
+```text
+__init__(config: AppConfig, loader: CosmicLoader, geolocator: Geolocator)
+```
+
+#### Logic
+
+Store:
+
+- `self.config`
+- `self.loader`
+- `self.geolocator`
+
+No scientific computation should occur in `__init__`.
+
+The constructor should not read data files. Data access must happen inside `process_year` or `process_l1_l2_period`.
+
+---
+
+### 5. Signal-to-Wavelength Handling
+
+`Geolocator.process_window(window, wavelength_m)` requires the carrier wavelength.
+
+Because `process_year(year, signal)` may receive a generic signal selector such as `"L1"`, and COSMIC-2 data may include both GPS and GLONASS, the wavelength should be selected per `SignalWindow`, using:
+
+- `window.constellation`
+- `window.signal_name`
+
+This is important because GPS L1 and GLONASS L1 are not necessarily identical in carrier frequency. The implementation should use constants defined in `src/core/constants.py`.
+
+The logic should be:
+
+1. Inspect `window.constellation`.
+2. Inspect `window.signal_name`.
+3. Resolve wavelength from shared constants.
+4. Pass that wavelength to:
+   ```text
+   self.geolocator.process_window(window, wavelength_m)
+   ```
+
+If the wavelength cannot be resolved, the implementation should not silently use GPS L1 as a fallback. It should either:
+
+- raise a clear data/configuration error, or
+- return a rejected-style result if a safe project convention for that exists.
+
+Since `Geolocator` owns rejected `GeolocationResult` construction for scientific QC, this module should preferably fail early with a clear error for unsupported signal metadata.
+
+---
+
+### 6. `process_year(year: int, signal: str)`
+
+#### Purpose
+
+Process all COSMIC-2 high-rate windows for one year and one signal selector.
+
+Used for:
+
+- 2021 L1 monthly maps
+- 2023 L1 monthly maps
+- possible L1/L2 period processing after date filtering
+
+#### Inputs
+
+```text
+year: int
+signal: str
+```
+
+Examples from configuration:
+
+```text
+year = 2021
+signal = "L1"
+```
+
+```text
+year = 2023
+signal = "L1"
+```
+
+#### Expected Data Source
+
+Use only the design-provided loader method:
+
+```text
+self.loader.iter_windows(year, signal)
+```
+
+This returns an iterator of `SignalWindow`.
+
+The implementation should not directly call file readers or xarray/netCDF APIs here.
+
+#### Per-Window Processing Logic
+
+For each `SignalWindow`:
+
+1. Resolve wavelength from `window.constellation` and `window.signal_name`.
+2. Call:
+   ```text
+   self.geolocator.process_window(window, wavelength_m)
+   ```
+3. Convert the returned `GeolocationResult` to a dictionary using the existing interface:
+   ```text
+   result.to_dict()
+   ```
+4. Append the dictionary to an in-memory list.
+
+At the end:
+
+```text
+return pandas.DataFrame(result_dicts)
+```
+
+#### Important Behavior
+
+The returned DataFrame should include both accepted and rejected results, because `config.yaml` requests logging rejection reasons:
+
+```yaml
+reproducibility:
+  log_rejection_reasons: true
+  log_multivalued_cases: true
+  log_processing_statistics: true
+```
+
+The monthly binning step will later filter:
+
+```text
+accepted == true
+```
+
+Keeping rejected rows is useful for reproducing processing statistics, including:
+
+- number of windows failing `sigma_phi > 0.25 rad`
+- number failing tangent height `>150 km`
+- number rejected for low `Q`
+- number rejected for `cos(alpha) <= 0.1`
+- number discarded as multi-valued
+
+#### Scientific QC Location
+
+This method must not reimplement QC thresholds. The thresholds are already applied by `Geolocator` and lower-level classes using configuration values:
+
+- `sigma_phi_threshold_rad: 0.25`
+- `tangent_point_filter.min_height_km: 150`
+- `q_threshold: 1.2`
+- `cos_alpha_threshold: 0.1`
+- `require_single_valued_geolocation: true`
+
+`process_year` only orchestrates processing.
+
+---
+
+### 7. `make_monthly_bins(results: DataFrame)`
+
+#### Purpose
+
+Convert accepted geolocation results into monthly post-sunset `3° × 3°` latitude/longitude bin counts, matching Figure 21-style products in the paper.
+
+#### Input
+
+A DataFrame returned by `process_year`.
+
+Expected columns come from `GeolocationResult.to_dict()` and should include at least:
+
+- `accepted`
+- `mid_time`
+- `latitude_deg`
+- `longitude_deg`
+- `local_time_hr`
+- `signal_name`
+- `distance_km`
+- `q`
+- `cos_alpha`
+- `is_multivalued`
+
+#### Filtering Logic
+
+Apply filters in this order:
+
+1. Accepted geolocations only:
+   ```text
+   accepted == true
+   ```
+
+2. Valid geolocation coordinates:
+   ```text
+   latitude_deg is finite
+   longitude_deg is finite
+   ```
+
+3. Post-sunset local time from configuration:
+   ```text
+   18 <= local_time_hr < 24
+   ```
+
+The local-time reference in `config.yaml` is:
+
+```yaml
+processing:
+  local_time_filter:
+    reference: "geolocation_longitude"
+```
+
+Therefore this module should use the `local_time_hr` already computed by `Geolocator.make_result`. It should not recompute local time independently.
+
+#### Monthly Extraction
+
+Extract:
+
+```text
+year = mid_time.year
+month = mid_time.month
+```
+
+from the `mid_time` column.
+
+If `mid_time` is stored as string after DataFrame construction, convert using `pandas.to_datetime`.
+
+#### Longitude Handling
+
+Longitude should be wrapped consistently, preferably to:
+
+```text
+[-180, 180)
+```
+
+before binning.
+
+This avoids binning inconsistencies around the dateline.
+
+#### Bin Size
+
+Use the configured bin size:
+
+```yaml
+real_data_experiments:
+  monthly_l1_maps:
+    bin_size_deg:
+      latitude: 3
+      longitude: 3
+```
+
+or the flattened `AppConfig.map_bin_deg` if the implementation exposes a single bin-size field.
+
+Do not hard-code `3`.
+
+#### Bin Edges
+
+Latitude bins:
+
+```text
+[-90, -87, -84, ..., 87, 90]
+```
+
+Longitude bins:
+
+```text
+[-180, -177, -174, ..., 177, 180]
+```
+
+The output should contain one row per populated bin, not necessarily all empty bins.
+
+#### Output DataFrame Schema
+
+Recommended output columns:
+
+```text
+year
+month
+lat_bin_min
+lat_bin_max
+lat_bin_center
+lon_bin_min
+lon_bin_max
+lon_bin_center
+count
+```
+
+This format is convenient for `Plotter.plot_monthly_maps`.
+
+#### Scientific Alignment
+
+The monthly bins should be directly usable to reproduce the paper’s Figure 21:
+
+- monthly maps
+- L1 only
+- post-sunset 18–24 local time
+- `3° × 3°` bin counts
+- years 2021 and 2023
+
+---
+
+### 8. `process_l1_l2_period(start: date, end: date)`
+
+#### Purpose
+
+Process the L1/L2 comparison period and return paired common geolocation cases with L1–L2 zonal differences.
+
+#### Inputs
+
+```text
+start: date
+end: date
+```
+
+These should be passed by `main.py` from `config.yaml`:
+
+```yaml
+signals:
+  l1_l2_comparison:
+    start_date: "2021-02-19"
+    end_date: "2021-03-01"
+```
+
+#### Date Range Convention
+
+Use a consistent date convention. The safest reproducible convention is:
+
+```text
+start <= window.mid_time.date() < end
+```
+
+That is, start inclusive, end exclusive.
+
+This avoids double-counting if multiple period runs are concatenated.
+
+The expected paper counts should be used as validation:
+
+- L1: approximately `13000`
+- L2: approximately `11000`
+- paired common cases: approximately `8000`
+
+If counts are systematically low or high, the inclusive/exclusive interpretation should be documented and tested.
+
+#### Processing Logic
+
+1. Determine year range from `start` and `end`.
+2. For each relevant year:
+   - Get L1 windows using:
+     ```text
+     self.loader.iter_windows(year, "L1")
+     ```
+   - Filter windows by `window.mid_time` within `[start, end)`.
+   - Process using `self.geolocator.process_window`.
+
+3. For L2:
+   - Process only allowed L2 signals from configuration.
+   - For GPS, include `L2C`.
+   - Exclude `L2P`.
+   - If the loader exposes generic `"L2"` windows, filter out GPS `L2P` using `window.signal_name`.
+
+4. Convert L1 and L2 result lists into DataFrames.
+
+5. Filter to accepted geolocations before pairing:
+   ```text
+   accepted == true
+   ```
+
+6. Pair with:
+   ```text
+   self.pair_l1_l2(l1_results, l2_results)
+   ```
+
+7. Return the paired DataFrame.
+
+#### Important Constraint
+
+Do not pair rejected results. The paper’s common set refers to successful geolocations obtained independently from L1 and L2.
+
+---
+
+### 9. `pair_l1_l2(l1_results: DataFrame, l2_results: DataFrame)`
+
+#### Purpose
+
+Find common L1/L2 geolocation cases and compute zonal geolocation differences.
+
+#### Input DataFrames
+
+Both input DataFrames should contain accepted geolocation rows from `GeolocationResult.to_dict()`.
+
+Required columns:
+
+```text
+event_id
+leo_id
+gnss_id
+signal_name
+mid_time
+accepted
+latitude_deg
+longitude_deg
+altitude_km
+distance_km
+q
+cos_alpha
+```
+
+#### Pairing Keys
+
+The paper pairs geolocations obtained from the same observation interval. Given the available `GeolocationResult` design, the pairing key should use:
+
+```text
+event_id
+leo_id
+gnss_id
+mid_time
+```
+
+If `mid_time` precision differs between L1 and L2 due to data formatting, normalize it to the 10-second processing window before pairing. The configured window length is:
+
+```yaml
+processing:
+  window_seconds: 10
+```
+
+This normalization should use the configured window length and not a hard-coded value.
+
+Do not use fields that are not present in `GeolocationResult`.
+
+#### Accepted Rows Only
+
+Before merging:
+
+```text
+l1 = l1_results[l1_results.accepted == True]
+l2 = l2_results[l2_results.accepted == True]
+```
+
+Multi-valued rows should already be rejected by `Geolocator`, because configuration requires:
+
+```yaml
+back_propagation:
+  quality_control:
+    require_single_valued_geolocation: true
+    discard_multivalued_geolocations: true
+```
+
+#### Merge Logic
+
+Perform an inner join on the pairing keys:
+
+```text
+event_id
+leo_id
+gnss_id
+mid_time_key
+```
+
+Use suffixes:
+
+```text
+_l1
+_l2
+```
+
+#### Zonal Difference
+
+The paper’s histogram uses L1–L2 zonal geolocation differences in degrees.
+
+Compute:
+
+\[
+\Delta \lambda = \lambda_{L1} - \lambda_{L2}
+\]
+
+Then wrap to:
+
+```text
+[-180, 180)
+```
+
+Recommended formula:
+
+```text
+delta = ((lon_l1 - lon_l2 + 180) % 360) - 180
+```
+
+Store as:
+
+```text
+zonal_difference_deg
+```
+
+No conversion to kilometers should be used for the paper’s Figure 23 histogram, because the paper states the histogram uses degrees with `0.5°` bins.
+
+#### Optional Diagnostic Differences
+
+The paired DataFrame may also include:
+
+```text
+lat_difference_deg = latitude_deg_l1 - latitude_deg_l2
+altitude_difference_km = altitude_km_l1 - altitude_km_l2
+distance_difference_km = distance_km_l1 - distance_km_l2
+```
+
+These are useful diagnostics, but the core paper comparison is the zonal longitude difference.
+
+#### Expected Output
+
+The paired DataFrame should support:
+
+- map of paired L1/L2 geolocations
+- histogram of `zonal_difference_deg`
+- validation of common count around `8000`
+
+---
+
+### 10. Rejection and Processing Statistics
+
+Although this module does not perform QC itself, it should preserve enough information for downstream statistics.
+
+For annual and L1/L2 runs, the returned DataFrames should allow computation of:
+
+```text
+total_windows
+accepted_count
+rejected_count
+rejection_reason counts
+multivalued_count
+low_q_count
+low_cos_alpha_count
+```
+
+These are needed because `config.yaml` requests:
+
+```yaml
+reproducibility:
+  log_rejection_reasons: true
+  log_multivalued_cases: true
+  log_processing_statistics: true
+```
+
+The module may compute summaries internally for logging, but persistence should be handled by `ResultWriter` in `main.py`.
+
+---
+
+### 11. Validation Targets
+
+#### 11.1 Annual L1 Processing
+
+After calling:
+
+```text
+process_year(2021, "L1")
+process_year(2023, "L1")
+```
+
+and then:
+
+```text
+make_monthly_bins(results)
+```
+
+the accepted post-QC geolocation totals should be approximately:
+
+```text
+2021: 332000
+2023: 1108000
+```
+
+Differences may occur because of:
+
+- COSMIC-2 product version
+- detrending implementation
+- precise L1 signal selection
+- data availability
+- GNSS orbit/clock differences
+- whether GLONASS phase is already connected
+- FFT versus Kirchhoff implementation choice
+
+These differences should be documented, not hidden.
+
+#### 11.2 Monthly Morphology
+
+The output should allow downstream plots to show:
+
+- December–January activity mainly in American/Atlantic longitudes.
+- May–July maxima in African and Pacific sectors.
+- September–October activity across most longitudes.
+- Higher activity in 2023 than 2021.
+
+This module only produces binned counts; visual validation belongs to `Plotter`.
+
+#### 11.3 L1/L2 Comparison
+
+After:
+
+```text
+process_l1_l2_period(date(2021, 2, 19), date(2021, 3, 1))
+```
+
+expected accepted counts are approximately:
+
+```text
+L1: 13000
+L2: 11000
+common paired: 8000
+```
+
+The paired `zonal_difference_deg` distribution should be centered near zero.
+
+---
+
+### 12. Edge Cases
+
+#### 12.1 Empty Data
+
+If no windows are found for a year/signal, return an empty DataFrame with a stable schema if possible.
+
+Do not crash during monthly binning; `make_monthly_bins` should return an empty DataFrame with expected bin columns.
+
+#### 12.2 Missing Columns
+
+If `make_monthly_bins` or `pair_l1_l2` is called with DataFrames missing required columns, raise a clear error.
+
+Examples:
+
+```text
+missing required column: accepted
+missing required column: local_time_hr
+missing required column: longitude_deg
+```
+
+Silent failure would make reproduction unreliable.
+
+#### 12.3 NaN Coordinates
+
+Rejected geolocations may have NaN coordinates. These must be filtered out before binning or pairing.
+
+#### 12.4 Longitude Dateline
+
+Always wrap longitude before:
+
+- binning
+- zonal L1/L2 difference calculation
+
+This avoids artificial ±360° differences.
+
+#### 12.5 Duplicate Pairing Keys
+
+Ideally, each paired key is unique after filtering to accepted rows. If duplicates occur, likely causes include:
+
+- multiple antennas,
+- duplicate event IDs,
+- overlapping windows,
+- signal metadata ambiguity.
+
+Since `GeolocationResult` does not expose antenna, the implementation should detect duplicate keys and handle them deterministically or raise a warning/error. The preferred scientific behavior is to avoid arbitrary pairing.
+
+---
+
+### 13. Recommended Pseudocode Structure
+
+#### `process_year`
+
+```text
+results = []
+
+for window in self.loader.iter_windows(year, signal):
+    wavelength_m = resolve_wavelength(window.constellation, window.signal_name)
+    result = self.geolocator.process_window(window, wavelength_m)
+    results.append(result.to_dict())
+
+return pandas.DataFrame(results)
+```
+
+#### `make_monthly_bins`
+
+```text
+df = results.copy()
+df = df[df["accepted"] == True]
+df = df[finite latitude/longitude]
+df = df[(df["local_time_hr"] >= 18) & (df["local_time_hr"] < 24)]
+
+df["mid_time"] = pandas.to_datetime(df["mid_time"])
+df["year"] = df["mid_time"].dt.year
+df["month"] = df["mid_time"].dt.month
+df["longitude_wrapped"] = wrap_to_180(df["longitude_deg"])
+
+assign latitude bins using configured 3 degree size
+assign longitude bins using configured 3 degree size
+
+group by year, month, lat bin, lon bin
+count rows
+
+return binned DataFrame
+```
+
+#### `process_l1_l2_period`
+
+```text
+l1_results = process configured L1 windows in period
+l2_results = process configured L2/L2C windows in period, excluding GPS L2P
+
+l1_df = DataFrame(l1_results)
+l2_df = DataFrame(l2_results)
+
+pairs = self.pair_l1_l2(l1_df, l2_df)
+
+return pairs
+```
+
+#### `pair_l1_l2`
+
+```text
+l1 = l1_results[l1_results["accepted"] == True]
+l2 = l2_results[l2_results["accepted"] == True]
+
+normalize mid_time to configured 10-second key
+
+merge inner on:
+    event_id
+    leo_id
+    gnss_id
+    mid_time_key
+
+compute zonal_difference_deg =
+    wrap_to_180(longitude_deg_l1 - longitude_deg_l2)
+
+return paired DataFrame
+```
+
+---
+
+### 14. What This Module Must Not Do
+
+`real_data_experiments.py` must not:
+
+1. Parse netCDF/HDF COSMIC-2 files directly.
+2. Interpolate orbits directly.
+3. Compute scintillation indices directly.
+4. Apply BP directly.
+5. Compute magnetic-field vectors directly.
+6. Apply QC thresholds directly, except for experiment-level filters such as accepted-only and post-sunset local time.
+7. Hard-code paper constants that are present in `config.yaml`.
+8. Invent alternate L1/L2 periods.
+9. Include GPS L2P in the L1/L2 comparison.
+10. Convert zonal L1/L2 difference to kilometers for the paper histogram.
+
+---
+
+### 15. Summary
+
+`src/experiments/real_data_experiments.py` is a high-level experiment orchestration module. It should faithfully implement the paper’s real-data experiments by using the configured COSMIC-2 years, signals, local-time range, bin size, and L1/L2 comparison period.
+
+The core flow is:
+
+1. Load `SignalWindow` objects from `CosmicLoader`.
+2. Resolve the correct GNSS wavelength.
+3. Process each window through `Geolocator`.
+4. Return complete result tables.
+5. Filter accepted post-sunset geolocations.
+6. Bin monthly maps at `3° × 3°`.
+7. Process and pair L1/L2 accepted geolocations.
+8. Compute longitude-based zonal differences in degrees.
+
+This module should produce the tabular inputs needed to reproduce the paper’s Figure 21 monthly maps and Figure 23 L1/L2 comparison while leaving plotting and file writing to `Plotter` and `ResultWriter`.

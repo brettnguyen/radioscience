@@ -1,0 +1,1068 @@
+## Logic Analysis: `src/geolocation/qc.py`
+
+### 1. Purpose and Scope
+
+`src/geolocation/qc.py` implements the `QualityController` class defined in the design. This module contains the quality-control and curve-analysis logic required by the COSMIC-2 back-propagation geolocation algorithm.
+
+It must reproduce the paper’s QC methodology for:
+
+1. Pre-back-propagation filtering of 10-second scintillation windows.
+2. Smoothing and analyzing back-propagated amplitude-variance curves \(V(L)\).
+3. Detecting valid global local minima of \(V(L)\).
+4. Computing the minimum-depth metric \(Q\).
+5. Detecting zero crossings of:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+6. Rejecting multi-valued or low-quality geolocations.
+
+This module should not perform propagation, geometry construction, magnetic-field evaluation, or geolocation coordinate conversion. It only evaluates QC criteria and curve properties.
+
+---
+
+## 2. Required Class and Public Interface
+
+Follow the design exactly.
+
+```text
+class QualityController {
+    +__init__(config: AppConfig)
+    +passes_pre_bp(metrics: ScintillationMetrics, tangent_height_km: float) tuple
+    +smooth_v_curve(distances_km: ndarray, v_raw: ndarray) ndarray
+    +find_global_local_minimum(distances_km: ndarray, v_smooth: ndarray) tuple
+    +compute_q(distances_km: ndarray, v_smooth: ndarray, l0_km: float) tuple
+    +find_zero_crossings(d_curve: DCurve) list~float~
+    +passes_final(result: GeolocationResult) tuple
+}
+```
+
+No additional public methods should be required by other modules. Any helper routines should be private implementation details.
+
+---
+
+## 3. Configuration Dependencies
+
+All thresholds and method settings must come from `config.yaml`, mapped through `AppConfig`.
+
+Relevant configuration values are:
+
+### Pre-BP QC
+
+From:
+
+```yaml
+processing:
+  scintillation_indices:
+    sigma_phi_threshold_rad: 0.25
+
+  tangent_point_filter:
+    min_height_km: 150
+```
+
+Used as:
+
+- `config.sigma_phi_threshold_rad`
+- `config.tangent_height_min_km`
+
+The paper requires:
+
+\[
+\sigma_\phi > 0.25 \ \mathrm{rad}
+\]
+
+and:
+
+\[
+h_{\tan} > 150 \ \mathrm{km}
+\]
+
+Strictly use greater-than comparisons, because the paper states “greater than” and “above”.
+
+---
+
+### \(V(L)\) Smoothing
+
+From:
+
+```yaml
+back_propagation:
+  v_curve:
+    smoothing:
+      enabled: true
+      method: "second_order_sliding_polynomial_regression"
+      window_km: 1000
+      polynomial_order: 2
+```
+
+Used as:
+
+- `config.smoothing_window_km`
+- `config.smoothing_poly_order`
+
+The paper specifies:
+
+- second-order sliding polynomial regression,
+- 1000 km window.
+
+---
+
+### Minimum Detection
+
+From:
+
+```yaml
+back_propagation:
+  minimum_detection:
+    require_global_local_minimum: true
+    reject_endpoint_minimum: true
+    min_l1_samples: 2
+    min_l2_samples: 2
+    sample_spacing_km: 100
+```
+
+Used to enforce:
+
+\[
+L_1 \geq 2 \times 100 \ \mathrm{km}
+\]
+
+\[
+L_2 \geq 2 \times 100 \ \mathrm{km}
+\]
+
+or equivalently:
+
+\[
+L_1 \geq 200 \ \mathrm{km}
+\]
+
+\[
+L_2 \geq 200 \ \mathrm{km}
+\]
+
+The values must come from config, not be hard-coded.
+
+---
+
+### Final QC
+
+From:
+
+```yaml
+back_propagation:
+  quality_control:
+    q_threshold: 1.2
+    cos_alpha_threshold: 0.1
+    require_single_valued_geolocation: true
+    discard_multivalued_geolocations: true
+```
+
+Used as:
+
+- `config.q_threshold`
+- `config.cos_alpha_threshold`
+
+The final accepted geolocation must satisfy:
+
+\[
+Q > 1.2
+\]
+
+\[
+\cos\alpha > 0.1
+\]
+
+and must be single-valued.
+
+---
+
+## 4. Method Logic
+
+---
+
+# 4.1 `__init__(config: AppConfig)`
+
+### Responsibility
+
+Store the configuration object and expose the QC thresholds internally.
+
+### Inputs
+
+- `config: AppConfig`
+
+### Internal Values
+
+Use config-derived fields only:
+
+- `sigma_phi_threshold_rad`
+- `tangent_height_min_km`
+- `smoothing_window_km`
+- `smoothing_poly_order`
+- `bp_step_km`
+- `q_threshold`
+- `cos_alpha_threshold`
+
+### Notes
+
+No scientific constants should be hard-coded here. Machine precision safeguards, such as `np.finfo(float).eps`, are acceptable numerical protections, not scientific thresholds.
+
+---
+
+# 4.2 `passes_pre_bp(metrics, tangent_height_km)`
+
+### Purpose
+
+Apply the paper’s two pre-back-propagation filters.
+
+The paper states that BP is applied only when:
+
+1. Phase scintillation exceeds threshold:
+
+\[
+\sigma_\phi > 0.25 \ \mathrm{rad}
+\]
+
+2. LOS tangent point is above 150 km:
+
+\[
+h_{\tan} > 150 \ \mathrm{km}
+\]
+
+### Inputs
+
+- `metrics: ScintillationMetrics`
+  - uses `metrics.sigma_phi_rad`
+- `tangent_height_km: float`
+
+### Output
+
+Return a tuple:
+
+```text
+(bool_passed, rejection_reason)
+```
+
+Recommended rejection reasons:
+
+- `"sigma_phi_below_threshold"`
+- `"tangent_height_below_threshold"`
+- `"invalid_pre_bp_metrics"`
+- `"passed"`
+
+### Logic
+
+1. Verify `metrics.sigma_phi_rad` is finite.
+2. Verify `tangent_height_km` is finite.
+3. Reject if:
+
+\[
+\sigma_\phi \leq \text{config.sigma_phi_threshold_rad}
+\]
+
+4. Reject if:
+
+\[
+h_{\tan} \leq \text{config.tangent_height_min_km}
+\]
+
+5. Otherwise pass.
+
+### Important Detail
+
+Use strict greater-than logic for passing:
+
+```text
+sigma_phi_rad > threshold
+tangent_height_km > threshold
+```
+
+because the paper explicitly uses “greater than” and “above”.
+
+---
+
+# 4.3 `smooth_v_curve(distances_km, v_raw)`
+
+### Purpose
+
+Smooth the discrete \(V(L)\) curve before minimum-depth analysis.
+
+The paper states:
+
+> “To reduce this effect, we apply smoothing of \(V(L)\) by 2nd order sliding polynomial regression in a 1,000 km window.”
+
+This smoothing should reduce noise-driven false termination of the monotonic increase around \(L_0\), while preserving the approximate location of \(L_0\).
+
+### Inputs
+
+- `distances_km: ndarray`
+  - BP distance grid, expected from config:
+    - 100 km to 6000 km
+    - 100 km step
+- `v_raw: ndarray`
+  - raw normalized BP amplitude variance values
+
+### Output
+
+- `v_smooth: ndarray`
+
+Same shape as `v_raw`.
+
+### Required Formula for \(V(L)\)
+
+This method does not compute \(V(L)\), but it smooths values already computed as:
+
+\[
+V(L) = \frac{\langle A^2\rangle}{\langle A\rangle^2} - 1
+\]
+
+### Smoothing Logic
+
+Use local polynomial regression:
+
+1. For each distance point \(L_i\), select neighboring samples within the configured smoothing window.
+2. The window is:
+
+\[
+\text{config.smoothing_window_km} = 1000 \ \mathrm{km}
+\]
+
+3. With 100 km spacing, this corresponds to approximately 11 points:
+   - 5 points below,
+   - center point,
+   - 5 points above.
+
+4. Fit a polynomial of configured order:
+
+\[
+\text{config.smoothing_poly_order} = 2
+\]
+
+5. Evaluate the fitted polynomial at the center point \(L_i\).
+
+### Edge Handling
+
+At the beginning and end of the distance array:
+
+- Use the available points inside the window.
+- Require at least `poly_order + 1` finite points to fit.
+- If there are not enough valid points, return the raw value at that location.
+
+### Invalid Values
+
+If `v_raw` contains NaN or infinite values:
+
+- Exclude invalid samples from each local fit.
+- If too few valid samples remain, preserve NaN or raw value consistently.
+- Do not fabricate valid curve values where propagation failed.
+
+### Implementation Options
+
+A manual sliding polynomial fit is safest because it directly implements the paper’s “sliding polynomial regression” and works even if a future distance grid is not perfectly uniform.
+
+`scipy.signal.savgol_filter` is acceptable only if:
+
+- the grid is uniform,
+- the window length is derived from config,
+- the polynomial order is config-derived,
+- edge behavior is documented.
+
+---
+
+# 4.4 `find_global_local_minimum(distances_km, v_smooth)`
+
+### Purpose
+
+Find the global local minimum of the smoothed \(V(L)\) curve for one fixed BP-plane orientation.
+
+For each magnetic-field candidate distance \(L_{\mathrm{mf}}\), the inner loop produces \(V(L)\). The paper searches for:
+
+- the global local minimum \(V_0\),
+- its distance \(L_0\),
+- while ensuring that the minimum is not at the edge of the BP interval.
+
+### Inputs
+
+- `distances_km: ndarray`
+- `v_smooth: ndarray`
+
+### Output
+
+Return tuple:
+
+```text
+(l0_km, v0, has_valid_minimum)
+```
+
+### Logic
+
+1. Validate array sizes.
+2. Ignore NaN or infinite \(V\) values.
+3. Do not consider the first or last distance sample as a valid local minimum.
+4. Identify candidate local minima.
+
+A point \(i\) is a local minimum if it satisfies:
+
+\[
+V_i \leq V_{i-1}
+\]
+
+and:
+
+\[
+V_i \leq V_{i+1}
+\]
+
+For numerical robustness, flat-bottom minima may occur. A deterministic tie-breaking rule should be documented.
+
+5. From all candidate local minima, choose the one with the smallest \(V_i\).
+
+This is the “global local minimum.”
+
+6. Return:
+
+\[
+L_0 = L_i
+\]
+
+\[
+V_0 = V_i
+\]
+
+7. If no valid local minimum exists, return invalid values and `False`.
+
+### Endpoint Rejection
+
+The paper explicitly requires the minimum not to be at the end of the BP interval. Therefore:
+
+- index `0` is invalid,
+- index `n-1` is invalid.
+
+Additional distance from the endpoint is evaluated in `compute_q()` through the \(L_1\), \(L_2\) requirements.
+
+---
+
+# 4.5 `compute_q(distances_km, v_smooth, l0_km)`
+
+### Purpose
+
+Compute the quality metric \(Q\), which measures the depth of the global local minimum.
+
+The paper defines:
+
+\[
+Q = \frac{\min(V_1, V_2)}{V_0}
+\]
+
+where:
+
+\[
+V_0 = V(L_0)
+\]
+
+\[
+V_1 = V(L_0 - L_1)
+\]
+
+\[
+V_2 = V(L_0 + L_2)
+\]
+
+\(L_1\) and \(L_2\) are distances from \(L_0\) to the points where monotonic increase of \(V(L)\) ends on the left and right sides.
+
+### Inputs
+
+- `distances_km: ndarray`
+- `v_smooth: ndarray`
+- `l0_km: float`
+
+### Output
+
+Return tuple:
+
+```text
+(l1_km, l2_km, v1, v2, q)
+```
+
+### Logic
+
+1. Locate index `i0` where:
+
+\[
+distances\_km[i0] = l0\_km
+\]
+
+2. Set:
+
+\[
+V_0 = V[i0]
+\]
+
+3. Walk left from `i0`.
+
+Moving away from \(L_0\), \(V(L)\) should monotonically increase.
+
+For the left side:
+
+- Start at `i0`.
+- Move to `i0 - 1`, `i0 - 2`, etc.
+- Continue while each farther point is greater than or equal to the previous closer point.
+- Stop when this monotonic increase fails or the edge is reached.
+- The last point satisfying the monotonic increase is the left endpoint.
+
+Then:
+
+\[
+L_1 = L_0 - L_{\text{left endpoint}}
+\]
+
+\[
+V_1 = V(L_{\text{left endpoint}})
+\]
+
+4. Walk right from `i0`.
+
+For the right side:
+
+- Start at `i0`.
+- Move to `i0 + 1`, `i0 + 2`, etc.
+- Continue while each farther point is greater than or equal to the previous closer point.
+- Stop when monotonic increase fails or the edge is reached.
+- The last point satisfying the monotonic increase is the right endpoint.
+
+Then:
+
+\[
+L_2 = L_{\text{right endpoint}} - L_0
+\]
+
+\[
+V_2 = V(L_{\text{right endpoint}})
+\]
+
+5. Compute:
+
+\[
+Q = \frac{\min(V_1, V_2)}{V_0}
+\]
+
+### Minimum Span Requirement
+
+The paper states that a valid minimum exists only if \(L_1\) and \(L_2\) are not smaller than two 100-km samples.
+
+Using config:
+
+```yaml
+min_l1_samples: 2
+min_l2_samples: 2
+sample_spacing_km: 100
+```
+
+Therefore:
+
+\[
+L_1 \geq \text{min_l1_samples} \times \text{sample_spacing_km}
+\]
+
+\[
+L_2 \geq \text{min_l2_samples} \times \text{sample_spacing_km}
+\]
+
+If either condition fails, the minimum should be considered invalid by the caller. Since this method’s designed return type does not include a boolean, the implementation can signal invalidity by returning `q = NaN` while still returning diagnostic values.
+
+### Numerical Safeguard
+
+Since \(V(L)\) is a normalized amplitude variance, it should be nonnegative. However, due to numerical precision, \(V_0\) may be extremely small.
+
+If:
+
+\[
+V_0 \leq 0
+\]
+
+or is not finite, \(Q\) should be treated as invalid for real-data QC.
+
+Do not introduce an arbitrary scientific threshold. Use only numerical safety handling.
+
+---
+
+# 4.6 `find_zero_crossings(d_curve: DCurve)`
+
+### Purpose
+
+Find geolocation distances where:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}} = 0
+\]
+
+The paper states that the correct geolocation occurs when the distance used to define the magnetic-field orientation equals the distance returned by the \(V(L)\) minimum.
+
+A valid zero crossing must satisfy the paper’s persistence condition:
+
+> “If \(D(L)\) remains positive and negative on both sides of the crossing for at least two 100-km steps... we determine the crossing \(D(L)=0\) as the geolocation.”
+
+### Inputs
+
+- `d_curve: DCurve`
+
+Required fields:
+
+- `d_curve.l_mf_km`
+- `d_curve.d_km`
+- optionally diagnostic arrays:
+  - `d_curve.l0_km`
+  - `d_curve.q`
+  - `d_curve.cos_alpha`
+
+### Output
+
+Return:
+
+```text
+list[float]
+```
+
+Each float is one valid zero-crossing distance in km.
+
+### Valid Crossing Types
+
+The method should detect both:
+
+1. Exact sampled zero:
+
+\[
+D_i = 0
+\]
+
+2. Sign change between adjacent samples:
+
+\[
+D_i D_{i+1} < 0
+\]
+
+For sign-change crossings, use linear interpolation between the two neighboring samples to estimate the crossing distance:
+
+\[
+L_{\times}
+=
+L_i
+-
+D_i
+\frac{L_{i+1} - L_i}{D_{i+1} - D_i}
+\]
+
+This is consistent with computing the crossing from the nearest positive and negative samples.
+
+### Exact-Zero Runs
+
+The paper notes that a crossing may occur at one sample or several samples.
+
+Therefore:
+
+- A contiguous run of zero-valued samples should be treated as one crossing, not multiple crossings.
+- The crossing distance may be represented by the center of the zero run.
+
+### Persistence Requirement
+
+For a crossing to be valid:
+
+- There must be at least two valid samples on one side with the same sign.
+- There must be at least two valid samples on the other side with the opposite sign.
+
+Using the configured 100 km sample spacing, this implements the paper’s “at least two 100-km steps” requirement.
+
+For a sign-change crossing between indices `i` and `i+1`, require:
+
+- samples ending at `i` on the left side have one sign,
+- samples starting at `i+1` on the right side have the opposite sign,
+- each side has at least two valid samples.
+
+For an exact-zero crossing at index `i`, or a zero plateau, ignore the zero samples themselves and inspect the nearest nonzero samples on both sides.
+
+### Invalid Samples
+
+Skip crossings involving NaN or infinite values.
+
+If invalid values interrupt the required two-sample persistence region, the crossing should not be accepted.
+
+### Multi-Valued Logic
+
+This method only returns all valid crossings.
+
+The caller, usually `BackpropProcessor` or `Geolocator`, should mark:
+
+```text
+is_multivalued = len(zero_crossings) > 1
+```
+
+The final QC then rejects multi-valued cases if configured to do so.
+
+The paper reports that approximately 8% of COSMIC-2 cases are multi-valued and that all multi-valued geolocations are discarded.
+
+---
+
+# 4.7 `passes_final(result: GeolocationResult)`
+
+### Purpose
+
+Apply final geolocation QC after a candidate crossing has been converted into a `GeolocationResult`.
+
+Final QC criteria from the paper:
+
+1. Geolocation must be single-valued.
+2. \(Q > 1.2\).
+3. \(\cos\alpha > 0.1\).
+
+### Inputs
+
+- `result: GeolocationResult`
+
+Required fields:
+
+- `result.is_multivalued`
+- `result.q`
+- `result.cos_alpha`
+- `result.distance_km`
+- possibly `result.latitude_deg`, `longitude_deg`, `altitude_km` for finite checks
+
+### Output
+
+Return tuple:
+
+```text
+(bool_passed, rejection_reason)
+```
+
+Recommended rejection reasons:
+
+- `"multivalued_geolocation"`
+- `"q_below_threshold"`
+- `"cos_alpha_below_threshold"`
+- `"invalid_final_result"`
+- `"passed"`
+
+### Logic
+
+1. Verify required numeric fields are finite:
+   - distance,
+   - q,
+   - cos_alpha.
+
+2. If config requires single-valued geolocations and:
+
+```text
+result.is_multivalued is True
+```
+
+reject.
+
+3. Reject if:
+
+\[
+Q \leq \text{config.q_threshold}
+\]
+
+From config:
+
+\[
+\text{config.q_threshold} = 1.2
+\]
+
+4. Reject if:
+
+\[
+\cos\alpha \leq \text{config.cos_alpha_threshold}
+\]
+
+From config:
+
+\[
+\text{config.cos_alpha_threshold} = 0.1
+\]
+
+5. Otherwise pass.
+
+### Important Detail
+
+Use strict greater-than comparisons:
+
+\[
+Q > 1.2
+\]
+
+\[
+\cos\alpha > 0.1
+\]
+
+because the paper states “greater than”.
+
+---
+
+## 5. Data Flow With Other Modules
+
+### Used by `Geolocator`
+
+`Geolocator.process_window()` should call:
+
+1. `passes_pre_bp(metrics, tangent_height_km)`
+2. If passed, run `BackpropProcessor.compute_d_curve(...)`
+3. Use `passes_final(result)` after creating a `GeolocationResult`
+
+---
+
+### Used by `BackpropProcessor`
+
+`BackpropProcessor.process_for_lmf()` or `compute_v_curve()` should call:
+
+1. `smooth_v_curve(distances_km, v_raw)`
+2. `find_global_local_minimum(distances_km, v_smooth)`
+3. `compute_q(distances_km, v_smooth, l0_km)`
+
+`BackpropProcessor.compute_d_curve()` should call:
+
+1. `find_zero_crossings(d_curve)`
+
+---
+
+## 6. Paper-Faithful QC Summary
+
+The module must implement the following exactly, using config values:
+
+| QC Step | Paper Criterion | Config Source |
+|---|---:|---|
+| Phase scintillation | \(\sigma_\phi > 0.25\) rad | `processing.scintillation_indices.sigma_phi_threshold_rad` |
+| Tangent height | \(h_{\tan} > 150\) km | `processing.tangent_point_filter.min_height_km` |
+| BP minimum | global local minimum, not endpoint | `back_propagation.minimum_detection` |
+| \(L_1,L_2\) span | at least two 100-km samples | `min_l1_samples`, `min_l2_samples`, `sample_spacing_km` |
+| \(V(L)\) smoothing | 2nd-order polynomial, 1000 km window | `back_propagation.v_curve.smoothing` |
+| Minimum depth | \(Q > 1.2\) | `back_propagation.quality_control.q_threshold` |
+| Scan angle | \(\cos\alpha > 0.1\) | `back_propagation.quality_control.cos_alpha_threshold` |
+| Multi-valued cases | discard | `require_single_valued_geolocation`, `discard_multivalued_geolocations` |
+
+---
+
+## 7. Edge Cases to Handle
+
+### 7.1 No Local Minimum
+
+If \(V(L)\) is monotonic or invalid:
+
+- `find_global_local_minimum()` returns invalid.
+- `BackpropProcessor` should not use that \(L_{\mathrm{mf}}\) point in \(D(L_{\mathrm{mf}})\).
+
+---
+
+### 7.2 Endpoint Minimum
+
+If the lowest \(V(L)\) value occurs at 100 km or 6000 km:
+
+- reject as invalid.
+- The paper requires a local minimum inside the BP interval.
+
+---
+
+### 7.3 Weak Scintillation / Noisy Curve
+
+Weak scintillation may produce small, noisy variations in \(V(L)\). The paper addresses this by smoothing \(V(L)\) before estimating \(Q\).
+
+Expected behavior:
+
+- smoothing should not substantially move \(L_0\),
+- smoothing should improve robustness of \(L_1\), \(L_2\), and \(Q\).
+
+---
+
+### 7.4 \(V_0 = 0\)
+
+In ideal synthetic cases, \(V_0\) can approach zero. The paper notes that for noise-free synthetic modeling, \(Q\) may not be meaningful.
+
+For real-data QC:
+
+- if \(V_0\) is zero or nonfinite, treat \(Q\) as invalid unless explicitly used only for synthetic diagnostics.
+
+---
+
+### 7.5 Multiple Zero Crossings
+
+If `find_zero_crossings()` returns more than one crossing:
+
+- mark the case multi-valued,
+- reject in `passes_final()` if configured.
+
+This follows the paper’s treatment of multi-valued geolocations.
+
+---
+
+### 7.6 Crossing Between Samples
+
+The task requires detecting sign changes as well as exact zeros. Therefore, if \(D(L)\) crosses zero between two 100-km samples, return an interpolated crossing distance only if the two-sample persistence condition is satisfied on both sides.
+
+---
+
+## 8. Expected Outputs From This Module
+
+### `passes_pre_bp`
+
+Example output:
+
+```text
+(True, "passed")
+(False, "sigma_phi_below_threshold")
+(False, "tangent_height_below_threshold")
+```
+
+---
+
+### `smooth_v_curve`
+
+Returns an array:
+
+```text
+v_smooth.shape == v_raw.shape
+```
+
+---
+
+### `find_global_local_minimum`
+
+Returns:
+
+```text
+(l0_km, v0, True)
+```
+
+or invalid values with:
+
+```text
+(..., ..., False)
+```
+
+---
+
+### `compute_q`
+
+Returns:
+
+```text
+(l1_km, l2_km, v1, v2, q)
+```
+
+where:
+
+\[
+Q = \frac{\min(V_1,V_2)}{V_0}
+\]
+
+---
+
+### `find_zero_crossings`
+
+Returns:
+
+```text
+[]
+```
+
+for no geolocation,
+
+```text
+[distance_km]
+```
+
+for single-valued geolocation,
+
+or:
+
+```text
+[distance_1_km, distance_2_km, ...]
+```
+
+for multi-valued geolocation.
+
+---
+
+### `passes_final`
+
+Returns:
+
+```text
+(True, "passed")
+```
+
+or rejection reason.
+
+---
+
+## 9. Validation Tests Recommended for `qc.py`
+
+Although code is not requested yet, the following tests should be written later.
+
+### Pre-BP QC Tests
+
+1. `sigma_phi_rad = 0.26`, `tangent_height_km = 151` should pass.
+2. `sigma_phi_rad = 0.25` should fail.
+3. `tangent_height_km = 150` should fail.
+4. NaN input should fail.
+
+---
+
+### \(V(L)\) Minimum Tests
+
+1. Synthetic parabola with minimum in the center should return correct \(L_0\).
+2. Minimum at first sample should be invalid.
+3. Minimum at last sample should be invalid.
+4. No local minimum should be invalid.
+
+---
+
+### \(Q\) Tests
+
+1. Symmetric curve with clear monotonic rise should produce expected \(L_1\), \(L_2\), \(Q\).
+2. Curve where monotonic rise ends after one sample should produce invalid or NaN \(Q\).
+3. \(V_0 \leq 0\) should not produce a valid real-data \(Q\).
+
+---
+
+### Zero-Crossing Tests
+
+1. Exact single zero with two persistent samples on both sides should pass.
+2. Sign change between samples with persistence should pass.
+3. Crossing without two samples on each side should fail.
+4. Two valid crossings should return two distances.
+5. Contiguous zero plateau should count as one crossing.
+
+---
+
+### Final QC Tests
+
+1. Single-valued, \(Q > 1.2\), \(\cos\alpha > 0.1\) should pass.
+2. `is_multivalued=True` should fail.
+3. `q = 1.2` should fail.
+4. `cos_alpha = 0.1` should fail.
+5. NaN `q` or `cos_alpha` should fail.
+
+---
+
+## 10. Key Reproducibility Requirement
+
+This module is central to reproducing the paper’s accepted/rejected geolocation statistics. Small differences in:
+
+- smoothing,
+- local-minimum detection,
+- \(L_1/L_2\) monotonic-span detection,
+- zero-crossing persistence logic,
+
+can change accepted counts, multi-valued fraction, and monthly map densities.
+
+Therefore, every rejection reason should be logged by downstream code when:
+
+```yaml
+reproducibility:
+  log_rejection_reasons: true
+  log_multivalued_cases: true
+  log_processing_statistics: true
+```
+
+The QC logic should remain deterministic and entirely controlled by `AppConfig`.

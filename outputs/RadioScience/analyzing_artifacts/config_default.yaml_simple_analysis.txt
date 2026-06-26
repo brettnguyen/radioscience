@@ -1,0 +1,786 @@
+## Logic Analysis: `config/default.yaml`
+
+### 1. Purpose of `config/default.yaml`
+
+`config/default.yaml` is the central reproducibility contract for the project. It must encode all experiment settings that the paper explicitly specifies and that downstream modules need for synthetic validation, COSMIC-2 processing, geolocation QC, monthly mapping, and L1/L2 comparison.
+
+No scientific module should hard-code methodological values such as the 10 s window length, BP distance grid, QC thresholds, smoothing settings, map bin size, local-time filter, or random seed. These must come from `config/default.yaml`, using the values already specified in the provided `config.yaml`.
+
+---
+
+### 2. Required Values from the Paper and Provided Configuration
+
+The default configuration must preserve the following paper-aligned settings.
+
+#### Data paths
+
+From `config.yaml`:
+
+```yaml
+paths:
+  cosmic2_hr_data_dir: "data/cosmic2/hr"
+  receiver_orbit_dir: "data/cosmic2/orbits"
+  gnss_orbit_clock_dir: "data/gnss"
+  f107_data_path: "data/f107/f107.csv"
+  output_dir: "outputs"
+```
+
+These are required by:
+
+- `CosmicLoader`
+- `OrbitLoader`
+- `F107Loader`
+- `ResultWriter`
+- `RealDataExperiments`
+
+The paths should be relative by default so the repository can be moved without editing absolute paths.
+
+---
+
+### 3. AppConfig Mapping Required by the Design
+
+The design defines the public `AppConfig` interface as:
+
+```text
+cosmic_data_dir
+receiver_orbit_dir
+gnss_orbit_dir
+output_dir
+igrf_model
+sigma_phi_threshold_rad
+tangent_height_min_km
+bp_min_distance_km
+bp_max_distance_km
+bp_step_km
+mf_step_km
+q_threshold
+cos_alpha_threshold
+smoothing_window_km
+smoothing_poly_order
+map_bin_deg
+random_seed
+from_yaml(path)
+```
+
+Therefore, `src/config.py` should map the hierarchical YAML fields into these public members as follows:
+
+| `AppConfig` field | YAML source |
+|---|---|
+| `cosmic_data_dir` | `paths.cosmic2_hr_data_dir` |
+| `receiver_orbit_dir` | `paths.receiver_orbit_dir` |
+| `gnss_orbit_dir` | `paths.gnss_orbit_clock_dir` |
+| `output_dir` | `paths.output_dir` |
+| `igrf_model` | `data.magnetic_field.model` |
+| `sigma_phi_threshold_rad` | `processing.scintillation_indices.sigma_phi_threshold_rad` |
+| `tangent_height_min_km` | `processing.tangent_point_filter.min_height_km` |
+| `bp_min_distance_km` | `back_propagation.distance_grid.min_km` |
+| `bp_max_distance_km` | `back_propagation.distance_grid.max_km` |
+| `bp_step_km` | `back_propagation.distance_grid.step_km` |
+| `mf_step_km` | `back_propagation.magnetic_field_candidate_grid.step_km` |
+| `q_threshold` | `back_propagation.quality_control.q_threshold` |
+| `cos_alpha_threshold` | `back_propagation.quality_control.cos_alpha_threshold` |
+| `smoothing_window_km` | `back_propagation.v_curve.smoothing.window_km` |
+| `smoothing_poly_order` | `back_propagation.v_curve.smoothing.polynomial_order` |
+| `map_bin_deg` | `real_data_experiments.monthly_l1_maps.bin_size_deg.latitude` and `.longitude` |
+| `random_seed` | `reproducibility.random_seed` |
+
+Important design constraint: downstream code should use only the existing `AppConfig` public fields and `AppConfig.from_yaml(path)`. Do not introduce additional public methods unless the design is updated.
+
+---
+
+### 4. Paper-Specified Processing Constants
+
+`config/default.yaml` must include these values exactly as given in the supplied configuration.
+
+#### Windowing
+
+```yaml
+processing:
+  window_seconds: 10
+```
+
+Paper basis:
+
+- COSMIC-2 HR scintillation data are processed in 10 s intervals.
+- Onboard `S4` is also calculated in 10 s intervals.
+
+Used by:
+
+- `CosmicLoader.segment_to_windows(event_data, window_seconds)`
+- `Geolocator.process_window(...)`
+- `ScintillationCalculator`
+
+---
+
+#### Phase scintillation threshold
+
+```yaml
+processing:
+  scintillation_indices:
+    sigma_phi_threshold_rad: 0.25
+```
+
+Paper basis:
+
+\[
+\sigma_\phi > 0.25 \ \mathrm{rad}
+\]
+
+Only windows exceeding this threshold are processed by BP.
+
+Used by:
+
+- `ScintillationCalculator.compute(...)`
+- `QualityController.passes_pre_bp(...)`
+
+---
+
+#### Tangent-point height filter
+
+```yaml
+processing:
+  tangent_point_filter:
+    min_height_km: 150
+```
+
+Paper basis:
+
+- BP is only applied when the LOS tangent point is above 150 km.
+- This avoids sporadic E-layer contamination.
+
+Used by:
+
+- `LosGeometry.tangent_height(window)`
+- `QualityController.passes_pre_bp(...)`
+
+---
+
+### 5. Back-Propagation Grid Settings
+
+The paper uses the same 100–6000 km grid for:
+
+1. Inner BP screen-distance loop.
+2. Outer magnetic-field candidate distance loop.
+
+Required configuration:
+
+```yaml
+back_propagation:
+  distance_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+Paper basis:
+
+\[
+100 \ \mathrm{km} < L < 6000 \ \mathrm{km}
+\]
+
+with 100 km step.
+
+Implementation detail:
+
+- The grid should include 100 km and 6000 km.
+- This gives 60 samples:
+
+\[
+100, 200, \ldots, 6000
+\]
+
+Used by:
+
+- `BackpropProcessor.compute_v_curve(...)`
+- `BackpropProcessor.compute_d_curve(...)`
+- `QualityController.find_global_local_minimum(...)`
+- `QualityController.find_zero_crossings(...)`
+
+Validation required in `AppConfig.from_yaml`:
+
+- `min_km > 0`
+- `max_km > min_km`
+- `step_km > 0`
+- `(max_km - min_km)` divisible by `step_km`
+- BP grid and magnetic-field grid should be consistent unless deliberately changed.
+
+---
+
+### 6. Stationary-Transmitter Correction Settings
+
+Required configuration:
+
+```yaml
+back_propagation:
+  stationary_transmitter_correction:
+    enabled: true
+    default_option: 2
+```
+
+Paper basis:
+
+The paper describes two options:
+
+- Option 1:
+  \[
+  x_2' = x_2
+  \]
+  suitable for Kirchhoff diffraction integral.
+
+- Option 2:
+  \[
+  x_2' = x_{20}
+  \]
+  suitable for FFT/plane-wave BP after interpolation to a uniform corrected receiver trajectory.
+
+The design explicitly defaults to Option 2 for the first implementation.
+
+Used by:
+
+- `StationaryCorrector.correct(...)`
+- `StationaryCorrector.apply_tx_rx_correction(...)`
+- `BackpropProcessor.compute_v_curve(...)`
+
+---
+
+### 7. Wavefront Curvature Correction
+
+Required configuration:
+
+```yaml
+back_propagation:
+  wavefront_curvature_correction:
+    enabled: true
+    correction_path_term: "z^2 * tan(alpha)^2 / (2R)"
+```
+
+Paper basis:
+
+Projection to the BP plane changes the spherical wavefront curvature from:
+
+\[
+R
+\]
+
+to:
+
+\[
+R_1 = R \cos^2 \alpha
+\]
+
+The paper corrects this by adding:
+
+\[
+\Delta S =
+\frac{z^2 \tan^2 \alpha}{2R}
+\]
+
+Used by:
+
+- `StationaryCorrector.apply_curvature_correction(...)`
+
+---
+
+### 8. V-Curve Definition and Smoothing
+
+Required configuration:
+
+```yaml
+back_propagation:
+  v_curve:
+    definition: "<A^2> / <A>^2 - 1"
+    smoothing:
+      enabled: true
+      method: "second_order_sliding_polynomial_regression"
+      window_km: 1000
+      polynomial_order: 2
+```
+
+Paper basis:
+
+The normalized BP amplitude variance is:
+
+\[
+V(L) =
+\frac{\langle A^2 \rangle}{\langle A \rangle^2}
+-
+1
+\]
+
+The paper smooths `V(L)` using:
+
+- second-order sliding polynomial regression,
+- 1000 km window.
+
+Used by:
+
+- `FftPropagator.amplitude_variance(...)`
+- `QualityController.smooth_v_curve(...)`
+- `QualityController.find_global_local_minimum(...)`
+- `QualityController.compute_q(...)`
+
+Implementation detail:
+
+At 100 km spacing, a 1000 km smoothing window corresponds to approximately 11 grid points if centered symmetrically. The implementation should use the configured `window_km` and `bp_step_km` to determine the number of points, rather than hard-coding 11.
+
+---
+
+### 9. Minimum Detection Settings
+
+Required configuration:
+
+```yaml
+back_propagation:
+  minimum_detection:
+    require_global_local_minimum: true
+    reject_endpoint_minimum: true
+    min_l1_samples: 2
+    min_l2_samples: 2
+    sample_spacing_km: 100
+```
+
+Paper basis:
+
+The minimum of `V(L)` must:
+
+- be a local minimum,
+- not be at the BP interval edge,
+- have monotonic-increase spans on both sides,
+- have `L1` and `L2` at least two 100 km samples.
+
+That means:
+
+\[
+L_1 \ge 200 \ \mathrm{km}
+\]
+
+\[
+L_2 \ge 200 \ \mathrm{km}
+\]
+
+Used by:
+
+- `QualityController.find_global_local_minimum(...)`
+- `QualityController.compute_q(...)`
+
+---
+
+### 10. Final Quality-Control Thresholds
+
+Required configuration:
+
+```yaml
+back_propagation:
+  quality_control:
+    q_threshold: 1.2
+    cos_alpha_threshold: 0.1
+    require_single_valued_geolocation: true
+    discard_multivalued_geolocations: true
+```
+
+Paper basis:
+
+Accepted geolocations must satisfy:
+
+1. single-valued geolocation,
+2. \(Q > 1.2\),
+3. \(\cos\alpha > 0.1\).
+
+Where:
+
+\[
+Q =
+\frac{\min(V_1,V_2)}{V_0}
+\]
+
+Used by:
+
+- `QualityController.passes_final(...)`
+- `Geolocator.process_window(...)`
+
+Important:
+
+The paper states multi-valued geolocations are discarded because they cannot be reliably disambiguated from observations alone.
+
+---
+
+### 11. Geolocation Formula
+
+Required configuration:
+
+```yaml
+back_propagation:
+  geolocation:
+    equation: "R_geo = R_rx + L * n_rt"
+    n_rt_definition: "(R_rx - R_tx) / |R_rx - R_tx|"
+```
+
+Paper basis:
+
+\[
+\vec{R}_{geo}
+=
+\vec{R}_{rx}
++
+L \vec{n}_{rt}
+\]
+
+with:
+
+\[
+\vec{n}_{rt}
+=
+\frac{\vec{R}_{rx} - \vec{R}_{tx}}
+{|\vec{R}_{rx} - \vec{R}_{tx}|}
+\]
+
+Implementation warning:
+
+The sign convention must be tested carefully. The final geolocation point must lie along the receiver-transmitter LOS, physically between the receiver and transmitter for ordinary cases. `LosGeometry.candidate_position(...)` and `LosGeometry.geolocation_from_distance(...)` must use one consistent convention.
+
+---
+
+### 12. Monthly Map Settings
+
+Required configuration:
+
+```yaml
+real_data_experiments:
+  monthly_l1_maps:
+    enabled: true
+    years:
+      - 2021
+      - 2023
+    signal: "L1"
+    local_time_hours:
+      - 18
+      - 24
+    bin_size_deg:
+      latitude: 3
+      longitude: 3
+```
+
+Paper basis:
+
+Monthly post-sunset maps use:
+
+- years 2021 and 2023,
+- L1 data,
+- local time 18–24 hr,
+- 3° × 3° latitude/longitude bins.
+
+Expected accepted geolocation counts:
+
+```yaml
+expected_total_geolocations:
+  2021: 332000
+  2023: 1108000
+```
+
+These expected counts are validation targets, not QC thresholds.
+
+Used by:
+
+- `RealDataExperiments.process_year(...)`
+- `RealDataExperiments.make_monthly_bins(...)`
+- `Plotter.plot_monthly_maps(...)`
+
+---
+
+### 13. Local-Time Filter
+
+Required configuration:
+
+```yaml
+processing:
+  local_time_filter:
+    enabled_for_monthly_maps: true
+    start_hour: 18
+    end_hour: 24
+    reference: "geolocation_longitude"
+```
+
+Paper basis:
+
+The paper reports post-sunset geolocations for:
+
+\[
+18 \leq \mathrm{LT} < 24
+\]
+
+The paper does not explicitly state whether local time is computed at tangent point, receiver, or geolocation. The supplied configuration chooses:
+
+```yaml
+reference: "geolocation_longitude"
+```
+
+This should be documented in outputs because it is an ambiguity from the paper.
+
+Used by:
+
+- `CoordinateTransformer.local_time(...)`
+- `RealDataExperiments.make_monthly_bins(...)`
+
+---
+
+### 14. L1/L2 Comparison Settings
+
+Required configuration:
+
+```yaml
+signals:
+  l1_l2_comparison:
+    enabled: true
+    start_date: "2021-02-19"
+    end_date: "2021-03-01"
+    gps_l2_allowed:
+      - "L2C"
+    gps_l2_excluded:
+      - "L2P"
+```
+
+Paper basis:
+
+The body text specifies the comparison period:
+
+```text
+February 19 to March 1, 2021
+```
+
+GPS L2P is excluded because semi-codeless tracking can become unstable during strong scintillation.
+
+Expected counts:
+
+```yaml
+real_data_experiments:
+  l1_l2_comparison:
+    expected_counts:
+      l1_geolocations: 13000
+      l2_geolocations: 11000
+      common_l1_l2_cases: 8000
+    zonal_difference_histogram_bin_deg: 0.5
+```
+
+Used by:
+
+- `RealDataExperiments.process_l1_l2_period(...)`
+- `RealDataExperiments.pair_l1_l2(...)`
+- `Plotter.plot_l1_l2_histogram(...)`
+
+The 0.5° histogram bin width should come from config.
+
+---
+
+### 15. Synthetic Experiment Settings
+
+The default config must include synthetic settings because the design has a synthetic validation mode.
+
+Required values from `config.yaml`:
+
+```yaml
+synthetic_experiments:
+  enabled: true
+
+  wavelength:
+    default_signal: "L1"
+
+  phase_screen:
+    approximation: "single_thin_phase_screen"
+    spectral_index_p: 1.5
+    outer_scale_km: 10
+    spectrum_1d: "(k0^2 + kz^2)^(-p/2)"
+    k0_definition: "2*pi / outer_scale"
+```
+
+Paper basis:
+
+The synthetic phase-screen spectrum is:
+
+\[
+\Phi(k_z) \sim (k_0^2 + k_z^2)^{-p/2}
+\]
+
+with:
+
+\[
+p = 1.5
+\]
+
+\[
+l_0 = 10 \ \mathrm{km}
+\]
+
+Observed sanity values:
+
+```yaml
+observed_average_values:
+  sigma_phi_rad: 1.65
+  s4: 0.32
+  sigma_phi_over_s4_rad: 5.25
+  distance_from_phase_screen_to_receiver_km: 1900
+  estimated_outer_scale_km: 9.7
+```
+
+Used by:
+
+- `SyntheticExperiments.single_phase_screen(...)`
+- `SyntheticExperiments.outer_scale_estimation(...)`
+- `SyntheticExperiments.orientation_error(...)`
+- `SyntheticExperiments.two_screens_aligned(...)`
+- `SyntheticExperiments.two_screens_misaligned(...)`
+- `SyntheticExperiments.thermal_noise(...)`
+
+---
+
+### 16. Thermal Noise Configuration
+
+Required configuration:
+
+```yaml
+synthetic_experiments:
+  modeled_cases:
+    thermal_noise:
+      enabled: true
+      phase_screen_distance_km: 2000
+      sigma_phi_cases_rad:
+        - 1.65
+        - 0.25
+      snr_1hz_cases_vv:
+        - 200
+        - 400
+        - 600
+      average_snr_1hz_vv: 400
+      typical_snr_1hz_range_vv:
+        - 200
+        - 600
+      assumed_sampling_rate_hz: 100
+      assumed_projected_scan_velocity_km_s: 4
+      modeled_spatial_interval_km: 40
+      windowed_spatial_interval_km: 35
+      internal_grid_step_m: 10
+```
+
+Paper basis:
+
+- Average SNR is about 400 V/V in a 1 Hz band.
+- More than 90% of geolocations have SNR between 200 and 600 V/V.
+- Noise tests use a phase screen at 2000 km.
+- Paper tests \(\sigma_\phi = 1.65\) rad and \(\sigma_\phi = 0.25\) rad.
+- Assumed scan velocity is 4 km/s.
+- Sampling rate is 100 Hz.
+- Internal modeling grid step is 10 m.
+
+Used by:
+
+- `SyntheticExperiments.thermal_noise(...)`
+
+---
+
+### 17. Reproducibility Settings
+
+Required configuration:
+
+```yaml
+reproducibility:
+  random_seed: 42
+  log_rejection_reasons: true
+  log_multivalued_cases: true
+  log_processing_statistics: true
+```
+
+Used by:
+
+- `PhaseScreenGenerator`
+- `SyntheticExperiments`
+- `Geolocator`
+- `RealDataExperiments`
+- `ResultWriter`
+
+The seed should control synthetic random phase-screen generation and any stochastic test behavior.
+
+---
+
+### 18. Validation Rules for `config/default.yaml`
+
+`AppConfig.from_yaml(path)` should validate at least:
+
+1. Required path keys exist.
+2. `processing.window_seconds == 10` unless intentionally overridden.
+3. `sigma_phi_threshold_rad > 0`.
+4. `tangent_point_filter.min_height_km == 150` for paper reproduction.
+5. BP distance grid:
+   - min = 100 km,
+   - max = 6000 km,
+   - step = 100 km.
+6. Magnetic-field candidate grid:
+   - min = 100 km,
+   - max = 6000 km,
+   - step = 100 km.
+7. `q_threshold == 1.2`.
+8. `cos_alpha_threshold == 0.1`.
+9. V smoothing:
+   - enabled,
+   - window = 1000 km,
+   - polynomial order = 2.
+10. Monthly map bin size:
+   - latitude = 3°,
+   - longitude = 3°.
+11. Local-time filter:
+   - start = 18 hr,
+   - end = 24 hr.
+12. `random_seed` exists and is an integer.
+13. `data.magnetic_field.model == "IGRF-13"`.
+
+For strict reproduction, validation should warn if values differ from the paper-specified defaults.
+
+---
+
+### 19. Interface Risk to Track
+
+The supplied `config.yaml` contains more settings than the current `AppConfig` design exposes publicly. Examples include:
+
+- `processing.window_seconds`
+- `processing.local_time_filter.start_hour`
+- `processing.local_time_filter.end_hour`
+- `signals.l1_l2_comparison.start_date`
+- `outputs.save_interval_results`
+- `synthetic_experiments.*`
+
+However, the design requires that `AppConfig` expose only the listed public fields. Therefore:
+
+- The YAML should still contain the complete reproducibility configuration.
+- `AppConfig.from_yaml(path)` must at minimum populate the public fields defined in the design.
+- Downstream modules should not call nonexistent public accessors.
+- If later implementation needs additional config access, the design should be updated deliberately rather than modules reading arbitrary YAML keys independently.
+
+This is especially important for avoiding hidden hard-coded values in `RealDataExperiments` and `SyntheticExperiments`.
+
+---
+
+### 20. Expected Role of `config/default.yaml` in the Pipeline
+
+`config/default.yaml` is loaded first:
+
+```text
+main.py
+  -> AppConfig.from_yaml(config/default.yaml)
+```
+
+Then its values control:
+
+1. Data locations.
+2. IGRF model choice.
+3. Scintillation pre-BP QC.
+4. BP and magnetic-field distance grids.
+5. V-curve smoothing.
+6. Q and scan-angle thresholds.
+7. Monthly map bin size.
+8. Reproducibility seed.
+9. Output location.
+
+The file should therefore be created before most processing modules and treated as the single source of method constants from the paper.

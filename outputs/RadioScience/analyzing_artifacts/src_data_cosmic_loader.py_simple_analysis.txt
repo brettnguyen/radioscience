@@ -1,0 +1,906 @@
+## Logic Analysis: `src/data/cosmic_loader.py`
+
+### 1. Purpose and Scope
+
+`src/data/cosmic_loader.py` implements the `CosmicLoader` class, which is the ingestion layer for COSMIC-2 high-rate scintillation data used in the paper’s real-data experiments.
+
+This module must transform external COSMIC-2 HR phase/amplitude files into standardized `SignalWindow` objects defined in `src/core/types.py`.
+
+According to the design, the public interface must remain:
+
+```python
+class CosmicLoader:
+    +__init__(config: AppConfig)
+    +list_events(year: int, signal: str) list[Path]
+    +load_event(path: Path) list[SignalWindow]
+    +iter_windows(year: int, signal: str) Iterator[SignalWindow]
+    +segment_to_windows(event_data: Any, window_seconds: int) list[SignalWindow]
+```
+
+No additional public methods should be required by downstream modules.
+
+This module is used by `RealDataExperiments.process_year(year, signal)` and ultimately feeds `Geolocator.process_window(window, wavelength_m)`.
+
+---
+
+## 2. Paper Alignment
+
+The paper processes COSMIC-2 high-rate GNSS radio occultation scintillation observations collected from POD antennas.
+
+Relevant paper details that must be reflected in this loader:
+
+1. Data source:
+   - UCAR COSMIC Data Analysis and Archive Center.
+   - DOI in `config.yaml`:
+     ```yaml
+     data.cosmic2.doi: "https://doi.org/10.5065/T353-C093"
+     ```
+
+2. Data type:
+   ```yaml
+   data.cosmic2.data_type:
+     "COSMIC-2 high-rate phase and amplitude/SNR from POD antennas"
+   ```
+
+3. Years used for main reproduction:
+   ```yaml
+   data.cosmic2.years:
+     - 2021
+     - 2023
+   ```
+
+4. POD antenna types:
+   ```yaml
+   data.cosmic2.pod_antennas:
+     - velocity_facing
+     - anti_velocity_facing
+   ```
+
+5. Sampling rates:
+   ```yaml
+   data.cosmic2.sampling_rates_hz.gps: 50
+   data.cosmic2.sampling_rates_hz.glonass: 100
+   ```
+
+6. Amplitude representation:
+   ```yaml
+   data.cosmic2.amplitude_representation: "SNR scaled to 1-Hz band"
+   ```
+
+7. GPS tracking:
+   - Closed-loop.
+   - Phase is expected to be connected onboard.
+
+8. GLONASS tracking:
+   - Open-loop.
+   - Data modulation removal and phase connection may be required if not already provided by the CDAAC product.
+
+9. Processing interval:
+   ```yaml
+   processing.window_seconds: 10
+   ```
+
+10. Real-data BP should operate on 10-second windows, consistent with the paper:
+   - High-rate phase and SNR are used in 10-s intervals.
+   - Scintillation indices are computed in 10-s intervals.
+   - BP is applied to windows where later QC passes.
+
+The loader should not apply scientific QC such as `sigma_phi > 0.25 rad`, tangent height, `Q > 1.2`, or `cos(alpha) > 0.1`. Those checks belong to `ScintillationCalculator`, `LosGeometry`, `QualityController`, and `Geolocator`.
+
+---
+
+## 3. Configuration Dependencies
+
+`CosmicLoader` must use values from `AppConfig`, which should be populated from `config.yaml`.
+
+Relevant configuration entries:
+
+```yaml
+paths.cosmic2_hr_data_dir: "data/cosmic2/hr"
+paths.receiver_orbit_dir: "data/cosmic2/orbits"
+paths.gnss_orbit_clock_dir: "data/gnss"
+```
+
+In the design, `AppConfig` exposes these as:
+
+```python
+AppConfig.cosmic_data_dir
+AppConfig.receiver_orbit_dir
+AppConfig.gnss_orbit_dir
+```
+
+The loader should use these fields instead of hard-coding paths.
+
+Relevant processing setting:
+
+```yaml
+processing.window_seconds: 10
+```
+
+The public method `segment_to_windows(event_data, window_seconds)` receives `window_seconds` explicitly, but `iter_windows(year, signal)` should pass the configured value.
+
+Relevant signal configuration:
+
+```yaml
+signals.primary_signal: "L1"
+signals.l1_l2_comparison.gps_l2_allowed:
+  - "L2C"
+signals.l1_l2_comparison.gps_l2_excluded:
+  - "L2P"
+```
+
+`CosmicLoader` should support filtering by the `signal` argument passed to `list_events` and `iter_windows`. GPS L2P exclusion may be performed here or in `RealDataExperiments.process_l1_l2_period`, but the loader should preserve enough metadata in `SignalWindow.signal_name` and `SignalWindow.constellation` to allow correct filtering downstream.
+
+---
+
+## 4. Expected Input Data Characteristics
+
+The exact CDAAC file schema is explicitly unclear in `config.yaml`:
+
+```yaml
+unclear_from_paper:
+  - "Exact COSMIC-2 HR data field names and preprocessing state."
+```
+
+Therefore, `CosmicLoader` should be written as an adapter layer that can tolerate different netCDF/HDF structures.
+
+Supported file backends should include:
+
+- `xarray`
+- `netCDF4`
+- `h5py`
+
+Required external packages are listed in the task:
+
+```text
+xarray>=2023.12.0
+netCDF4>=1.6.5
+h5py>=3.10.0
+pandas>=2.1.0
+numpy>=1.26.0
+```
+
+The loader should detect whether a file can be opened with `xarray`; if not, it may fall back to `h5py` or `netCDF4`.
+
+Because field names are not guaranteed, the logic should isolate schema-specific extraction into private helper routines inside the module. The public API should still remain exactly as designed.
+
+---
+
+## 5. Required Output: `SignalWindow`
+
+Each returned 10-second segment must be represented as a `SignalWindow` from `src/core/types.py`.
+
+The loader must populate the following fields as completely as possible:
+
+```python
+SignalWindow:
+    event_id: str
+    leo_id: str
+    gnss_id: str
+    constellation: str
+    signal_name: str
+    antenna: str
+    start_time: datetime
+    mid_time: datetime
+    end_time: datetime
+    sampling_rate_hz: float
+    times: ndarray
+    phase_rad: ndarray
+    amplitude: ndarray
+    snr_vv: ndarray
+    rx_states: list[StateVector]
+    tx_states: list[StateVector]
+    tangent_height_km: float
+```
+
+### 5.1 Mandatory Arrays
+
+For each `SignalWindow`, these arrays are mandatory:
+
+1. `times`
+2. `phase_rad`
+3. `amplitude`
+4. `snr_vv`
+
+Since the paper states that amplitude is represented by SNR scaled to a 1-Hz band, initial implementation should set:
+
+```python
+amplitude = snr_vv
+```
+
+unless the CDAAC product provides a clearly distinct amplitude variable.
+
+Any later normalization must be performed by `SignalPreprocessor.normalize_amplitude`, not by `CosmicLoader`.
+
+### 5.2 Orbit State Fields
+
+`rx_states` and `tx_states` are required by later geometry and BP modules.
+
+The design allows cooperation with `OrbitLoader`:
+
+```python
+OrbitLoader.interpolate_rx_states(window)
+OrbitLoader.interpolate_tx_states(window)
+```
+
+Although `CosmicLoader.__init__` only accepts `config`, this module may internally construct an `OrbitLoader(config)` or defer orbit filling if event files already contain state vectors.
+
+The preferred logic is:
+
+1. Create preliminary `SignalWindow` objects from HR files.
+2. Populate `rx_states` and `tx_states` by using `OrbitLoader` methods if states are not already present.
+3. Populate or update `tangent_height_km` if possible.
+4. Return fully usable `SignalWindow` objects to `RealDataExperiments`.
+
+This preserves the public interface while satisfying the program call flow.
+
+---
+
+## 6. Method-Level Logic
+
+---
+
+# 6.1 `__init__(config: AppConfig)`
+
+### Responsibility
+
+Store configuration and prepare data access paths.
+
+### Logic
+
+1. Save `config`.
+2. Resolve:
+   - `config.cosmic_data_dir`
+   - `config.receiver_orbit_dir`
+   - `config.gnss_orbit_dir`
+3. Optionally create an internal `OrbitLoader(config)` instance for orbit interpolation.
+4. Do not fail if data directories do not exist when synthetic-only runs are intended.
+5. For real-data processing, missing COSMIC-2 HR data should result in a clear error when `list_events` or `iter_windows` is called.
+
+### Important Constraint
+
+Do not perform heavy scanning or loading in `__init__`.
+
+---
+
+# 6.2 `list_events(year: int, signal: str) -> list[Path]`
+
+### Responsibility
+
+Return a list of COSMIC-2 HR event files for a given year and signal.
+
+### Paper/Config Alignment
+
+Main calls include:
+
+- `year=2021`, `signal="L1"`
+- `year=2023`, `signal="L1"`
+- L1/L2 comparison period beginning with signal-specific searches.
+
+Relevant config:
+
+```yaml
+paths.cosmic2_hr_data_dir: "data/cosmic2/hr"
+real_data_experiments.monthly_l1_maps.years:
+  - 2021
+  - 2023
+real_data_experiments.monthly_l1_maps.signal: "L1"
+```
+
+### Logic
+
+1. Search inside `config.cosmic_data_dir`.
+2. Restrict to files associated with the requested year.
+3. Restrict to files associated with the requested `signal` if this can be inferred from:
+   - filename,
+   - directory name,
+   - global attributes,
+   - metadata index, if present.
+4. Include supported file extensions:
+   - `.nc`
+   - `.nc4`
+   - `.cdf`
+   - `.h5`
+   - `.hdf`
+   - `.hdf5`
+5. Return paths sorted chronologically if possible.
+
+### Ambiguity Handling
+
+Because the COSMIC-2 HR file naming convention is not specified in the paper, `list_events` should not assume one rigid pattern.
+
+Recommended staged strategy:
+
+1. First search recursively under a year directory if it exists, e.g.:
+   - `data/cosmic2/hr/2021`
+   - `data/cosmic2/hr/2023`
+
+2. If no year directory exists, search recursively under the full HR data root.
+
+3. Use filename matching for year and signal when possible.
+
+4. If signal cannot be determined from filename, return candidate files and allow `load_event` to filter based on internal metadata.
+
+### Failure Cases
+
+If no files are found, return an empty list rather than raising immediately. `RealDataExperiments` can then report that no windows were available.
+
+---
+
+# 6.3 `load_event(path: Path) -> list[SignalWindow]`
+
+### Responsibility
+
+Read one COSMIC-2 HR event file and return a list of 10-second `SignalWindow` objects.
+
+### Logic Overview
+
+1. Open the file.
+2. Extract raw event-level data.
+3. Normalize metadata into an internal event object or dictionary.
+4. Segment into 10-second windows using `segment_to_windows`.
+5. Populate orbit states if required.
+6. Return the windows.
+
+### Required Extracted Fields
+
+At minimum, the loader must obtain:
+
+| Quantity | Destination |
+|---|---|
+| high-rate timestamps | `SignalWindow.times` |
+| carrier phase | `SignalWindow.phase_rad` |
+| SNR/amplitude | `SignalWindow.snr_vv`, `SignalWindow.amplitude` |
+| receiver/COSMIC-2 ID | `SignalWindow.leo_id` |
+| GNSS transmitter ID/PRN | `SignalWindow.gnss_id` |
+| constellation | `SignalWindow.constellation` |
+| signal name | `SignalWindow.signal_name` |
+| POD antenna direction | `SignalWindow.antenna` |
+| sampling rate | `SignalWindow.sampling_rate_hz` |
+
+### Phase Units
+
+The final `SignalWindow.phase_rad` must be in radians.
+
+If the product stores phase in:
+
+- radians: use directly.
+- cycles: multiply by `2π`.
+- meters/path length: convert using wavelength, but only if the corresponding signal frequency is known.
+
+Because exact CDAAC field units are unclear, the loader should inspect variable attributes when available.
+
+If units cannot be determined, it should fail clearly rather than silently guessing.
+
+### Amplitude/SNR Units
+
+The paper says:
+
+```yaml
+data.cosmic2.amplitude_representation: "SNR scaled to 1-Hz band"
+```
+
+Therefore:
+
+```python
+snr_vv = extracted_snr
+amplitude = extracted_snr
+```
+
+at ingestion time.
+
+Later amplitude normalization belongs to `SignalPreprocessor`.
+
+### Sampling Rate
+
+The loader should determine `sampling_rate_hz` by:
+
+1. Reading metadata if present.
+2. Otherwise inferring from timestamp spacing.
+
+Expected values from config/paper:
+
+```yaml
+data.cosmic2.sampling_rates_hz.gps: 50
+data.cosmic2.sampling_rates_hz.glonass: 100
+```
+
+The inferred rate should be checked against these expected rates where constellation is known.
+
+Do not reject solely because of minor floating-point deviations.
+
+### GLONASS Phase Handling
+
+The paper states:
+
+```yaml
+data.cosmic2.notes:
+  - "GLONASS signals are tracked in open-loop mode and require ground processing if connected phase is not already provided."
+```
+
+`CosmicLoader` should not implement complex GLONASS demodulation unless the file product requires it and the necessary fields are available.
+
+Recommended logic:
+
+1. If the file provides connected phase, load it.
+2. If the file provides raw open-loop phase and navigation/data modulation information, mark this as requiring preprocessing.
+3. If connected phase is unavailable and demodulation cannot be performed, the loader should skip the event or raise a clear schema/preprocessing error.
+
+Actual phase unwrapping and detrending should occur in `SignalPreprocessor`.
+
+---
+
+# 6.4 `segment_to_windows(event_data: Any, window_seconds: int) -> list[SignalWindow]`
+
+### Responsibility
+
+Split one event into 10-second windows.
+
+The paper uses 10-second intervals for:
+
+- onboard S4 calculations,
+- phase scintillation index calculation,
+- BP processing.
+
+Relevant config:
+
+```yaml
+processing.window_seconds: 10
+```
+
+### Logic
+
+Given event-level arrays:
+
+```text
+times
+phase_rad
+snr_vv
+amplitude
+metadata
+optional states
+```
+
+perform:
+
+1. Sort samples by time if needed.
+2. Remove invalid samples:
+   - missing timestamp,
+   - NaN phase,
+   - NaN amplitude/SNR,
+   - non-positive SNR if physically invalid.
+3. Determine event start and end times.
+4. Divide into contiguous 10-second intervals.
+5. For each interval:
+   - select samples with `start <= t < end`;
+   - require enough samples to represent the expected sampling rate.
+6. Compute:
+   - `start_time`
+   - `end_time`
+   - `mid_time`
+   - `sampling_rate_hz`
+7. Create one `SignalWindow` per valid interval.
+
+### Expected Samples Per Window
+
+From config/paper:
+
+| Constellation | Sampling Rate | Expected Samples in 10 s |
+|---|---:|---:|
+| GPS | 50 Hz | ~500 |
+| GLONASS | 100 Hz | ~1000 |
+
+The loader should allow slight sample-count variation due to edge effects or missing samples.
+
+However, severely incomplete windows should be rejected or marked unavailable before geolocation.
+
+A practical implementation can require a configurable completeness threshold later, but since no such value is specified in `config.yaml`, this module should not invent a hard threshold beyond basic non-empty validity.
+
+### Window Alignment
+
+The paper processes 10-second intervals but does not specify whether intervals are aligned to absolute clock boundaries or event start.
+
+Recommended reproduction logic:
+
+1. Segment relative to the event’s own start time unless CDAAC files already provide 10-s interval boundaries.
+2. Preserve exact `start_time`, `mid_time`, and `end_time`.
+3. Document this behavior in `README.md`.
+
+If CDAAC provides onboard S4 interval indices or 10-second boundaries, those should be preferred.
+
+---
+
+# 6.5 `iter_windows(year: int, signal: str) -> Iterator[SignalWindow]`
+
+### Responsibility
+
+Memory-efficient generator over all 10-second windows for a year and signal.
+
+### Logic
+
+1. Call:
+   ```python
+   paths = self.list_events(year, signal)
+   ```
+2. Iterate over paths.
+3. For each file:
+   ```python
+   windows = self.load_event(path)
+   ```
+4. Yield only windows matching requested `signal`.
+5. Attach orbit states if not already done by `load_event`.
+6. Do not perform phase detrending, scintillation thresholding, tangent-height QC, BP, or final geolocation.
+
+### Signal Filtering
+
+The method should ensure the yielded windows correspond to the requested signal.
+
+Examples:
+
+- For monthly maps:
+  ```python
+  signal = "L1"
+  ```
+- For L1/L2 comparison:
+  - `"L1"`
+  - `"L2"`
+  - `"L2C"` depending on how `RealDataExperiments` calls it.
+
+GPS L2P exclusion should be supported by preserving `signal_name`, but final exclusion can be performed in `RealDataExperiments.process_l1_l2_period`.
+
+---
+
+## 7. Event Metadata Logic
+
+Each event should receive a stable `event_id`.
+
+The paper’s L1/L2 comparison requires pairing by common event/interval:
+
+```text
+same occultation event,
+same COSMIC-2 satellite,
+same GNSS transmitter,
+same 10-s interval
+```
+
+Therefore `event_id` must be deterministic.
+
+Recommended event ID components:
+
+1. COSMIC-2 receiver ID.
+2. GNSS transmitter ID.
+3. antenna direction.
+4. occultation start time.
+5. possibly source filename stem.
+
+The exact composition may depend on CDAAC metadata, but it must be stable across L1/L2 files so that `RealDataExperiments.pair_l1_l2` can pair common cases.
+
+If L1 and L2 data are stored in separate files, the event ID should avoid including the signal name unless a separate common occultation identifier is available.
+
+---
+
+## 8. Orbit Cooperation Logic
+
+The paper requires:
+
+- receiver positions,
+- transmitter positions,
+- LOS tangent height,
+- LOS geometry for BP.
+
+`SignalWindow` includes:
+
+```python
+rx_states: list[StateVector]
+tx_states: list[StateVector]
+tangent_height_km: float
+```
+
+### Preferred Logic
+
+Inside `load_event` or after segmentation:
+
+1. If HR event file contains receiver and transmitter states:
+   - convert them to `StateVector`;
+   - attach directly.
+
+2. Otherwise use `OrbitLoader`:
+   ```python
+   rx_states = orbit_loader.interpolate_rx_states(window)
+   tx_states = orbit_loader.interpolate_tx_states(window)
+   ```
+
+3. If tangent height is present in the file:
+   - set `window.tangent_height_km`.
+
+4. Otherwise leave tangent height to be computed by `LosGeometry.tangent_height(window)` later, if the loader cannot compute it.
+
+### Important Design Constraint
+
+The public `CosmicLoader` API does not expose an orbit loader parameter.
+
+Therefore, if this module performs orbit interpolation, it should instantiate or manage `OrbitLoader` internally using `AppConfig`.
+
+This is consistent with the task statement that `CosmicLoader` “should call or cooperate with `OrbitLoader`.”
+
+---
+
+## 9. What This Module Must Not Do
+
+`CosmicLoader` must not perform scientific processing assigned elsewhere.
+
+Do not perform:
+
+1. Phase detrending.
+   - Belongs to `SignalPreprocessor.detrend_phase`.
+
+2. Amplitude normalization beyond mapping SNR to amplitude.
+   - Belongs to `SignalPreprocessor.normalize_amplitude`.
+
+3. Calculation of `sigma_phi`.
+   - Belongs to `ScintillationCalculator.compute_sigma_phi`.
+
+4. Calculation of `S4`.
+   - Belongs to `ScintillationCalculator.compute_s4`.
+
+5. Pre-BP threshold:
+   ```yaml
+   sigma_phi_threshold_rad: 0.25
+   ```
+   - Belongs to `QualityController.passes_pre_bp`.
+
+6. Tangent-height filtering:
+   ```yaml
+   tangent_point_filter.min_height_km: 150
+   ```
+   - Belongs to `QualityController.passes_pre_bp`.
+
+7. BP processing.
+   - Belongs to `BackpropProcessor`.
+
+8. Monthly local-time filtering:
+   ```yaml
+   local_time_filter.start_hour: 18
+   local_time_filter.end_hour: 24
+   ```
+   - Belongs to `RealDataExperiments.make_monthly_bins`.
+
+9. L1/L2 pairing.
+   - Belongs to `RealDataExperiments.pair_l1_l2`.
+
+---
+
+## 10. Error Handling and Logging
+
+Because the file schema is uncertain, the loader should provide transparent errors.
+
+Recommended error categories:
+
+1. File open failure.
+2. Missing timestamp variable.
+3. Missing phase variable.
+4. Missing SNR/amplitude variable.
+5. Missing required metadata.
+6. Unsupported phase units.
+7. Unsupported time encoding.
+8. Orbit interpolation unavailable.
+9. Empty event after filtering invalid samples.
+10. No valid 10-second windows.
+
+For production-scale processing, a malformed file should not necessarily stop the entire year. `iter_windows` may log the error and continue to the next file, depending on the intended robustness.
+
+The config includes:
+
+```yaml
+reproducibility.log_rejection_reasons: true
+```
+
+Although rejection reasons are mostly handled later, loader-level skip reasons should also be logged or recorded when practical.
+
+---
+
+## 11. Reproducibility Requirements
+
+To support paper reproduction, this loader must preserve enough metadata for diagnostics and aggregation.
+
+Each `SignalWindow` should carry:
+
+- `event_id`
+- `leo_id`
+- `gnss_id`
+- `constellation`
+- `signal_name`
+- `antenna`
+- `start_time`
+- `mid_time`
+- `end_time`
+- `sampling_rate_hz`
+
+These are needed for:
+
+1. per-window diagnostics,
+2. accepted/rejected statistics,
+3. L1/L2 pairing,
+4. monthly maps,
+5. debugging differences from expected paper counts:
+   - 2021 L1 accepted geolocations: `332000`
+   - 2023 L1 accepted geolocations: `1108000`
+   - L1/L2 comparison counts:
+     - L1: `13000`
+     - L2: `11000`
+     - common: `8000`
+
+The loader itself does not need to reproduce those counts, but bad ingestion will directly affect them.
+
+---
+
+## 12. Interaction with Downstream Modules
+
+### 12.1 With `SignalPreprocessor`
+
+`CosmicLoader` returns raw or minimally cleaned phase/SNR arrays.
+
+Then `SignalPreprocessor.prepare_window(window)` performs:
+
+- phase unwrap if needed,
+- detrending,
+- amplitude normalization,
+- complex signal construction later as needed.
+
+### 12.2 With `ScintillationCalculator`
+
+The calculator assumes:
+
+```python
+window.phase_rad
+window.amplitude
+window.snr_vv
+```
+
+are numeric, finite arrays with matching length.
+
+### 12.3 With `LosGeometry`
+
+`LosGeometry` requires:
+
+```python
+window.rx_states
+window.tx_states
+```
+
+to compute:
+
+- midpoint LOS,
+- candidate positions,
+- tangent height,
+- final geolocation from distance.
+
+Therefore loader/orbit cooperation is critical.
+
+### 12.4 With `RealDataExperiments`
+
+`RealDataExperiments.process_year(year, signal)` depends on:
+
+```python
+CosmicLoader.iter_windows(year, signal)
+```
+
+and expects a stream of `SignalWindow` objects.
+
+`RealDataExperiments.process_l1_l2_period(start, end)` depends on stable metadata for pairing.
+
+---
+
+## 13. Practical Implementation Strategy
+
+A robust implementation should proceed in layers.
+
+### Layer 1: File Discovery
+
+Implement `list_events` with recursive search and extension filtering.
+
+### Layer 2: Generic File Opening
+
+Implement private schema handling using:
+
+1. `xarray.open_dataset`
+2. fallback to `h5py.File`
+3. fallback to `netCDF4.Dataset`
+
+### Layer 3: Metadata Extraction
+
+Extract or infer:
+
+- event ID,
+- LEO ID,
+- GNSS ID,
+- constellation,
+- signal,
+- antenna,
+- sampling rate.
+
+### Layer 4: Time/Signal Arrays
+
+Extract:
+
+- timestamps,
+- phase,
+- SNR/amplitude.
+
+Convert:
+
+- timestamps to Python datetimes or a consistent datetime array,
+- phase to radians,
+- amplitude to numeric SNR-like amplitude.
+
+### Layer 5: Windowing
+
+Use `segment_to_windows(event_data, config.processing.window_seconds)`.
+
+### Layer 6: Orbit Attachment
+
+Use existing state vectors if available, otherwise call `OrbitLoader`.
+
+### Layer 7: Yielding
+
+Return/yield only well-formed `SignalWindow` objects.
+
+---
+
+## 14. Validation Checks for This Module
+
+Before implementing the full BP pipeline, `CosmicLoader` should be validated independently.
+
+For a small sample of COSMIC-2 HR files:
+
+1. `list_events(2021, "L1")` returns files.
+2. `load_event(path)` returns one or more `SignalWindow` objects.
+3. Each `SignalWindow` has:
+   - non-empty `times`,
+   - phase array same length as time,
+   - amplitude/SNR array same length as time,
+   - valid `start_time`, `mid_time`, `end_time`,
+   - sampling rate near 50 Hz for GPS or 100 Hz for GLONASS.
+4. 10-second GPS windows have approximately 500 samples.
+5. 10-second GLONASS windows have approximately 1000 samples.
+6. `event_id` is stable.
+7. `signal_name` correctly distinguishes L1, L2C, L2P, etc.
+8. `antenna` identifies velocity-facing or anti-velocity-facing POD antenna when available.
+9. `rx_states` and `tx_states` are populated or clearly deferred.
+10. `iter_windows(year, signal)` streams windows without loading an entire year into memory.
+
+---
+
+## 15. Key Ambiguities to Preserve and Document
+
+The implementation must explicitly account for these known uncertainties from `config.yaml` and the paper:
+
+1. Exact COSMIC-2 HR data field names are unknown.
+2. GLONASS phase may or may not already be demodulated and connected.
+3. Exact SNR/amplitude normalization before BP is not fully specified.
+4. Some products may store phase in radians, cycles, or path length.
+5. Some products may store L1/L2 signals in separate files or combined files.
+6. Some products may include orbit states directly, while others require interpolation from orbit files.
+7. File naming conventions are unspecified.
+8. The loader should preserve enough metadata to resolve L1/L2 pairing later.
+
+These ambiguities should not be hidden inside silent assumptions. They should produce clear logs or explicit exceptions when encountered.
+
+---
+
+## 16. Summary of Correct Module Behavior
+
+`src/data/cosmic_loader.py` should:
+
+1. Locate COSMIC-2 HR files under `config.paths.cosmic2_hr_data_dir`.
+2. Filter by year and signal when possible.
+3. Read netCDF/HDF files using available scientific Python I/O libraries.
+4. Extract high-rate timestamps, phase, SNR/amplitude, and metadata.
+5. Convert phase to radians and amplitude to SNR-based amplitude.
+6. Infer or read sampling rate.
+7. Segment each event into 10-second `SignalWindow` objects using `processing.window_seconds`.
+8. Populate receiver and transmitter states directly or through `OrbitLoader`.
+9. Preserve metadata required for diagnostics, monthly maps, and L1/L2 pairing.
+10. Avoid performing downstream scientific processing or QC.
+
+This module is the first real-data dependency in the reproduction pipeline. Its correctness determines whether the later BP geolocation algorithm can reproduce the paper’s 2021/2023 COSMIC-2 results and L1/L2 comparison.

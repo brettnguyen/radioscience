@@ -1,0 +1,337 @@
+"""dataset_loader.py
+
+This module is responsible for loading and preprocessing datasets for both translation and parsing tasks.
+It leverages Hugging Face’s tokenizers for tokenization and PyTorch’s DataLoader for dynamic batching
+based on token counts (approximately 25,000 tokens per side as specified in the configuration).
+All configuration parameters (including file paths, token thresholds, and vocabulary sizes) are read from config.py.
+"""
+
+import os
+import random
+from typing import List, Tuple, Iterable
+
+import torch
+from torch.utils.data import Dataset, DataLoader, Sampler
+
+from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders, processors, normalizers
+
+from config import get_config
+
+# Default pad token ID used if not specified by the tokenizer.
+DEFAULT_PAD_TOKEN_ID = 0
+
+
+class DynamicBatchSampler(Sampler[List[int]]):
+    """A custom batch sampler that groups sample indices such that the total number of tokens
+    in source and target does not exceed specified thresholds.
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        max_src_tokens: int,
+        max_tgt_tokens: int,
+        shuffle: bool = True,
+    ) -> None:
+        self.dataset = dataset
+        self.max_src_tokens = max_src_tokens
+        self.max_tgt_tokens = max_tgt_tokens
+        self.shuffle = shuffle
+        self.indices = list(range(len(dataset)))
+        # Shuffle indices if required.
+        if self.shuffle:
+            random.shuffle(self.indices)
+        # Sort indices by the maximum token length (source or target) for better bucketing.
+        self.indices.sort(key=lambda idx: max(len(self.dataset[idx][0]), len(self.dataset[idx][1])))
+
+    def __iter__(self) -> Iterable[List[int]]:
+        batch: List[int] = []
+        total_src = 0
+        total_tgt = 0
+        for idx in self.indices:
+            src_len = len(self.dataset[idx][0])
+            tgt_len = len(self.dataset[idx][1])
+            # If adding the current example exceeds any threshold, yield the current batch.
+            if batch and (total_src + src_len > self.max_src_tokens or total_tgt + tgt_len > self.max_tgt_tokens):
+                yield batch
+                batch = []
+                total_src = 0
+                total_tgt = 0
+            batch.append(idx)
+            total_src += src_len
+            total_tgt += tgt_len
+        if batch:
+            yield batch
+
+    def __len__(self) -> int:
+        # Approximate number of batches based on total tokens in the dataset.
+        total_src = sum(len(self.dataset[idx][0]) for idx in self.indices)
+        total_tgt = sum(len(self.dataset[idx][1]) for idx in self.indices)
+        approx_batches = max(total_src // self.max_src_tokens, total_tgt // self.max_tgt_tokens)
+        return approx_batches if approx_batches > 0 else 1
+
+
+class TranslationDataset(Dataset):
+    """Dataset for machine translation tasks.
+
+    Each example is assumed to be a tuple of (source_tokens, target_tokens).
+    The data file is expected to have one sentence pair per line separated by a tab.
+    Tokenization is performed using the provided Hugging Face tokenizer.
+    """
+
+    def __init__(self, file_path: str, tokenizer: Tokenizer) -> None:
+        super().__init__()
+        self.file_path: str = file_path
+        self.tokenizer: Tokenizer = tokenizer
+        self.examples: List[Tuple[List[int], List[int]]] = []
+        self._load_file()
+
+    def _load_file(self) -> None:
+        if not os.path.exists(self.file_path):
+            raise FileNotFoundError(f"Translation dataset file not found: {self.file_path}")
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # Expecting each line to be: source_sentence <tab> target_sentence
+                parts = line.split("\t")
+                if len(parts) != 2:
+                    # Skip lines that do not conform to expected format.
+                    continue
+                src_sentence, tgt_sentence = parts
+                src_tokens = self.tokenizer.encode(src_sentence).ids
+                tgt_tokens = self.tokenizer.encode(tgt_sentence).ids
+                self.examples.append((src_tokens, tgt_tokens))
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> Tuple[List[int], List[int]]:
+        return self.examples[idx]
+
+
+class ParsingDataset(Dataset):
+    """Dataset for English constituency parsing tasks.
+
+    Each example is assumed to be a tuple of (source_tokens, target_tokens) where target_tokens
+    represent a linearized structure of the parse tree. The data file should have one example
+    per line separated by a tab. Tokenization is performed using the provided tokenizer.
+    """
+
+    def __init__(self, file_path: str, tokenizer: Tokenizer) -> None:
+        super().__init__()
+        self.file_path: str = file_path
+        self.tokenizer: Tokenizer = tokenizer
+        self.examples: List[Tuple[List[int], List[int]]] = []
+        self._load_file()
+
+    def _load_file(self) -> None:
+        if not os.path.exists(self.file_path):
+            raise FileNotFoundError(f"Parsing dataset file not found: {self.file_path}")
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # Expecting each line to be: source_sentence <tab> target_parse
+                parts = line.split("\t")
+                if len(parts) != 2:
+                    continue
+                src_sentence, tgt_parse = parts
+                src_tokens = self.tokenizer.encode(src_sentence).ids
+                tgt_tokens = self.tokenizer.encode(tgt_parse).ids
+                self.examples.append((src_tokens, tgt_tokens))
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> Tuple[List[int], List[int]]:
+        return self.examples[idx]
+
+
+class DatasetLoader:
+    """Handles loading and preprocessing for both translation and parsing tasks.
+
+    This class initializes tokenizers (using Hugging Face's tokenizers), reads raw data files,
+    tokenizes the text, and creates dynamic PyTorch DataLoaders that batch examples based on
+    token count thresholds as specified in the configuration.
+    """
+
+    def __init__(self, config: dict) -> None:
+        self.config: dict = config
+        # Default file paths; these can be overridden via the configuration dictionary.
+        self.translation_train_path: str = config.get("translation_train_path", "./data/wmt14_en_de_train.txt")
+        self.translation_val_path: str = config.get("translation_val_path", "./data/wmt14_en_de_val.txt")
+        self.parsing_train_path: str = config.get("parsing_train_path", "./data/wsj_train.txt")
+        self.parsing_val_path: str = config.get("parsing_val_path", "./data/wsj_val.txt")
+
+        # Build tokenizers for translation and parsing tasks.
+        self.translation_tokenizer: Tokenizer = self._build_translation_tokenizer()
+        self.parsing_tokenizer: Tokenizer = self._build_parsing_tokenizer()
+
+        # Pad token id; if the tokenizer defines a pad token, it can be retrieved; otherwise use default.
+        self.pad_token_id: int = DEFAULT_PAD_TOKEN_ID
+
+    def _build_translation_tokenizer(self) -> Tokenizer:
+        """Builds or loads the tokenizer for translation tasks using Hugging Face's tokenizers library.
+
+        If a pretrained tokenizer file exists at the specified path, it is loaded.
+        Otherwise, a new BPE tokenizer is trained on the translation training data.
+        """
+        tokenizer_path: str = "./tokenizers/translation_tokenizer.json"
+        vocab_size: int = 37000  # Default shared vocabulary size for translation (e.g., English–German)
+
+        if os.path.exists(tokenizer_path):
+            try:
+                tokenizer: Tokenizer = Tokenizer.from_file(tokenizer_path)
+                return tokenizer
+            except Exception as e:
+                print(f"Error loading translation tokenizer from {tokenizer_path}: {e}")
+
+        # Ensure the training file exists to train the tokenizer.
+        if not os.path.exists(self.translation_train_path):
+            raise FileNotFoundError(f"Translation training data not found: {self.translation_train_path}")
+
+        # Initialize a new BPE tokenizer.
+        tokenizer = Tokenizer(models.BPE())
+        tokenizer.normalizer = normalizers.Sequence([normalizers.NFD(), normalizers.Lowercase(), normalizers.StripAccents()])
+        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+        trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"])
+
+        files = [self.translation_train_path]
+        tokenizer.train(files, trainer)
+        os.makedirs(os.path.dirname(tokenizer_path), exist_ok=True)
+        tokenizer.save(tokenizer_path)
+        return tokenizer
+
+    def _build_parsing_tokenizer(self) -> Tokenizer:
+        """Builds or loads the tokenizer for parsing tasks using Hugging Face's tokenizers library.
+
+        For the WSJ parsing task in WSJ-only mode, the vocabulary size is set to 16,000 tokens.
+        """
+        tokenizer_path: str = "./tokenizers/parsing_tokenizer.json"
+        vocab_size: int = 16000  # Default vocabulary size for WSJ-only parsing tasks.
+
+        if os.path.exists(tokenizer_path):
+            try:
+                tokenizer: Tokenizer = Tokenizer.from_file(tokenizer_path)
+                return tokenizer
+            except Exception as e:
+                print(f"Error loading parsing tokenizer from {tokenizer_path}: {e}")
+
+        if not os.path.exists(self.parsing_train_path):
+            raise FileNotFoundError(f"Parsing training data not found: {self.parsing_train_path}")
+
+        tokenizer = Tokenizer(models.BPE())
+        tokenizer.normalizer = normalizers.Sequence([normalizers.NFD(), normalizers.Lowercase(), normalizers.StripAccents()])
+        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+        trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"])
+
+        files = [self.parsing_train_path]
+        tokenizer.train(files, trainer)
+        os.makedirs(os.path.dirname(tokenizer_path), exist_ok=True)
+        tokenizer.save(tokenizer_path)
+        return tokenizer
+
+    @staticmethod
+    def _pad_sequences(sequences: List[List[int]], pad_value: int = DEFAULT_PAD_TOKEN_ID) -> torch.Tensor:
+        """Pads a list of token sequences to the maximum length in the batch."""
+        max_length: int = max(len(seq) for seq in sequences)
+        padded_sequences: List[List[int]] = [
+            seq + [pad_value] * (max_length - len(seq)) for seq in sequences
+        ]
+        return torch.tensor(padded_sequences, dtype=torch.long)
+
+    def _translation_collate_fn(self, batch: List[Tuple[List[int], List[int]]]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Collate function for translation tasks.
+
+        Pads source and target sequences in a batch and returns them as tensors.
+        """
+        src_batch = [item[0] for item in batch]
+        tgt_batch = [item[1] for item in batch]
+        padded_src = self._pad_sequences(src_batch, pad_value=self.pad_token_id)
+        padded_tgt = self._pad_sequences(tgt_batch, pad_value=self.pad_token_id)
+        return padded_src, padded_tgt
+
+    def _parsing_collate_fn(self, batch: List[Tuple[List[int], List[int]]]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Collate function for parsing tasks.
+
+        Pads source sequences and target parse sequences in a batch and returns them as tensors.
+        """
+        src_batch = [item[0] for item in batch]
+        tgt_batch = [item[1] for item in batch]
+        padded_src = self._pad_sequences(src_batch, pad_value=self.pad_token_id)
+        padded_tgt = self._pad_sequences(tgt_batch, pad_value=self.pad_token_id)
+        return padded_src, padded_tgt
+
+    def load_translation_data(self) -> Tuple[DataLoader, DataLoader]:
+        """Loads and preprocesses the translation dataset.
+
+        Steps:
+          1. Reads the translation training and validation files (default: one sentence pair per line separated by a tab).
+          2. Tokenizes each sentence using the shared translation tokenizer.
+          3. Groups examples into dynamic batches based on token counts (≈25,000 tokens per side).
+          4. Creates PyTorch DataLoaders with a custom collate function to pad sequences.
+
+        Returns:
+          A tuple (train_loader, validation_loader) for the translation task.
+        """
+        train_dataset = TranslationDataset(self.translation_train_path, self.translation_tokenizer)
+        val_dataset = TranslationDataset(self.translation_val_path, self.translation_tokenizer)
+
+        # Retrieve batching thresholds from configuration.
+        max_src_tokens: int = self.config.get("training", {}).get("batch_token_size", {}).get("source", 25000)
+        max_tgt_tokens: int = self.config.get("training", {}).get("batch_token_size", {}).get("target", 25000)
+
+        train_sampler = DynamicBatchSampler(train_dataset, max_src_tokens, max_tgt_tokens, shuffle=True)
+        val_sampler = DynamicBatchSampler(val_dataset, max_src_tokens, max_tgt_tokens, shuffle=False)
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_sampler,
+            collate_fn=self._translation_collate_fn,
+            num_workers=4,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_sampler=val_sampler,
+            collate_fn=self._translation_collate_fn,
+            num_workers=4,
+        )
+        return train_loader, val_loader
+
+    def load_parsing_data(self) -> Tuple[DataLoader, DataLoader]:
+        """Loads and preprocesses the WSJ constituency parsing dataset.
+
+        Steps:
+          1. Reads the WSJ training and validation files (each line should contain a sentence and its parse separated by a tab).
+          2. Tokenizes each example using the parsing tokenizer.
+          3. Groups examples into dynamic batches based on token counts (using the same thresholds as translation).
+          4. Creates PyTorch DataLoaders with a custom collate function for padding.
+
+        Returns:
+          A tuple (train_loader, validation_loader) for the parsing task.
+        """
+        train_dataset = ParsingDataset(self.parsing_train_path, self.parsing_tokenizer)
+        val_dataset = ParsingDataset(self.parsing_val_path, self.parsing_tokenizer)
+
+        max_src_tokens: int = self.config.get("training", {}).get("batch_token_size", {}).get("source", 25000)
+        max_tgt_tokens: int = self.config.get("training", {}).get("batch_token_size", {}).get("target", 25000)
+
+        train_sampler = DynamicBatchSampler(train_dataset, max_src_tokens, max_tgt_tokens, shuffle=True)
+        val_sampler = DynamicBatchSampler(val_dataset, max_src_tokens, max_tgt_tokens, shuffle=False)
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_sampler,
+            collate_fn=self._parsing_collate_fn,
+            num_workers=4,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_sampler=val_sampler,
+            collate_fn=self._parsing_collate_fn,
+            num_workers=4,
+        )
+        return train_loader, val_loader

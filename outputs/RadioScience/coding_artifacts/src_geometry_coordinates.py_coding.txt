@@ -1,0 +1,371 @@
+## Code: src/geometry/coordinates.py
+```python
+## src/geometry/coordinates.py
+"""Coordinate transformation utilities for COSMIC-2 BP geolocation.
+
+This module provides the low-level geodetic utilities used by LOS geometry,
+magnetic-field evaluation, local-time filtering, and final geolocation output.
+
+Conventions:
+    * ECEF positions are in meters.
+    * Geodetic latitude and longitude are in degrees.
+    * Longitude is east-positive and returned in the canonical interval
+      ``[-180, 180)``.
+    * ``geodetic_to_ecef()`` accepts altitude in meters, matching its public
+      design signature.
+    * ``ecef_to_geodetic()`` returns altitude in kilometers, matching
+      ``GeolocationResult.altitude_km`` and the pipeline call flow.
+
+The implementation uses pyproj with:
+    * EPSG:4978 for WGS84 geocentric ECEF coordinates.
+    * EPSG:4979 for WGS84 geographic 3D coordinates.
+
+The paper states that final geolocation height is over a reference ellipsoid
+but does not expose an ellipsoid configuration field. WGS84/EPSG:4979 is the
+standard practical convention used here.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import math
+from typing import Final
+
+import numpy as np
+from pyproj import CRS, Transformer
+
+from src.core.types import Vector3
+
+
+_ECEF_CRS_EPSG: Final[int] = 4978
+_GEODETIC_CRS_EPSG: Final[int] = 4979
+_M_PER_KM: Final[float] = 1000.0
+_DEG_PER_LOCAL_TIME_HOUR: Final[float] = 15.0
+_HOURS_PER_DAY: Final[float] = 24.0
+_SECONDS_PER_HOUR: Final[float] = 3600.0
+_MICROSECONDS_PER_HOUR: Final[float] = 3.6e9
+_ECEF_ORIGIN_EPS_M: Final[float] = 1.0e-9
+_UNIT_TOLERANCE: Final[float] = 1.0e-14
+
+
+def _require_finite(value: float, name: str) -> float:
+    """Validate and return a finite scalar.
+
+    Args:
+        value: Scalar value to validate.
+        name: Name used in error messages.
+
+    Returns:
+        The value converted to ``float``.
+
+    Raises:
+        ValueError: If the value is not finite.
+    """
+    scalar_value: float = float(value)
+    if not math.isfinite(scalar_value):
+        raise ValueError(f"{name} must be finite, got {value!r}.")
+    return scalar_value
+
+
+def _validate_latitude_deg(lat_deg: float) -> float:
+    """Validate geodetic latitude in degrees.
+
+    Args:
+        lat_deg: Latitude in degrees.
+
+    Returns:
+        Validated latitude as a float.
+
+    Raises:
+        ValueError: If latitude is non-finite or outside ``[-90, 90]``.
+    """
+    latitude: float = _require_finite(lat_deg, "lat_deg")
+    if latitude < -90.0 or latitude > 90.0:
+        raise ValueError(f"lat_deg must be in [-90, 90], got {latitude}.")
+    return latitude
+
+
+def _wrap_lon_deg(lon_deg: float) -> float:
+    """Wrap east-positive longitude to ``[-180, 180)`` degrees.
+
+    Args:
+        lon_deg: Longitude in degrees.
+
+    Returns:
+        Wrapped longitude in degrees.
+
+    Raises:
+        ValueError: If longitude is non-finite.
+    """
+    longitude: float = _require_finite(lon_deg, "lon_deg")
+    wrapped: float = ((longitude + 180.0) % 360.0) - 180.0
+
+    # Canonicalize values that round extremely close to the upper endpoint.
+    if wrapped >= 180.0:
+        wrapped -= 360.0
+    if math.isclose(wrapped, 180.0, abs_tol=1.0e-12):
+        wrapped = -180.0
+    if math.isclose(wrapped, 0.0, abs_tol=1.0e-14):
+        wrapped = 0.0
+
+    return wrapped
+
+
+def _vector_from_array(array: np.ndarray) -> Vector3:
+    """Construct a Vector3 from a length-3 array."""
+    return Vector3(float(array[0]), float(array[1]), float(array[2]))
+
+
+class CoordinateTransformer:
+    """Coordinate utility class for ECEF, geodetic, local time, and ENU basis.
+
+    The class is stateless apart from cached pyproj transformer instances. It
+    does not read application configuration and does not apply any geolocation
+    QC or experiment thresholds.
+    """
+
+    def __init__(self) -> None:
+        """Create WGS84 ECEF/geodetic transformers."""
+        self._ecef_crs: CRS = CRS.from_epsg(_ECEF_CRS_EPSG)
+        self._geodetic_crs: CRS = CRS.from_epsg(_GEODETIC_CRS_EPSG)
+
+        # always_xy=True ensures geographic inputs/outputs are lon, lat, alt.
+        self._ecef_to_geodetic_transformer: Transformer = Transformer.from_crs(
+            self._ecef_crs,
+            self._geodetic_crs,
+            always_xy=True,
+        )
+        self._geodetic_to_ecef_transformer: Transformer = Transformer.from_crs(
+            self._geodetic_crs,
+            self._ecef_crs,
+            always_xy=True,
+        )
+
+    def ecef_to_geodetic(self, position_m: Vector3) -> tuple[float, float, float]:
+        """Convert ECEF position to geodetic latitude, longitude, altitude.
+
+        Args:
+            position_m: ECEF position in meters.
+
+        Returns:
+            Tuple ``(lat_deg, lon_deg, alt_km)``. Note that altitude is returned
+            in kilometers to match ``GeolocationResult.altitude_km`` and the
+            pipeline sequence diagram.
+
+        Raises:
+            TypeError: If ``position_m`` is not a ``Vector3``.
+            ValueError: If coordinates are non-finite, at the ECEF origin, or
+                pyproj returns non-finite geodetic coordinates.
+        """
+        if not isinstance(position_m, Vector3):
+            raise TypeError(
+                "position_m must be a Vector3, "
+                f"got {type(position_m).__name__}."
+            )
+
+        x_m: float = _require_finite(position_m.x, "position_m.x")
+        y_m: float = _require_finite(position_m.y, "position_m.y")
+        z_m: float = _require_finite(position_m.z, "position_m.z")
+
+        radius_m: float = math.sqrt(x_m * x_m + y_m * y_m + z_m * z_m)
+        if radius_m <= _ECEF_ORIGIN_EPS_M:
+            raise ValueError(
+                "ECEF origin is physically invalid for geodetic conversion."
+            )
+
+        lon_deg_raw, lat_deg_raw, alt_m_raw = (
+            self._ecef_to_geodetic_transformer.transform(x_m, y_m, z_m)
+        )
+
+        lat_deg: float = _validate_latitude_deg(float(lat_deg_raw))
+        lon_deg: float = _wrap_lon_deg(float(lon_deg_raw))
+        alt_m: float = _require_finite(float(alt_m_raw), "alt_m")
+        alt_km: float = alt_m / _M_PER_KM
+
+        return lat_deg, lon_deg, alt_km
+
+    def geodetic_to_ecef(
+        self,
+        lat_deg: float,
+        lon_deg: float,
+        alt_m: float,
+    ) -> Vector3:
+        """Convert geodetic coordinates to ECEF.
+
+        Args:
+            lat_deg: Geodetic latitude in degrees. Must be in ``[-90, 90]``.
+            lon_deg: East-positive longitude in degrees. Values outside
+                ``[-180, 180)`` are accepted and wrapped internally.
+            alt_m: Ellipsoidal altitude in meters. Negative values are allowed.
+
+        Returns:
+            ECEF position as ``Vector3`` in meters.
+
+        Raises:
+            ValueError: If any input or transformed coordinate is non-finite, or
+                if latitude is outside the valid range.
+        """
+        latitude_deg: float = _validate_latitude_deg(lat_deg)
+        longitude_deg: float = _wrap_lon_deg(lon_deg)
+        altitude_m: float = _require_finite(alt_m, "alt_m")
+
+        x_m_raw, y_m_raw, z_m_raw = self._geodetic_to_ecef_transformer.transform(
+            longitude_deg,
+            latitude_deg,
+            altitude_m,
+        )
+
+        x_m: float = _require_finite(float(x_m_raw), "x_m")
+        y_m: float = _require_finite(float(y_m_raw), "y_m")
+        z_m: float = _require_finite(float(z_m_raw), "z_m")
+
+        return Vector3(x_m, y_m, z_m)
+
+    def local_time(self, time: datetime, lon_deg: float) -> float:
+        """Compute longitude-based local solar time in hours.
+
+        The paper uses post-sunset local time for monthly maps. This method
+        computes only the local time value; downstream modules apply configured
+        filters such as ``18 <= LT < 24``.
+
+        Naive datetimes are treated as UTC, consistent with COSMIC-2
+        observation-time conventions in the reproduction workflow. Aware
+        datetimes are converted to UTC before extracting the decimal hour.
+
+        Args:
+            time: UTC observation time. Naive datetimes are interpreted as UTC.
+            lon_deg: East-positive longitude in degrees.
+
+        Returns:
+            Local time in hours in the interval ``[0, 24)``.
+
+        Raises:
+            TypeError: If ``time`` is not a ``datetime``.
+            ValueError: If longitude is non-finite.
+        """
+        if not isinstance(time, datetime):
+            raise TypeError(f"time must be datetime, got {type(time).__name__}.")
+
+        if time.tzinfo is None:
+            utc_time: datetime = time.replace(tzinfo=timezone.utc)
+        else:
+            utc_time = time.astimezone(timezone.utc)
+
+        longitude_deg: float = _wrap_lon_deg(lon_deg)
+
+        utc_decimal_hour: float = (
+            float(utc_time.hour)
+            + float(utc_time.minute) / 60.0
+            + float(utc_time.second) / _SECONDS_PER_HOUR
+            + float(utc_time.microsecond) / _MICROSECONDS_PER_HOUR
+        )
+
+        local_time_hr: float = (
+            utc_decimal_hour + longitude_deg / _DEG_PER_LOCAL_TIME_HOUR
+        ) % _HOURS_PER_DAY
+
+        # Avoid returning exactly 24 because of any floating-point roundoff.
+        if local_time_hr >= _HOURS_PER_DAY:
+            local_time_hr -= _HOURS_PER_DAY
+        if math.isclose(local_time_hr, _HOURS_PER_DAY, abs_tol=1.0e-12):
+            local_time_hr = 0.0
+        if math.isclose(local_time_hr, 0.0, abs_tol=1.0e-14):
+            local_time_hr = 0.0
+
+        return local_time_hr
+
+    def enu_basis(self, lat_deg: float, lon_deg: float) -> tuple[Vector3, Vector3, Vector3]:
+        """Return local East-North-Up unit basis vectors in ECEF coordinates.
+
+        Args:
+            lat_deg: Geodetic latitude in degrees.
+            lon_deg: East-positive longitude in degrees. Wrapped internally.
+
+        Returns:
+            Tuple ``(east, north, up)`` where each element is a unit ``Vector3``
+            expressed in ECEF coordinates.
+
+        Raises:
+            ValueError: If inputs are invalid or the computed basis fails
+                numerical orthonormality checks.
+        """
+        latitude_deg: float = _validate_latitude_deg(lat_deg)
+        longitude_deg: float = _wrap_lon_deg(lon_deg)
+
+        lat_rad: float = math.radians(latitude_deg)
+        lon_rad: float = math.radians(longitude_deg)
+
+        sin_lat: float = math.sin(lat_rad)
+        cos_lat: float = math.cos(lat_rad)
+        sin_lon: float = math.sin(lon_rad)
+        cos_lon: float = math.cos(lon_rad)
+
+        east_array: np.ndarray = np.array(
+            [-sin_lon, cos_lon, 0.0],
+            dtype=np.float64,
+        )
+        north_array: np.ndarray = np.array(
+            [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
+            dtype=np.float64,
+        )
+        up_array: np.ndarray = np.array(
+            [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat],
+            dtype=np.float64,
+        )
+
+        east: Vector3 = _vector_from_array(east_array).unit()
+        north: Vector3 = _vector_from_array(north_array).unit()
+        up: Vector3 = _vector_from_array(up_array).unit()
+
+        self._validate_enu_orthonormality(east=east, north=north, up=up)
+
+        return east, north, up
+
+    @staticmethod
+    def _validate_enu_orthonormality(
+        east: Vector3,
+        north: Vector3,
+        up: Vector3,
+    ) -> None:
+        """Validate numerical orthonormality of ENU basis vectors.
+
+        Args:
+            east: East unit vector in ECEF.
+            north: North unit vector in ECEF.
+            up: Up unit vector in ECEF.
+
+        Raises:
+            ValueError: If the basis is not orthonormal within numerical
+                tolerance.
+        """
+        east_array: np.ndarray = east.to_array()
+        north_array: np.ndarray = north.to_array()
+        up_array: np.ndarray = up.to_array()
+
+        for name, vector in {
+            "east": east_array,
+            "north": north_array,
+            "up": up_array,
+        }.items():
+            norm: float = float(np.linalg.norm(vector))
+            if not math.isclose(norm, 1.0, rel_tol=0.0, abs_tol=_UNIT_TOLERANCE):
+                raise ValueError(f"{name} ENU basis vector is not unit length.")
+
+        dot_en: float = float(np.dot(east_array, north_array))
+        dot_eu: float = float(np.dot(east_array, up_array))
+        dot_nu: float = float(np.dot(north_array, up_array))
+
+        if abs(dot_en) > _UNIT_TOLERANCE:
+            raise ValueError("ENU basis invalid: east and north are not orthogonal.")
+        if abs(dot_eu) > _UNIT_TOLERANCE:
+            raise ValueError("ENU basis invalid: east and up are not orthogonal.")
+        if abs(dot_nu) > _UNIT_TOLERANCE:
+            raise ValueError("ENU basis invalid: north and up are not orthogonal.")
+
+        cross_en: np.ndarray = np.cross(east_array, north_array)
+        if not np.allclose(cross_en, up_array, rtol=0.0, atol=2.0 * _UNIT_TOLERANCE):
+            raise ValueError("ENU basis invalid: east × north does not equal up.")
+
+
+__all__ = ["CoordinateTransformer"]
+```

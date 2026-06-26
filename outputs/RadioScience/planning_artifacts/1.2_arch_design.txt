@@ -1,0 +1,515 @@
+----------------------------------------
+[Implementation approach]
+Build a simple Python command-line research pipeline with two modes: (1) synthetic validation experiments for the back-propagation method, and (2) COSMIC-2 high-rate data processing for real geolocation products. Use NumPy/SciPy for signal processing and propagation, xarray/netCDF4/h5py for COSMIC-2 files, pandas/pyarrow for tabular outputs, astropy or sgp4/gnss utilities as needed for orbit interpolation, pymap3d/pyproj for geodetic transforms, ppigrf or pyIGRF for IGRF-13 magnetic-field direction, matplotlib/cartopy for maps, and pydantic/yaml for configuration. The architecture is intentionally modular but small: data loading, geometry, signal preprocessing, propagation, geolocation, quality control, synthetic experiments, and plotting. The first implementation should use FFT/plane-wave back propagation with the paper's Option 2 stationary-transmitter correction, while keeping a placeholder interface for Kirchhoff integral validation later.
+
+----------------------------------------
+[File list]
+- main.py
+- config/default.yaml
+- src/config.py
+- src/data/cosmic_loader.py
+- src/data/orbit_loader.py
+- src/data/f107_loader.py
+- src/core/types.py
+- src/core/constants.py
+- src/geometry/coordinates.py
+- src/geometry/los.py
+- src/geometry/magnetic_field.py
+- src/geometry/bp_plane.py
+- src/signal/preprocessing.py
+- src/signal/scintillation.py
+- src/propagation/phase_screen.py
+- src/propagation/fft_propagator.py
+- src/propagation/kirchhoff.py
+- src/geolocation/stationary_correction.py
+- src/geolocation/backprop_processor.py
+- src/geolocation/qc.py
+- src/geolocation/geolocator.py
+- src/experiments/synthetic_experiments.py
+- src/experiments/real_data_experiments.py
+- src/visualization/plots.py
+- src/io/writers.py
+- requirements.txt
+- README.md
+
+----------------------------------------
+[Data structures and interfaces]
+classDiagram
+    class AppConfig {
+        +Path cosmic_data_dir
+        +Path receiver_orbit_dir
+        +Path gnss_orbit_dir
+        +Path output_dir
+        +str igrf_model
+        +float sigma_phi_threshold_rad
+        +float tangent_height_min_km
+        +float bp_min_distance_km
+        +float bp_max_distance_km
+        +float bp_step_km
+        +float mf_step_km
+        +float q_threshold
+        +float cos_alpha_threshold
+        +float smoothing_window_km
+        +int smoothing_poly_order
+        +float map_bin_deg
+        +int random_seed
+        +from_yaml(path: Path) AppConfig
+    }
+
+    class Main {
+        +__init__(config_path: Path)
+        +run() None
+        +run_synthetic() None
+        +run_real_data() None
+        +run_l1_l2_comparison() None
+        +run_monthly_maps() None
+    }
+
+    class Vector3 {
+        +float x
+        +float y
+        +float z
+        +to_array() ndarray
+        +norm() float
+        +unit() Vector3
+    }
+
+    class StateVector {
+        +datetime time
+        +Vector3 position_m
+        +Vector3 velocity_mps
+    }
+
+    class SignalWindow {
+        +str event_id
+        +str leo_id
+        +str gnss_id
+        +str constellation
+        +str signal_name
+        +str antenna
+        +datetime start_time
+        +datetime mid_time
+        +datetime end_time
+        +float sampling_rate_hz
+        +ndarray times
+        +ndarray phase_rad
+        +ndarray amplitude
+        +ndarray snr_vv
+        +list~StateVector~ rx_states
+        +list~StateVector~ tx_states
+        +float tangent_height_km
+        +copy() SignalWindow
+    }
+
+    class ScintillationMetrics {
+        +float sigma_phi_rad
+        +float s4
+        +float mean_snr_vv
+        +bool passes_threshold
+    }
+
+    class BpPlaneGeometry {
+        +float l_mf_km
+        +Vector3 los_unit
+        +Vector3 x_axis
+        +Vector3 y_axis
+        +Vector3 z_axis
+        +Vector3 magnetic_unit
+        +float cos_alpha
+        +float alpha_rad
+        +float beta_rad
+        +Vector3 candidate_position_m
+    }
+
+    class CorrectedSignal {
+        +float screen_distance_km
+        +ndarray z_m
+        +ndarray complex_signal
+        +ndarray amplitude
+        +ndarray phase_rad
+        +float curvature_radius_m
+    }
+
+    class BpCurve {
+        +float l_mf_km
+        +ndarray distances_km
+        +ndarray v_raw
+        +ndarray v_smooth
+        +float l0_km
+        +float v0
+        +float l1_km
+        +float l2_km
+        +float v1
+        +float v2
+        +float q
+        +bool has_valid_minimum
+    }
+
+    class DCurve {
+        +ndarray l_mf_km
+        +ndarray d_km
+        +ndarray l0_km
+        +ndarray q
+        +ndarray cos_alpha
+        +list~float~ zero_crossings_km
+        +bool is_multivalued
+    }
+
+    class GeolocationResult {
+        +str event_id
+        +str leo_id
+        +str gnss_id
+        +str signal_name
+        +datetime mid_time
+        +bool accepted
+        +str rejection_reason
+        +float distance_km
+        +float latitude_deg
+        +float longitude_deg
+        +float altitude_km
+        +float local_time_hr
+        +float sigma_phi_rad
+        +float s4
+        +float mean_snr_vv
+        +float q
+        +float cos_alpha
+        +float d_slope
+        +bool is_multivalued
+        +to_dict() dict
+    }
+
+    class CosmicLoader {
+        +__init__(config: AppConfig)
+        +list_events(year: int, signal: str) list~Path~
+        +load_event(path: Path) list~SignalWindow~
+        +iter_windows(year: int, signal: str) Iterator~SignalWindow~
+        +segment_to_windows(event_data: Any, window_seconds: int) list~SignalWindow~
+    }
+
+    class OrbitLoader {
+        +__init__(config: AppConfig)
+        +load_receiver_orbit(leo_id: str, date: date) Any
+        +load_gnss_orbit(date: date) Any
+        +interpolate_rx_states(window: SignalWindow) list~StateVector~
+        +interpolate_tx_states(window: SignalWindow) list~StateVector~
+    }
+
+    class F107Loader {
+        +__init__(source_url: str)
+        +download(start: date, end: date) DataFrame
+        +load_cached(path: Path) DataFrame
+    }
+
+    class CoordinateTransformer {
+        +ecef_to_geodetic(position_m: Vector3) tuple
+        +geodetic_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) Vector3
+        +local_time(time: datetime, lon_deg: float) float
+        +enu_basis(lat_deg: float, lon_deg: float) tuple
+    }
+
+    class LosGeometry {
+        +__init__(transformer: CoordinateTransformer)
+        +midpoint_los(window: SignalWindow) Vector3
+        +candidate_position(window: SignalWindow, distance_km: float) Vector3
+        +tangent_height(window: SignalWindow) float
+        +geolocation_from_distance(window: SignalWindow, distance_km: float) tuple
+    }
+
+    class MagneticFieldModel {
+        +__init__(model_name: str)
+        +field_vector(time: datetime, position_m: Vector3) Vector3
+        +field_unit(time: datetime, position_m: Vector3) Vector3
+    }
+
+    class BpPlaneBuilder {
+        +__init__(los_geometry: LosGeometry, magnetic_model: MagneticFieldModel)
+        +build(window: SignalWindow, l_mf_km: float) BpPlaneGeometry
+        +project_state(state: StateVector, plane: BpPlaneGeometry) tuple
+        +compute_scan_angle(window: SignalWindow, plane: BpPlaneGeometry) float
+    }
+
+    class SignalPreprocessor {
+        +__init__(config: AppConfig)
+        +detrend_phase(phase_rad: ndarray, times: ndarray) ndarray
+        +normalize_amplitude(amplitude: ndarray) ndarray
+        +make_complex_signal(amplitude: ndarray, phase_rad: ndarray) ndarray
+        +prepare_window(window: SignalWindow) SignalWindow
+    }
+
+    class ScintillationCalculator {
+        +compute(window: SignalWindow) ScintillationMetrics
+        +compute_sigma_phi(phase_rad: ndarray) float
+        +compute_s4(amplitude: ndarray) float
+    }
+
+    class PhaseScreenGenerator {
+        +__init__(random_seed: int)
+        +generate_1d(z_m: ndarray, p: float, outer_scale_km: float, sigma_phi_rad: float, wavelength_m: float) ndarray
+        +generate_2d(y_m: ndarray, z_m: ndarray, alpha_rad: float, p: float, outer_scale_km: float, sigma_phi_rad: float, wavelength_m: float) ndarray
+    }
+
+    class FftPropagator {
+        +__init__(wavelength_m: float)
+        +propagate_2d(field_z: ndarray, z_m: ndarray, distance_m: float) ndarray
+        +backpropagate_2d(field_z: ndarray, z_m: ndarray, distance_m: float) ndarray
+        +propagate_3d(field_yz: ndarray, y_m: ndarray, z_m: ndarray, distance_m: float) ndarray
+        +amplitude_variance(field: ndarray) float
+    }
+
+    class KirchhoffPropagator {
+        +__init__(wavelength_m: float)
+        +backpropagate_arbitrary_trajectory(signal: ndarray, source_points_m: ndarray, target_points_m: ndarray) ndarray
+    }
+
+    class StationaryCorrector {
+        +__init__(config: AppConfig)
+        +correct(window: SignalWindow, plane: BpPlaneGeometry, screen_distance_km: float, option: int) CorrectedSignal
+        +apply_tx_rx_correction(window: SignalWindow, plane: BpPlaneGeometry, screen_distance_km: float, option: int) tuple
+        +apply_phase_correction(phase_rad: ndarray, original_path_m: ndarray, corrected_path_m: ndarray, wavelength_m: float) ndarray
+        +apply_curvature_correction(phase_rad: ndarray, z_m: ndarray, alpha_rad: float, radius_m: float, wavelength_m: float) ndarray
+    }
+
+    class QualityController {
+        +__init__(config: AppConfig)
+        +passes_pre_bp(metrics: ScintillationMetrics, tangent_height_km: float) tuple
+        +smooth_v_curve(distances_km: ndarray, v_raw: ndarray) ndarray
+        +find_global_local_minimum(distances_km: ndarray, v_smooth: ndarray) tuple
+        +compute_q(distances_km: ndarray, v_smooth: ndarray, l0_km: float) tuple
+        +find_zero_crossings(d_curve: DCurve) list~float~
+        +passes_final(result: GeolocationResult) tuple
+    }
+
+    class BackpropProcessor {
+        +__init__(config: AppConfig, plane_builder: BpPlaneBuilder, corrector: StationaryCorrector, propagator: FftPropagator, qc: QualityController)
+        +process_for_lmf(window: SignalWindow, l_mf_km: float, wavelength_m: float) BpCurve
+        +compute_v_curve(window: SignalWindow, plane: BpPlaneGeometry, wavelength_m: float) BpCurve
+        +compute_d_curve(window: SignalWindow, wavelength_m: float) DCurve
+    }
+
+    class Geolocator {
+        +__init__(config: AppConfig, preprocessor: SignalPreprocessor, scintillation: ScintillationCalculator, los_geometry: LosGeometry, processor: BackpropProcessor, qc: QualityController)
+        +process_window(window: SignalWindow, wavelength_m: float) GeolocationResult
+        +process_many(windows: Iterator~SignalWindow~, wavelength_m: float) list~GeolocationResult~
+        +make_result(window: SignalWindow, d_curve: DCurve, crossing_km: float, metrics: ScintillationMetrics) GeolocationResult
+    }
+
+    class SyntheticExperiments {
+        +__init__(config: AppConfig, generator: PhaseScreenGenerator, propagator: FftPropagator)
+        +run_all() dict
+        +single_phase_screen() dict
+        +outer_scale_estimation() dict
+        +orientation_error() dict
+        +two_screens_aligned() dict
+        +two_screens_misaligned() dict
+        +thermal_noise() dict
+        +multivalued_geometry() dict
+    }
+
+    class RealDataExperiments {
+        +__init__(config: AppConfig, loader: CosmicLoader, geolocator: Geolocator)
+        +process_year(year: int, signal: str) DataFrame
+        +process_l1_l2_period(start: date, end: date) DataFrame
+        +make_monthly_bins(results: DataFrame) DataFrame
+        +pair_l1_l2(l1_results: DataFrame, l2_results: DataFrame) DataFrame
+    }
+
+    class Plotter {
+        +plot_v_curve(curve: BpCurve, output_path: Path) None
+        +plot_d_curve(d_curve: DCurve, output_path: Path) None
+        +plot_monthly_maps(binned: DataFrame, output_dir: Path) None
+        +plot_l1_l2_histogram(pairs: DataFrame, output_path: Path) None
+        +plot_f107(f107: DataFrame, output_path: Path) None
+        +plot_synthetic_outputs(results: dict, output_dir: Path) None
+    }
+
+    class ResultWriter {
+        +__init__(output_dir: Path)
+        +write_results(results: list~GeolocationResult~, name: str) Path
+        +write_dataframe(df: DataFrame, name: str) Path
+        +write_diagnostics(obj: Any, name: str) Path
+    }
+
+    Main --> AppConfig
+    Main --> CosmicLoader
+    Main --> OrbitLoader
+    Main --> Geolocator
+    Main --> SyntheticExperiments
+    Main --> RealDataExperiments
+    Main --> Plotter
+    Main --> ResultWriter
+    CosmicLoader --> SignalWindow
+    OrbitLoader --> StateVector
+    Geolocator --> SignalPreprocessor
+    Geolocator --> ScintillationCalculator
+    Geolocator --> LosGeometry
+    Geolocator --> BackpropProcessor
+    Geolocator --> QualityController
+    BackpropProcessor --> BpPlaneBuilder
+    BackpropProcessor --> StationaryCorrector
+    BackpropProcessor --> FftPropagator
+    BackpropProcessor --> BpCurve
+    BackpropProcessor --> DCurve
+    BpPlaneBuilder --> LosGeometry
+    BpPlaneBuilder --> MagneticFieldModel
+    StationaryCorrector --> CorrectedSignal
+    QualityController --> GeolocationResult
+    SyntheticExperiments --> PhaseScreenGenerator
+    SyntheticExperiments --> FftPropagator
+    RealDataExperiments --> CosmicLoader
+    RealDataExperiments --> Geolocator
+    LosGeometry --> CoordinateTransformer
+
+----------------------------------------
+[Program call flow]
+sequenceDiagram
+    participant CLI as main.py
+    participant CFG as AppConfig
+    participant MAIN as Main
+    participant CL as CosmicLoader
+    participant OL as OrbitLoader
+    participant CT as CoordinateTransformer
+    participant LOS as LosGeometry
+    participant MF as MagneticFieldModel
+    participant PB as BpPlaneBuilder
+    participant SP as SignalPreprocessor
+    participant SC as ScintillationCalculator
+    participant FP as FftPropagator
+    participant KC as KirchhoffPropagator
+    participant ST as StationaryCorrector
+    participant QC as QualityController
+    participant BP as BackpropProcessor
+    participant GEO as Geolocator
+    participant SYN as SyntheticExperiments
+    participant REAL as RealDataExperiments
+    participant PLT as Plotter
+    participant WR as ResultWriter
+
+    CLI->>CFG: from_yaml(config/default.yaml)
+    CFG-->>CLI: config
+    CLI->>MAIN: __init__(config_path)
+    MAIN->>CL: __init__(config)
+    MAIN->>OL: __init__(config)
+    MAIN->>CT: __init__()
+    MAIN->>LOS: __init__(transformer)
+    MAIN->>MF: __init__(config.igrf_model)
+    MAIN->>PB: __init__(los_geometry, magnetic_model)
+    MAIN->>SP: __init__(config)
+    MAIN->>SC: __init__()
+    MAIN->>FP: __init__(wavelength_m)
+    MAIN->>KC: __init__(wavelength_m)
+    MAIN->>ST: __init__(config)
+    MAIN->>QC: __init__(config)
+    MAIN->>BP: __init__(config, plane_builder, corrector, propagator, qc)
+    MAIN->>GEO: __init__(config, preprocessor, scintillation, los_geometry, processor, qc)
+    MAIN->>SYN: __init__(config, generator, propagator)
+    MAIN->>REAL: __init__(config, loader, geolocator)
+    MAIN->>PLT: __init__()
+    MAIN->>WR: __init__(config.output_dir)
+
+    alt Synthetic validation mode
+        MAIN->>SYN: run_all()
+        SYN->>SYN: single_phase_screen()
+        SYN->>FP: propagate_2d(field_z, z_m, distance_m)
+        FP-->>SYN: receiver_field
+        SYN->>FP: backpropagate_2d(receiver_field, z_m, distance_m)
+        FP-->>SYN: bp_field
+        SYN->>FP: amplitude_variance(bp_field)
+        FP-->>SYN: v_value
+        SYN->>SYN: outer_scale_estimation()
+        SYN->>SYN: orientation_error()
+        SYN->>SYN: two_screens_aligned()
+        SYN->>SYN: two_screens_misaligned()
+        SYN->>SYN: thermal_noise()
+        SYN->>SYN: multivalued_geometry()
+        SYN-->>MAIN: synthetic_results
+        MAIN->>WR: write_diagnostics(synthetic_results, synthetic.json)
+        MAIN->>PLT: plot_synthetic_outputs(synthetic_results, output_dir)
+    else Real COSMIC-2 processing mode
+        MAIN->>REAL: process_year(year, signal)
+        REAL->>CL: iter_windows(year, signal)
+        loop For each COSMIC-2 event file
+            CL->>CL: load_event(path)
+            CL->>OL: interpolate_rx_states(window)
+            OL-->>CL: rx_states
+            CL->>OL: interpolate_tx_states(window)
+            OL-->>CL: tx_states
+            CL->>CL: segment_to_windows(event_data, 10)
+            CL-->>REAL: SignalWindow iterator
+        end
+        loop For each 10-second SignalWindow
+            REAL->>GEO: process_window(window, wavelength_m)
+            GEO->>SP: prepare_window(window)
+            SP->>SP: detrend_phase(phase_rad, times)
+            SP->>SP: normalize_amplitude(amplitude)
+            SP-->>GEO: prepared_window
+            GEO->>SC: compute(prepared_window)
+            SC->>SC: compute_sigma_phi(phase_rad)
+            SC->>SC: compute_s4(amplitude)
+            SC-->>GEO: ScintillationMetrics
+            GEO->>QC: passes_pre_bp(metrics, tangent_height_km)
+            alt Pre-BP QC failed
+                QC-->>GEO: false, rejection_reason
+                GEO-->>REAL: rejected GeolocationResult
+            else Pre-BP QC passed
+                GEO->>BP: compute_d_curve(prepared_window, wavelength_m)
+                loop l_mf_km = 100 to 6000 step 100
+                    BP->>PB: build(window, l_mf_km)
+                    PB->>LOS: candidate_position(window, l_mf_km)
+                    LOS-->>PB: candidate_position_m
+                    PB->>MF: field_unit(mid_time, candidate_position_m)
+                    MF-->>PB: magnetic_unit
+                    PB->>PB: compute_scan_angle(window, plane)
+                    PB-->>BP: BpPlaneGeometry
+                    BP->>BP: compute_v_curve(window, plane, wavelength_m)
+                    loop screen_distance_km = 100 to 6000 step 100
+                        BP->>ST: correct(window, plane, screen_distance_km, option=2)
+                        ST->>ST: apply_tx_rx_correction(window, plane, screen_distance_km, option=2)
+                        ST->>ST: apply_phase_correction(phase_rad, original_path_m, corrected_path_m, wavelength_m)
+                        ST->>ST: apply_curvature_correction(phase_rad, z_m, alpha_rad, radius_m, wavelength_m)
+                        ST-->>BP: CorrectedSignal
+                        BP->>FP: backpropagate_2d(complex_signal, z_m, distance_m)
+                        FP-->>BP: bp_field
+                        BP->>FP: amplitude_variance(bp_field)
+                        FP-->>BP: v_raw_value
+                    end
+                    BP->>QC: smooth_v_curve(distances_km, v_raw)
+                    QC-->>BP: v_smooth
+                    BP->>QC: find_global_local_minimum(distances_km, v_smooth)
+                    QC-->>BP: l0_km, v0, valid_minimum
+                    BP->>QC: compute_q(distances_km, v_smooth, l0_km)
+                    QC-->>BP: l1_km, l2_km, v1, v2, q
+                    BP-->>BP: store BpCurve and D = l0_km - l_mf_km
+                end
+                BP->>QC: find_zero_crossings(d_curve)
+                QC-->>BP: zero_crossings_km
+                BP-->>GEO: DCurve
+                GEO->>GEO: make_result(window, d_curve, crossing_km, metrics)
+                GEO->>LOS: geolocation_from_distance(window, distance_km)
+                LOS->>CT: ecef_to_geodetic(position_m)
+                CT-->>LOS: lat_deg, lon_deg, alt_km
+                LOS-->>GEO: lat_deg, lon_deg, alt_km
+                GEO->>QC: passes_final(result)
+                QC-->>GEO: accepted_or_rejected
+                GEO-->>REAL: GeolocationResult
+            end
+        end
+        REAL-->>MAIN: results DataFrame
+        MAIN->>WR: write_dataframe(results, geolocations.parquet)
+        MAIN->>REAL: make_monthly_bins(results)
+        REAL-->>MAIN: monthly_binned_counts
+        MAIN->>WR: write_dataframe(monthly_binned_counts, monthly_bins.parquet)
+        MAIN->>PLT: plot_monthly_maps(monthly_binned_counts, output_dir)
+    else L1/L2 comparison mode
+        MAIN->>REAL: process_l1_l2_period(start, end)
+        REAL->>REAL: process_year_or_period(signal=L1)
+        REAL->>REAL: process_year_or_period(signal=L2C_or_GLONASS_L2)
+        REAL->>REAL: pair_l1_l2(l1_results, l2_results)
+        REAL-->>MAIN: paired_results
+        MAIN->>WR: write_dataframe(paired_results, l1_l2_pairs.parquet)
+        MAIN->>PLT: plot_l1_l2_histogram(paired_results, output_path)
+    end
+
+----------------------------------------
+[Anything UNCLEAR]
+Several implementation details are ambiguous in the paper and should be verified against COSMIC-2/CDAAC documentation or tested by sensitivity analysis: the exact HR file schema and whether GLONASS phases are already demodulated/connected; the exact phase detrending method used before computing sigma_phi; whether final operational BP used FFT plane-wave propagation with stationary-correction Option 2 or Kirchhoff diffraction integral with Option 1; the exact normalization of SNR/amplitude before BP; the missing Kirchhoff integral equation in the parsed text; the exact local-time reference point for post-sunset filtering; the sign convention in the published geolocation vector formula; and the discrepancy between the abstract's '2-month' L1/L2 comparison and the body text's February 19 to March 1, 2021 period.
+

@@ -1,0 +1,924 @@
+## Code: src/config.py
+```python
+"""Configuration loading and validation for the COSMIC-2 BP reproduction.
+
+This module maps the nested YAML configuration used by the repository into the
+flat ``AppConfig`` interface specified by the project design. The public
+``AppConfig`` intentionally exposes only the fields currently required by the
+processing modules.
+
+The configuration values implemented here are paper-backed defaults from the
+provided ``config.yaml`` and the described COSMIC-2 back-propagation method.
+External data directories are converted to ``Path`` objects but are not required
+to exist at load time, so synthetic-only runs can be configured without having
+downloaded COSMIC-2 or GNSS products.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, ClassVar
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from src.core import constants
+
+
+class ConfigLoadError(ValueError):
+    """Raised when a YAML configuration file cannot be loaded or validated."""
+
+
+class _StrictBaseModel(BaseModel):
+    """Base model for internal configuration sections."""
+
+    model_config = ConfigDict(
+        extra="ignore",
+        arbitrary_types_allowed=True,
+        validate_assignment=True,
+    )
+
+
+class _ProjectConfig(_StrictBaseModel):
+    """Project metadata section."""
+
+    name: str = Field(default="cosmic2_bp_geolocation_reproduction")
+    description: str = Field(default="")
+
+
+class _TrainingConfig(_StrictBaseModel):
+    """Training metadata section.
+
+    The paper does not define a machine-learning training procedure. This model
+    exists only to validate that the configuration explicitly represents this.
+    """
+
+    applicable: bool = Field(default=False)
+    note: str = Field(default="")
+
+    @field_validator("applicable")
+    @classmethod
+    def _validate_training_not_applicable(cls, value: bool) -> bool:
+        """Ensure the configuration does not introduce ML training."""
+        if value:
+            raise ValueError(
+                "training.applicable must be false because the paper describes "
+                "a deterministic signal-processing method, not ML training."
+            )
+        return value
+
+
+class _MagneticFieldConfig(_StrictBaseModel):
+    """Magnetic-field model configuration."""
+
+    model: str = Field(default="IGRF-13")
+    source_reference: str = Field(default="")
+    use_field_direction_only: bool = Field(default=True)
+
+    _SUPPORTED_MODELS: ClassVar[set[str]] = {
+        "IGRF-13",
+        "IGRF13",
+        "IGRF_13",
+    }
+
+    @field_validator("model")
+    @classmethod
+    def _validate_model(cls, value: str) -> str:
+        """Validate the magnetic-field model name."""
+        model_name = str(value).strip()
+        if not model_name:
+            raise ValueError("data.magnetic_field.model must be non-empty.")
+        if model_name.upper() not in {item.upper() for item in cls._SUPPORTED_MODELS}:
+            raise ValueError(
+                "Unsupported magnetic-field model "
+                f"{model_name!r}; expected IGRF-13 for this reproduction."
+            )
+        return model_name
+
+    @field_validator("use_field_direction_only")
+    @classmethod
+    def _validate_direction_only(cls, value: bool) -> bool:
+        """Validate paper-required use of magnetic-field direction only."""
+        if not value:
+            raise ValueError(
+                "data.magnetic_field.use_field_direction_only must be true; "
+                "the BP plane uses magnetic-field direction, not magnitude."
+            )
+        return value
+
+
+class _DataConfig(_StrictBaseModel):
+    """Data section."""
+
+    magnetic_field: _MagneticFieldConfig = Field(default_factory=_MagneticFieldConfig)
+
+
+class _PathsConfig(_StrictBaseModel):
+    """Input and output path configuration."""
+
+    cosmic2_hr_data_dir: Path = Field(default=Path("data/cosmic2/hr"))
+    receiver_orbit_dir: Path = Field(default=Path("data/cosmic2/orbits"))
+    gnss_orbit_clock_dir: Path = Field(default=Path("data/gnss"))
+    f107_data_path: Path = Field(default=Path("data/f107/f107.csv"))
+    output_dir: Path = Field(default=Path("outputs"))
+
+    @field_validator(
+        "cosmic2_hr_data_dir",
+        "receiver_orbit_dir",
+        "gnss_orbit_clock_dir",
+        "f107_data_path",
+        "output_dir",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_path(cls, value: Any) -> Path:
+        """Coerce path-like strings to ``Path``."""
+        if value is None:
+            raise ValueError("Path fields must not be null.")
+        path = Path(value).expanduser()
+        if str(path).strip() == "":
+            raise ValueError("Path fields must be non-empty.")
+        return path
+
+
+class _SignalsConfig(_StrictBaseModel):
+    """Signal selection section.
+
+    Currently validated only to require the section and preserve schema shape.
+    """
+
+    primary_signal: str = Field(default=constants.DEFAULT_PRIMARY_SIGNAL)
+
+
+class _PhaseDetrendingConfig(_StrictBaseModel):
+    """Phase detrending subsection."""
+
+    method: str = Field(default="unspecified_in_paper")
+    default_implementation: str = Field(default=constants.DEFAULT_PHASE_DETRENDING_METHOD)
+    polynomial_order: int = Field(default=constants.DEFAULT_PHASE_DETRENDING_POLY_ORDER)
+
+    @field_validator("polynomial_order")
+    @classmethod
+    def _validate_polynomial_order(cls, value: int) -> int:
+        """Validate detrending polynomial order."""
+        if value < 0:
+            raise ValueError(
+                "processing.scintillation_indices.phase_detrending."
+                "polynomial_order must be >= 0."
+            )
+        return value
+
+
+class _ScintillationIndicesConfig(_StrictBaseModel):
+    """Scintillation-index processing settings."""
+
+    sigma_phi_threshold_rad: float = Field(
+        default=constants.DEFAULT_SIGMA_PHI_THRESHOLD_RAD
+    )
+    compute_sigma_phi_in_ground_processing: bool = Field(default=True)
+    s4_definition: str = Field(default="")
+    phase_detrending: _PhaseDetrendingConfig = Field(
+        default_factory=_PhaseDetrendingConfig
+    )
+
+    @field_validator("sigma_phi_threshold_rad")
+    @classmethod
+    def _validate_sigma_phi_threshold(cls, value: float) -> float:
+        """Validate positive phase-scintillation threshold."""
+        value = float(value)
+        if value <= 0.0:
+            raise ValueError(
+                "processing.scintillation_indices.sigma_phi_threshold_rad "
+                "must be > 0."
+            )
+        return value
+
+
+class _TangentPointFilterConfig(_StrictBaseModel):
+    """Tangent-point pre-BP filter settings."""
+
+    min_height_km: float = Field(default=constants.DEFAULT_TANGENT_HEIGHT_MIN_KM)
+
+    @field_validator("min_height_km")
+    @classmethod
+    def _validate_min_height(cls, value: float) -> float:
+        """Validate non-negative tangent height threshold."""
+        value = float(value)
+        if value < 0.0:
+            raise ValueError(
+                "processing.tangent_point_filter.min_height_km must be >= 0."
+            )
+        return value
+
+
+class _LocalTimeFilterConfig(_StrictBaseModel):
+    """Local-time filter settings for monthly maps."""
+
+    enabled_for_monthly_maps: bool = Field(default=True)
+    start_hour: float = Field(default=constants.DEFAULT_POSTSUNSET_START_HOUR)
+    end_hour: float = Field(default=constants.DEFAULT_POSTSUNSET_END_HOUR)
+    reference: str = Field(default=constants.DEFAULT_LOCAL_TIME_REFERENCE)
+
+
+class _ProcessingConfig(_StrictBaseModel):
+    """Signal processing configuration."""
+
+    window_seconds: int = Field(default=constants.DEFAULT_WINDOW_SECONDS)
+    scintillation_indices: _ScintillationIndicesConfig = Field(
+        default_factory=_ScintillationIndicesConfig
+    )
+    tangent_point_filter: _TangentPointFilterConfig = Field(
+        default_factory=_TangentPointFilterConfig
+    )
+    local_time_filter: _LocalTimeFilterConfig = Field(default_factory=_LocalTimeFilterConfig)
+
+    @field_validator("window_seconds")
+    @classmethod
+    def _validate_window_seconds(cls, value: int) -> int:
+        """Validate positive processing-window length."""
+        if value <= 0:
+            raise ValueError("processing.window_seconds must be > 0.")
+        return value
+
+
+class _DistanceGridConfig(_StrictBaseModel):
+    """Distance-grid settings."""
+
+    min_km: float = Field(default=constants.DEFAULT_BP_MIN_DISTANCE_KM)
+    max_km: float = Field(default=constants.DEFAULT_BP_MAX_DISTANCE_KM)
+    step_km: float = Field(default=constants.DEFAULT_BP_STEP_KM)
+
+    @field_validator("min_km", "max_km", "step_km")
+    @classmethod
+    def _validate_finite_positive_components(cls, value: float) -> float:
+        """Validate finite grid values before cross-field checks."""
+        value = float(value)
+        if value != value:
+            raise ValueError("Distance-grid values must be finite, not NaN.")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_grid(self) -> "_DistanceGridConfig":
+        """Validate distance-grid ordering and integer stepping."""
+        if self.min_km <= 0.0:
+            raise ValueError("distance_grid.min_km must be > 0.")
+        if self.max_km <= self.min_km:
+            raise ValueError("distance_grid.max_km must be > distance_grid.min_km.")
+        if self.step_km <= 0.0:
+            raise ValueError("distance_grid.step_km must be > 0.")
+
+        span = self.max_km - self.min_km
+        ratio = span / self.step_km
+        if abs(ratio - round(ratio)) > 1.0e-9:
+            raise ValueError(
+                "Distance grid must be compatible with integer stepping: "
+                "(max_km - min_km) / step_km must be an integer."
+            )
+        return self
+
+
+class _MagneticFieldCandidateGridConfig(_StrictBaseModel):
+    """Outer-loop magnetic-field candidate grid."""
+
+    min_km: float = Field(default=constants.DEFAULT_MF_MIN_DISTANCE_KM)
+    max_km: float = Field(default=constants.DEFAULT_MF_MAX_DISTANCE_KM)
+    step_km: float = Field(default=constants.DEFAULT_MF_STEP_KM)
+
+    @model_validator(mode="after")
+    def _validate_grid(self) -> "_MagneticFieldCandidateGridConfig":
+        """Validate magnetic-field candidate grid."""
+        if self.min_km <= 0.0:
+            raise ValueError(
+                "magnetic_field_candidate_grid.min_km must be > 0."
+            )
+        if self.max_km <= self.min_km:
+            raise ValueError(
+                "magnetic_field_candidate_grid.max_km must be greater than min_km."
+            )
+        if self.step_km <= 0.0:
+            raise ValueError(
+                "magnetic_field_candidate_grid.step_km must be > 0."
+            )
+        span = self.max_km - self.min_km
+        ratio = span / self.step_km
+        if abs(ratio - round(ratio)) > 1.0e-9:
+            raise ValueError(
+                "Magnetic-field candidate grid must be compatible with integer "
+                "stepping: (max_km - min_km) / step_km must be an integer."
+            )
+        return self
+
+
+class _StationaryTransmitterCorrectionConfig(_StrictBaseModel):
+    """Stationary-transmitter correction section."""
+
+    enabled: bool = Field(default=constants.DEFAULT_STATIONARY_CORRECTION_ENABLED)
+    default_option: int = Field(default=constants.DEFAULT_STATIONARY_CORRECTION_OPTION)
+
+    @field_validator("default_option")
+    @classmethod
+    def _validate_default_option(cls, value: int) -> int:
+        """Validate paper-described correction option."""
+        if value not in {1, 2}:
+            raise ValueError(
+                "back_propagation.stationary_transmitter_correction."
+                "default_option must be 1 or 2."
+            )
+        return value
+
+
+class _WavefrontCurvatureCorrectionConfig(_StrictBaseModel):
+    """Wavefront-curvature correction section."""
+
+    enabled: bool = Field(default=constants.DEFAULT_WAVEFRONT_CURVATURE_CORRECTION_ENABLED)
+    correction_path_term: str = Field(default="z^2 * tan(alpha)^2 / (2R)")
+
+
+class _SmoothingConfig(_StrictBaseModel):
+    """V-curve smoothing configuration."""
+
+    enabled: bool = Field(default=constants.DEFAULT_SMOOTHING_ENABLED)
+    method: str = Field(default="second_order_sliding_polynomial_regression")
+    window_km: float = Field(default=constants.DEFAULT_SMOOTHING_WINDOW_KM)
+    polynomial_order: int = Field(default=constants.DEFAULT_SMOOTHING_POLY_ORDER)
+
+    @field_validator("window_km")
+    @classmethod
+    def _validate_window(cls, value: float) -> float:
+        """Validate positive smoothing-window width."""
+        value = float(value)
+        if value <= 0.0:
+            raise ValueError("back_propagation.v_curve.smoothing.window_km must be > 0.")
+        return value
+
+    @field_validator("polynomial_order")
+    @classmethod
+    def _validate_polynomial_order(cls, value: int) -> int:
+        """Validate polynomial order."""
+        if value < 0:
+            raise ValueError(
+                "back_propagation.v_curve.smoothing.polynomial_order must be >= 0."
+            )
+        return value
+
+
+class _VCurveConfig(_StrictBaseModel):
+    """V-curve configuration."""
+
+    definition: str = Field(default="<A^2> / <A>^2 - 1")
+    smoothing: _SmoothingConfig = Field(default_factory=_SmoothingConfig)
+
+
+class _MinimumDetectionConfig(_StrictBaseModel):
+    """Minimum-detection configuration."""
+
+    require_global_local_minimum: bool = Field(
+        default=constants.DEFAULT_REQUIRE_GLOBAL_LOCAL_MINIMUM
+    )
+    reject_endpoint_minimum: bool = Field(default=constants.DEFAULT_REJECT_ENDPOINT_MINIMUM)
+    min_l1_samples: int = Field(default=constants.DEFAULT_MIN_L1_SAMPLES)
+    min_l2_samples: int = Field(default=constants.DEFAULT_MIN_L2_SAMPLES)
+    sample_spacing_km: float = Field(default=constants.DEFAULT_MINIMUM_SAMPLE_SPACING_KM)
+
+    @field_validator("min_l1_samples", "min_l2_samples")
+    @classmethod
+    def _validate_min_samples(cls, value: int) -> int:
+        """Validate non-negative minimum span samples."""
+        if value < 0:
+            raise ValueError("minimum_detection min sample counts must be >= 0.")
+        return value
+
+    @field_validator("sample_spacing_km")
+    @classmethod
+    def _validate_sample_spacing(cls, value: float) -> float:
+        """Validate positive sample spacing."""
+        value = float(value)
+        if value <= 0.0:
+            raise ValueError("minimum_detection.sample_spacing_km must be > 0.")
+        return value
+
+
+class _QualityControlConfig(_StrictBaseModel):
+    """Back-propagation quality-control thresholds."""
+
+    q_threshold: float = Field(default=constants.DEFAULT_Q_THRESHOLD)
+    cos_alpha_threshold: float = Field(default=constants.DEFAULT_COS_ALPHA_THRESHOLD)
+    require_single_valued_geolocation: bool = Field(
+        default=constants.DEFAULT_REQUIRE_SINGLE_VALUED
+    )
+    discard_multivalued_geolocations: bool = Field(
+        default=constants.DEFAULT_DISCARD_MULTIVALUED
+    )
+
+    @field_validator("q_threshold")
+    @classmethod
+    def _validate_q_threshold(cls, value: float) -> float:
+        """Validate minimum-depth threshold."""
+        value = float(value)
+        if value <= 1.0:
+            raise ValueError("back_propagation.quality_control.q_threshold must be > 1.")
+        return value
+
+    @field_validator("cos_alpha_threshold")
+    @classmethod
+    def _validate_cos_alpha_threshold(cls, value: float) -> float:
+        """Validate scan-angle cosine threshold."""
+        value = float(value)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                "back_propagation.quality_control.cos_alpha_threshold must be "
+                "between 0 and 1."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_single_valued_policy(self) -> "_QualityControlConfig":
+        """Validate paper-required single-valued geolocation policy."""
+        if not self.require_single_valued_geolocation:
+            raise ValueError(
+                "back_propagation.quality_control."
+                "require_single_valued_geolocation must be true for the paper "
+                "reproduction."
+            )
+        if not self.discard_multivalued_geolocations:
+            raise ValueError(
+                "back_propagation.quality_control."
+                "discard_multivalued_geolocations must be true for the paper "
+                "reproduction."
+            )
+        return self
+
+
+class _BackPropagationConfig(_StrictBaseModel):
+    """Back-propagation method configuration."""
+
+    representation: str = Field(default="coordinate")
+    propagation_method_default: str = Field(default=constants.DEFAULT_PROPAGATION_METHOD)
+    alternative_method_available: str = Field(
+        default=constants.DEFAULT_ALTERNATIVE_PROPAGATION_METHOD
+    )
+    distance_grid: _DistanceGridConfig = Field(default_factory=_DistanceGridConfig)
+    magnetic_field_candidate_grid: _MagneticFieldCandidateGridConfig = Field(
+        default_factory=_MagneticFieldCandidateGridConfig
+    )
+    stationary_transmitter_correction: _StationaryTransmitterCorrectionConfig = Field(
+        default_factory=_StationaryTransmitterCorrectionConfig
+    )
+    wavefront_curvature_correction: _WavefrontCurvatureCorrectionConfig = Field(
+        default_factory=_WavefrontCurvatureCorrectionConfig
+    )
+    v_curve: _VCurveConfig = Field(default_factory=_VCurveConfig)
+    minimum_detection: _MinimumDetectionConfig = Field(
+        default_factory=_MinimumDetectionConfig
+    )
+    quality_control: _QualityControlConfig = Field(default_factory=_QualityControlConfig)
+    geolocation: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_cross_field_consistency(self) -> "_BackPropagationConfig":
+        """Validate BP and magnetic-field grid consistency."""
+        if abs(self.magnetic_field_candidate_grid.step_km - self.distance_grid.step_km) > 1.0e-9:
+            raise ValueError(
+                "The paper uses the same 100 km step for BP and magnetic-field "
+                "candidate loops; magnetic_field_candidate_grid.step_km must "
+                "equal distance_grid.step_km."
+            )
+
+        if self.v_curve.smoothing.window_km < self.distance_grid.step_km:
+            raise ValueError(
+                "back_propagation.v_curve.smoothing.window_km must be at least "
+                "distance_grid.step_km."
+            )
+
+        if (
+            abs(self.minimum_detection.sample_spacing_km - self.distance_grid.step_km)
+            > 1.0e-9
+        ):
+            raise ValueError(
+                "minimum_detection.sample_spacing_km must equal "
+                "distance_grid.step_km for consistent L1/L2 span checks."
+            )
+
+        if self.representation.strip().lower() != "coordinate":
+            raise ValueError(
+                "back_propagation.representation must be 'coordinate' to match "
+                "the paper's BP coordinate representation."
+            )
+
+        return self
+
+
+class _SyntheticExperimentsConfig(_StrictBaseModel):
+    """Synthetic experiment section.
+
+    The public ``AppConfig`` currently exposes only ``random_seed`` for
+    synthetic experiments, but this section is required by the YAML schema.
+    """
+
+    enabled: bool = Field(default=True)
+
+
+class _BinSizeDegConfig(_StrictBaseModel):
+    """Latitude/longitude bin-size pair."""
+
+    latitude: float = Field(default=constants.DEFAULT_MAP_BIN_DEG)
+    longitude: float = Field(default=constants.DEFAULT_MAP_BIN_DEG)
+
+    @model_validator(mode="after")
+    def _validate_bin_sizes(self) -> "_BinSizeDegConfig":
+        """Validate positive and equal latitude/longitude bin sizes."""
+        if self.latitude <= 0.0:
+            raise ValueError(
+                "real_data_experiments.monthly_l1_maps.bin_size_deg.latitude "
+                "must be > 0."
+            )
+        if self.longitude <= 0.0:
+            raise ValueError(
+                "real_data_experiments.monthly_l1_maps.bin_size_deg.longitude "
+                "must be > 0."
+            )
+        if abs(self.latitude - self.longitude) > 1.0e-12:
+            raise ValueError(
+                "Monthly map latitude and longitude bin sizes must be equal "
+                "because the paper uses 3° x 3° bins."
+            )
+        return self
+
+
+class _MonthlyL1MapsConfig(_StrictBaseModel):
+    """Monthly L1 map experiment settings."""
+
+    enabled: bool = Field(default=True)
+    years: list[int] = Field(default_factory=lambda: list(constants.DEFAULT_MONTHLY_MAP_YEARS))
+    signal: str = Field(default=constants.DEFAULT_PRIMARY_SIGNAL)
+    local_time_hours: list[float] = Field(
+        default_factory=lambda: [
+            constants.DEFAULT_POSTSUNSET_START_HOUR,
+            constants.DEFAULT_POSTSUNSET_END_HOUR,
+        ]
+    )
+    bin_size_deg: _BinSizeDegConfig = Field(default_factory=_BinSizeDegConfig)
+
+    @field_validator("years")
+    @classmethod
+    def _validate_years(cls, value: list[int]) -> list[int]:
+        """Validate monthly map years."""
+        if not value:
+            raise ValueError("real_data_experiments.monthly_l1_maps.years is empty.")
+        return [int(year) for year in value]
+
+
+class _L1L2ComparisonConfig(_StrictBaseModel):
+    """L1/L2 comparison experiment settings."""
+
+    enabled: bool = Field(default=True)
+    start_date: str = Field(default=constants.DEFAULT_L1_L2_START_DATE)
+    end_date: str = Field(default=constants.DEFAULT_L1_L2_END_DATE)
+    zonal_difference_histogram_bin_deg: float = Field(
+        default=constants.DEFAULT_L1_L2_HISTOGRAM_BIN_DEG
+    )
+
+
+class _RealDataExperimentsConfig(_StrictBaseModel):
+    """Real-data experiment configuration."""
+
+    monthly_l1_maps: _MonthlyL1MapsConfig = Field(default_factory=_MonthlyL1MapsConfig)
+    l1_l2_comparison: _L1L2ComparisonConfig = Field(
+        default_factory=_L1L2ComparisonConfig
+    )
+
+
+class _OutputsConfig(_StrictBaseModel):
+    """Output flags section."""
+
+    save_interval_results: bool = Field(default=True)
+    save_diagnostics: bool = Field(default=True)
+
+
+class _ReproducibilityConfig(_StrictBaseModel):
+    """Reproducibility section."""
+
+    random_seed: int = Field(default=constants.DEFAULT_RANDOM_SEED)
+    log_rejection_reasons: bool = Field(default=True)
+    log_multivalued_cases: bool = Field(default=True)
+    log_processing_statistics: bool = Field(default=True)
+
+    @field_validator("random_seed")
+    @classmethod
+    def _validate_random_seed(cls, value: int) -> int:
+        """Validate integer random seed."""
+        if not isinstance(value, int):
+            raise ValueError("reproducibility.random_seed must be an integer.")
+        return value
+
+
+class _RawConfig(_StrictBaseModel):
+    """Internal nested representation of the YAML configuration."""
+
+    project: _ProjectConfig
+    training: _TrainingConfig
+    data: _DataConfig
+    paths: _PathsConfig
+    signals: _SignalsConfig
+    processing: _ProcessingConfig
+    back_propagation: _BackPropagationConfig
+    synthetic_experiments: _SyntheticExperimentsConfig
+    real_data_experiments: _RealDataExperimentsConfig
+    outputs: _OutputsConfig
+    reproducibility: _ReproducibilityConfig
+
+
+class AppConfig(BaseModel):
+    """Flat application configuration used by processing modules.
+
+    Attributes:
+        cosmic_data_dir: Directory containing COSMIC-2 high-rate phase/SNR data.
+        receiver_orbit_dir: Directory containing COSMIC-2 receiver orbit data.
+        gnss_orbit_dir: Directory containing GNSS orbit/clock products.
+        output_dir: Directory where outputs should be written.
+        igrf_model: Magnetic-field model name, expected to be ``"IGRF-13"``.
+        sigma_phi_threshold_rad: Pre-BP phase-scintillation threshold in rad.
+        tangent_height_min_km: Minimum tangent-point height in km.
+        bp_min_distance_km: Minimum BP distance-grid value in km.
+        bp_max_distance_km: Maximum BP distance-grid value in km.
+        bp_step_km: BP distance-grid step in km.
+        mf_step_km: Magnetic-field candidate distance step in km.
+        q_threshold: Minimum-depth metric threshold.
+        cos_alpha_threshold: Scan-angle cosine threshold.
+        smoothing_window_km: V(L) smoothing window in km.
+        smoothing_poly_order: Sliding polynomial smoothing order.
+        map_bin_deg: Monthly map latitude/longitude bin size in degrees.
+        random_seed: Reproducibility seed for synthetic experiments.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        arbitrary_types_allowed=True,
+        validate_assignment=True,
+    )
+
+    cosmic_data_dir: Path = Field(default=Path("data/cosmic2/hr"))
+    receiver_orbit_dir: Path = Field(default=Path("data/cosmic2/orbits"))
+    gnss_orbit_dir: Path = Field(default=Path("data/gnss"))
+    output_dir: Path = Field(default=Path("outputs"))
+
+    igrf_model: str = Field(default="IGRF-13")
+
+    sigma_phi_threshold_rad: float = Field(
+        default=constants.DEFAULT_SIGMA_PHI_THRESHOLD_RAD
+    )
+    tangent_height_min_km: float = Field(default=constants.DEFAULT_TANGENT_HEIGHT_MIN_KM)
+
+    bp_min_distance_km: float = Field(default=constants.DEFAULT_BP_MIN_DISTANCE_KM)
+    bp_max_distance_km: float = Field(default=constants.DEFAULT_BP_MAX_DISTANCE_KM)
+    bp_step_km: float = Field(default=constants.DEFAULT_BP_STEP_KM)
+    mf_step_km: float = Field(default=constants.DEFAULT_MF_STEP_KM)
+
+    q_threshold: float = Field(default=constants.DEFAULT_Q_THRESHOLD)
+    cos_alpha_threshold: float = Field(default=constants.DEFAULT_COS_ALPHA_THRESHOLD)
+
+    smoothing_window_km: float = Field(default=constants.DEFAULT_SMOOTHING_WINDOW_KM)
+    smoothing_poly_order: int = Field(default=constants.DEFAULT_SMOOTHING_POLY_ORDER)
+
+    map_bin_deg: float = Field(default=constants.DEFAULT_MAP_BIN_DEG)
+    random_seed: int = Field(default=constants.DEFAULT_RANDOM_SEED)
+
+    @field_validator(
+        "cosmic_data_dir",
+        "receiver_orbit_dir",
+        "gnss_orbit_dir",
+        "output_dir",
+        mode="before",
+    )
+    @classmethod
+    def _validate_path(cls, value: Any) -> Path:
+        """Validate path fields without requiring filesystem existence."""
+        if value is None:
+            raise ValueError("Configuration path fields must not be null.")
+        path = Path(value).expanduser()
+        if str(path).strip() == "":
+            raise ValueError("Configuration path fields must be non-empty.")
+        return path
+
+    @field_validator("igrf_model")
+    @classmethod
+    def _validate_igrf_model(cls, value: str) -> str:
+        """Validate the IGRF model value."""
+        model_name = str(value).strip()
+        if not model_name:
+            raise ValueError("igrf_model must be non-empty.")
+        if model_name.upper() not in {"IGRF-13", "IGRF13", "IGRF_13"}:
+            raise ValueError(
+                f"Unsupported igrf_model {model_name!r}; expected 'IGRF-13'."
+            )
+        return model_name
+
+    @field_validator("sigma_phi_threshold_rad")
+    @classmethod
+    def _validate_sigma_phi_threshold(cls, value: float) -> float:
+        """Validate positive sigma-phi threshold."""
+        value = float(value)
+        if value <= 0.0:
+            raise ValueError("sigma_phi_threshold_rad must be > 0.")
+        return value
+
+    @field_validator("tangent_height_min_km")
+    @classmethod
+    def _validate_tangent_height(cls, value: float) -> float:
+        """Validate non-negative tangent-height threshold."""
+        value = float(value)
+        if value < 0.0:
+            raise ValueError("tangent_height_min_km must be >= 0.")
+        return value
+
+    @field_validator("bp_min_distance_km", "bp_max_distance_km", "bp_step_km", "mf_step_km")
+    @classmethod
+    def _validate_distance_scalar(cls, value: float) -> float:
+        """Validate finite distance-grid scalar."""
+        value = float(value)
+        if value != value:
+            raise ValueError("Distance configuration values must not be NaN.")
+        return value
+
+    @field_validator("q_threshold")
+    @classmethod
+    def _validate_q_threshold(cls, value: float) -> float:
+        """Validate Q threshold."""
+        value = float(value)
+        if value <= 1.0:
+            raise ValueError("q_threshold must be > 1.")
+        return value
+
+    @field_validator("cos_alpha_threshold")
+    @classmethod
+    def _validate_cos_alpha_threshold(cls, value: float) -> float:
+        """Validate cos(alpha) threshold."""
+        value = float(value)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("cos_alpha_threshold must be between 0 and 1.")
+        return value
+
+    @field_validator("smoothing_window_km")
+    @classmethod
+    def _validate_smoothing_window(cls, value: float) -> float:
+        """Validate smoothing-window size."""
+        value = float(value)
+        if value <= 0.0:
+            raise ValueError("smoothing_window_km must be > 0.")
+        return value
+
+    @field_validator("smoothing_poly_order")
+    @classmethod
+    def _validate_smoothing_poly_order(cls, value: int) -> int:
+        """Validate smoothing polynomial order."""
+        if value < 0:
+            raise ValueError("smoothing_poly_order must be >= 0.")
+        return value
+
+    @field_validator("map_bin_deg")
+    @classmethod
+    def _validate_map_bin_deg(cls, value: float) -> float:
+        """Validate map bin size."""
+        value = float(value)
+        if value <= 0.0:
+            raise ValueError("map_bin_deg must be > 0.")
+        return value
+
+    @field_validator("random_seed")
+    @classmethod
+    def _validate_random_seed(cls, value: int) -> int:
+        """Validate random seed."""
+        if not isinstance(value, int):
+            raise ValueError("random_seed must be an integer.")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_cross_field_consistency(self) -> "AppConfig":
+        """Validate flat configuration consistency."""
+        if self.bp_min_distance_km <= 0.0:
+            raise ValueError("bp_min_distance_km must be > 0.")
+        if self.bp_max_distance_km <= self.bp_min_distance_km:
+            raise ValueError("bp_max_distance_km must be greater than bp_min_distance_km.")
+        if self.bp_step_km <= 0.0:
+            raise ValueError("bp_step_km must be > 0.")
+        if self.mf_step_km <= 0.0:
+            raise ValueError("mf_step_km must be > 0.")
+
+        span = self.bp_max_distance_km - self.bp_min_distance_km
+        ratio = span / self.bp_step_km
+        if abs(ratio - round(ratio)) > 1.0e-9:
+            raise ValueError(
+                "(bp_max_distance_km - bp_min_distance_km) / bp_step_km "
+                "must be an integer."
+            )
+
+        if abs(self.mf_step_km - self.bp_step_km) > 1.0e-9:
+            raise ValueError(
+                "mf_step_km must equal bp_step_km; the paper uses 100 km for "
+                "both nested BP loops."
+            )
+
+        if self.smoothing_window_km < self.bp_step_km:
+            raise ValueError("smoothing_window_km must be >= bp_step_km.")
+
+        return self
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> "AppConfig":
+        """Load and validate application configuration from a YAML file.
+
+        Args:
+            path: Path to a YAML configuration file. The loader is path-driven
+                and does not assume a fixed filename.
+
+        Returns:
+            Validated ``AppConfig`` instance.
+
+        Raises:
+            ConfigLoadError: If the file is missing, YAML syntax is invalid,
+                the top-level YAML object is malformed, or validation fails.
+        """
+        config_path = Path(path).expanduser()
+        if not config_path.exists():
+            raise ConfigLoadError(f"Configuration file does not exist: {config_path}")
+        if not config_path.is_file():
+            raise ConfigLoadError(f"Configuration path is not a file: {config_path}")
+
+        try:
+            with config_path.open("r", encoding="utf-8") as stream:
+                loaded_yaml = yaml.safe_load(stream)
+        except yaml.YAMLError as exc:
+            raise ConfigLoadError(
+                f"Invalid YAML syntax in configuration file {config_path}: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ConfigLoadError(
+                f"Could not read configuration file {config_path}: {exc}"
+            ) from exc
+
+        if loaded_yaml is None:
+            raise ConfigLoadError(f"Configuration file is empty: {config_path}")
+        if not isinstance(loaded_yaml, dict):
+            raise ConfigLoadError(
+                "Configuration top-level YAML object must be a mapping/dictionary."
+            )
+
+        try:
+            raw_config = _RawConfig.model_validate(loaded_yaml)
+            app_config = cls._from_raw_config(raw_config)
+        except ValidationError as exc:
+            raise ConfigLoadError(
+                f"Configuration validation failed for {config_path}:\n{exc}"
+            ) from exc
+        except ValueError as exc:
+            raise ConfigLoadError(
+                f"Configuration validation failed for {config_path}: {exc}"
+            ) from exc
+
+        return app_config
+
+    @classmethod
+    def _from_raw_config(cls, raw_config: _RawConfig) -> "AppConfig":
+        """Map the internal nested YAML model to the flat public config."""
+        latitude_bin_deg = raw_config.real_data_experiments.monthly_l1_maps.bin_size_deg.latitude
+        longitude_bin_deg = raw_config.real_data_experiments.monthly_l1_maps.bin_size_deg.longitude
+        if abs(latitude_bin_deg - longitude_bin_deg) > 1.0e-12:
+            raise ValueError(
+                "Monthly map latitude and longitude bin sizes must be equal."
+            )
+
+        return cls(
+            cosmic_data_dir=raw_config.paths.cosmic2_hr_data_dir,
+            receiver_orbit_dir=raw_config.paths.receiver_orbit_dir,
+            gnss_orbit_dir=raw_config.paths.gnss_orbit_clock_dir,
+            output_dir=raw_config.paths.output_dir,
+            igrf_model=raw_config.data.magnetic_field.model,
+            sigma_phi_threshold_rad=(
+                raw_config.processing.scintillation_indices.sigma_phi_threshold_rad
+            ),
+            tangent_height_min_km=(
+                raw_config.processing.tangent_point_filter.min_height_km
+            ),
+            bp_min_distance_km=raw_config.back_propagation.distance_grid.min_km,
+            bp_max_distance_km=raw_config.back_propagation.distance_grid.max_km,
+            bp_step_km=raw_config.back_propagation.distance_grid.step_km,
+            mf_step_km=(
+                raw_config.back_propagation.magnetic_field_candidate_grid.step_km
+            ),
+            q_threshold=raw_config.back_propagation.quality_control.q_threshold,
+            cos_alpha_threshold=(
+                raw_config.back_propagation.quality_control.cos_alpha_threshold
+            ),
+            smoothing_window_km=(
+                raw_config.back_propagation.v_curve.smoothing.window_km
+            ),
+            smoothing_poly_order=(
+                raw_config.back_propagation.v_curve.smoothing.polynomial_order
+            ),
+            map_bin_deg=latitude_bin_deg,
+            random_seed=raw_config.reproducibility.random_seed,
+        )
+
+
+__all__ = ["AppConfig", "ConfigLoadError"]
+```

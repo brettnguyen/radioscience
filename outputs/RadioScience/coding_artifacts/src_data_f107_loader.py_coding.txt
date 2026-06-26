@@ -1,0 +1,889 @@
+## Code: src/data/f107_loader.py
+```python
+"""F10.7 solar radio flux loading for COSMIC-2 BP reproduction reporting.
+
+The paper uses daily F10.7 solar radio flux only as contextual evidence for
+the stronger scintillation/geolocation occurrence in 2023 relative to 2021.
+This module is intentionally independent from the back-propagation geolocation
+pipeline: it does not process COSMIC-2 data, compute scintillation metrics,
+apply QC, bin maps, or plot figures.
+
+Public API follows the project design exactly:
+
+    F107Loader(source_url)
+    F107Loader.download(start, end)
+    F107Loader.load_cached(path)
+
+Both loading methods return a normalized ``pandas.DataFrame`` containing at
+least:
+
+    date, f107
+
+A ``source`` column is also included for reproducibility. Dates are normalized
+to midnight UTC-naive pandas timestamps. F10.7 missing-value sentinels commonly
+seen in OMNI-style products are converted to NaN.
+
+The configured paper source is the OMNIWeb form URL
+``https://omniweb.gsfc.nasa.gov/form/dx1.html``. That URL is a human-facing
+form, not a stable direct data endpoint. For reproducibility, cached CSV loading
+is therefore the preferred path. ``download`` supports direct CSV/text URLs and
+fails with an actionable error for the OMNIWeb form URL rather than silently
+fabricating an unverified query.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from io import StringIO
+import math
+from pathlib import Path
+import re
+from typing import Any, Final
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+
+import numpy as np
+import pandas as pd
+
+
+_DEFAULT_SOURCE_URL: Final[str] = "https://omniweb.gsfc.nasa.gov/form/dx1.html"
+_URL_TIMEOUT_SECONDS: Final[float] = 60.0
+
+_REQUIRED_COLUMNS: Final[tuple[str, str]] = ("date", "f107")
+
+_MISSING_SENTINELS: Final[tuple[float, ...]] = (
+    999.0,
+    999.9,
+    9999.0,
+    9999.9,
+    99999.0,
+    99999.9,
+    999999.0,
+    999999.9,
+)
+
+_DIRECT_DATE_ALIASES: Final[frozenset[str]] = frozenset(
+    {
+        "date",
+        "datetime",
+        "time",
+        "utc",
+        "ut",
+        "day",
+        "timestamp",
+        "yyyymmdd",
+    }
+)
+
+_YEAR_ALIASES: Final[frozenset[str]] = frozenset(
+    {
+        "year",
+        "yr",
+        "yyyy",
+    }
+)
+
+_DOY_ALIASES: Final[frozenset[str]] = frozenset(
+    {
+        "doy",
+        "dayofyear",
+        "day_of_year",
+        "decimalday",
+        "decimal_day",
+        "julian",
+        "julian_day",
+        "jday",
+    }
+)
+
+_MONTH_ALIASES: Final[frozenset[str]] = frozenset(
+    {
+        "month",
+        "mon",
+        "mm",
+    }
+)
+
+_DAY_OF_MONTH_ALIASES: Final[frozenset[str]] = frozenset(
+    {
+        "dom",
+        "dayofmonth",
+        "day_of_month",
+        "dd",
+    }
+)
+
+_F107_EXACT_ALIASES: Final[frozenset[str]] = frozenset(
+    {
+        "f107",
+        "f107sfu",
+        "f107flux",
+        "f107index",
+        "f107cm",
+        "f107obs",
+        "f107observed",
+        "f107adj",
+        "f107adjusted",
+        "f107daily",
+        "f107dailyflux",
+        "f107d",
+        "f10",
+        "f10index",
+        "f10flux",
+        "f10sfu",
+        "f107a",
+        "f107_index",
+        "f10_7",
+        "f10_7_index",
+        "f10_7_flux",
+        "f10_7_sfu",
+    }
+)
+
+_F107_NAME_PATTERNS: Final[tuple[str, ...]] = (
+    "f107",
+    "f10_7",
+    "f10.7",
+    "10.7",
+    "10_7",
+    "solarflux",
+    "solar_flux",
+)
+
+_HTML_MARKERS: Final[tuple[str, ...]] = (
+    "<html",
+    "<!doctype html",
+    "<form",
+)
+
+_NUMERIC_TEXT_COMMENT_PREFIXES: Final[tuple[str, ...]] = ("#", ";", "!", "//")
+
+
+class F107Loader:
+    """Load or download daily F10.7 solar radio flux data.
+
+    Args:
+        source_url: Configured F10.7 source URL. The paper/configuration uses
+            the NASA OMNIWeb form URL. No network access is attempted during
+            initialization.
+
+    The class stores only the source URL and is intentionally lightweight.
+    """
+
+    def __init__(self, source_url: str = _DEFAULT_SOURCE_URL) -> None:
+        """Initialize an F10.7 loader.
+
+        Args:
+            source_url: Source URL from configuration.
+
+        Raises:
+            ValueError: If ``source_url`` is empty.
+        """
+        normalized_url: str = str(source_url).strip()
+        if not normalized_url:
+            raise ValueError("source_url must be a non-empty string.")
+
+        self.source_url: str = normalized_url
+
+    def download(self, start: date, end: date) -> pd.DataFrame:
+        """Download F10.7 data from a direct CSV/text endpoint.
+
+        The configured OMNIWeb form URL is not treated as a direct data
+        endpoint because the paper/configuration do not specify a stable API
+        query. If ``source_url`` points to a direct CSV/text resource, this
+        method downloads and normalizes it using the same rules as
+        ``load_cached``.
+
+        Args:
+            start: Inclusive start date. Python ``date``, ``datetime``, NumPy,
+                pandas, or ISO-like date values are accepted.
+            end: Inclusive end date.
+
+        Returns:
+            Normalized DataFrame with columns ``date``, ``f107``, and
+            ``source``, filtered to ``start <= date <= end``.
+
+        Raises:
+            ValueError: If the date range is invalid.
+            RuntimeError: If the source URL is an OMNIWeb form URL, the network
+                request fails, the response is HTML, or the downloaded content
+                cannot be normalized.
+        """
+        start_date: date = self._coerce_date(start, "start")
+        end_date: date = self._coerce_date(end, "end")
+        if start_date > end_date:
+            raise ValueError(
+                f"start must be <= end, got {start_date.isoformat()} > "
+                f"{end_date.isoformat()}."
+            )
+
+        if self._looks_like_omniweb_form_url(self.source_url):
+            raise RuntimeError(
+                "Direct OMNIWeb download is not implemented for the configured "
+                f"form URL {self.source_url!r}. The paper cites OMNIWeb as the "
+                "F10.7 source but does not specify a stable machine-query URL. "
+                "For reproducibility, provide a cached CSV at the configured "
+                "paths.f107_data_path and load it with F107Loader.load_cached()."
+            )
+
+        raw_text: str = self._download_text(self.source_url)
+        if self._looks_like_html(raw_text):
+            raise RuntimeError(
+                f"The configured F10.7 source URL returned HTML, not a direct "
+                f"CSV/text data table: {self.source_url!r}. Provide a cached "
+                "CSV or configure a direct data endpoint."
+            )
+
+        try:
+            raw_dataframe: pd.DataFrame = self._read_text_table(raw_text)
+            normalized_dataframe: pd.DataFrame = self._normalize_dataframe(
+                raw_dataframe,
+                source_label=self.source_url,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Downloaded F10.7 content could not be parsed into normalized "
+                f"date/f107 columns from source {self.source_url!r}. Provide a "
+                "cached CSV with recognizable columns such as date,f107 or "
+                "year,doy,f107."
+            ) from exc
+
+        start_timestamp: pd.Timestamp = pd.Timestamp(start_date)
+        end_timestamp: pd.Timestamp = pd.Timestamp(end_date)
+        filtered_dataframe: pd.DataFrame = normalized_dataframe.loc[
+            (normalized_dataframe["date"] >= start_timestamp)
+            & (normalized_dataframe["date"] <= end_timestamp)
+        ].reset_index(drop=True)
+
+        if filtered_dataframe.empty:
+            raise RuntimeError(
+                "Downloaded F10.7 data were parsed successfully, but no rows "
+                f"fall in the requested range {start_date.isoformat()} to "
+                f"{end_date.isoformat()}."
+            )
+
+        return filtered_dataframe
+
+    def load_cached(self, path: Path) -> pd.DataFrame:
+        """Load cached F10.7 data from a local CSV/text file.
+
+        The cache parser is flexible with common date and F10.7 column names.
+        It supports direct date columns, ``year`` + ``doy``, and
+        ``year`` + ``month`` + ``day`` formats.
+
+        Args:
+            path: Cached F10.7 file path, typically configured as
+                ``paths.f107_data_path``.
+
+        Returns:
+            Normalized DataFrame with columns ``date``, ``f107``, and
+            ``source``.
+
+        Raises:
+            FileNotFoundError: If the cache file is absent.
+            ValueError: If the file is empty, malformed, lacks date/F10.7
+                columns, or all F10.7 values are missing after sentinel cleanup.
+        """
+        cache_path: Path = Path(path).expanduser()
+        if not cache_path.exists():
+            raise FileNotFoundError(f"F10.7 cache file not found: {cache_path}")
+        if not cache_path.is_file():
+            raise ValueError(f"F10.7 cache path is not a file: {cache_path}")
+
+        try:
+            raw_dataframe: pd.DataFrame = self._read_cached_table(cache_path)
+        except Exception as exc:
+            raise ValueError(f"Could not read F10.7 cache file {cache_path}: {exc}") from exc
+
+        return self._normalize_dataframe(
+            raw_dataframe,
+            source_label=f"cache:{cache_path}",
+        )
+
+    @staticmethod
+    def _coerce_date(value: Any, name: str) -> date:
+        """Convert date-like input to a Python ``date``.
+
+        Args:
+            value: Date-like object.
+            name: Argument name for error messages.
+
+        Returns:
+            Python date.
+
+        Raises:
+            ValueError: If conversion fails.
+        """
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                value = value.astimezone(timezone.utc)
+            return value.date()
+
+        if isinstance(value, date):
+            return value
+
+        try:
+            timestamp: pd.Timestamp = pd.to_datetime(value)
+        except Exception as exc:
+            raise ValueError(f"{name} must be date-like, got {value!r}.") from exc
+
+        if pd.isna(timestamp):
+            raise ValueError(f"{name} could not be converted to a valid date.")
+
+        return timestamp.date()
+
+    @staticmethod
+    def _looks_like_omniweb_form_url(source_url: str) -> bool:
+        """Return True if the configured URL appears to be the OMNIWeb form."""
+        parsed_url = urlparse(source_url)
+        normalized_url: str = source_url.strip().lower()
+        normalized_path: str = parsed_url.path.strip().lower()
+        return (
+            "omniweb.gsfc.nasa.gov" in parsed_url.netloc.lower()
+            and (
+                normalized_path.endswith("/form/dx1.html")
+                or normalized_path.endswith("dx1.html")
+                or "/form/" in normalized_path
+            )
+        ) or normalized_url == _DEFAULT_SOURCE_URL.lower()
+
+    @staticmethod
+    def _download_text(source_url: str) -> str:
+        """Download a direct text/CSV URL using standard-library urllib.
+
+        Args:
+            source_url: Direct data URL.
+
+        Returns:
+            Decoded response text.
+
+        Raises:
+            RuntimeError: If network access or decoding fails.
+        """
+        request: Request = Request(
+            source_url,
+            headers={
+                "User-Agent": (
+                    "cosmic2-bp-geolocation-reproduction/1.0 "
+                    "(F10.7 loader; cached CSV preferred)"
+                )
+            },
+        )
+
+        try:
+            with urlopen(request, timeout=_URL_TIMEOUT_SECONDS) as response:
+                raw_bytes: bytes = response.read()
+                content_type: str = str(response.headers.get("Content-Type", ""))
+        except HTTPError as exc:
+            raise RuntimeError(
+                f"HTTP error while downloading F10.7 data from {source_url!r}: "
+                f"{exc.code} {exc.reason}"
+            ) from exc
+        except URLError as exc:
+            raise RuntimeError(
+                f"URL/network error while downloading F10.7 data from "
+                f"{source_url!r}: {exc.reason}"
+            ) from exc
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"Timed out after {_URL_TIMEOUT_SECONDS:g} s while downloading "
+                f"F10.7 data from {source_url!r}."
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not download F10.7 data from {source_url!r}: {exc}"
+            ) from exc
+
+        encoding: str = "utf-8"
+        content_type_match = re.search(r"charset=([^;\s]+)", content_type, flags=re.I)
+        if content_type_match:
+            encoding = content_type_match.group(1).strip()
+
+        try:
+            return raw_bytes.decode(encoding, errors="replace")
+        except LookupError:
+            return raw_bytes.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _looks_like_html(text: str) -> bool:
+        """Return True if text appears to be HTML rather than data."""
+        prefix: str = text.lstrip()[:500].lower()
+        return any(marker in prefix for marker in _HTML_MARKERS)
+
+    @classmethod
+    def _read_cached_table(cls, path: Path) -> pd.DataFrame:
+        """Read a cached table using robust CSV/whitespace fallbacks."""
+        read_errors: list[str] = []
+
+        for read_kwargs in (
+            {"sep": None, "engine": "python", "comment": "#"},
+            {"sep": ",", "engine": "python", "comment": "#"},
+            {"sep": r"\s+", "engine": "python", "comment": "#"},
+        ):
+            try:
+                dataframe: pd.DataFrame = pd.read_csv(path, **read_kwargs)
+                if not dataframe.empty and dataframe.shape[1] >= 1:
+                    return dataframe
+            except Exception as exc:
+                read_errors.append(f"{read_kwargs}: {exc}")
+
+        try:
+            raw_text: str = path.read_text(encoding="utf-8", errors="replace")
+            return cls._read_text_table(raw_text)
+        except Exception as exc:
+            read_errors.append(f"text fallback: {exc}")
+
+        raise ValueError("; ".join(read_errors) if read_errors else "empty file")
+
+    @classmethod
+    def _read_text_table(cls, text: str) -> pd.DataFrame:
+        """Parse downloaded or cached text into a raw DataFrame."""
+        if not str(text).strip():
+            raise ValueError("F10.7 text content is empty.")
+
+        read_errors: list[str] = []
+        for read_kwargs in (
+            {"sep": None, "engine": "python", "comment": "#"},
+            {"sep": ",", "engine": "python", "comment": "#"},
+            {"sep": r"\s+", "engine": "python", "comment": "#"},
+        ):
+            try:
+                dataframe: pd.DataFrame = pd.read_csv(StringIO(text), **read_kwargs)
+                if not dataframe.empty and dataframe.shape[1] >= 1:
+                    return dataframe
+            except Exception as exc:
+                read_errors.append(f"{read_kwargs}: {exc}")
+
+        numeric_dataframe: pd.DataFrame | None = cls._parse_numeric_whitespace_text(text)
+        if numeric_dataframe is not None and not numeric_dataframe.empty:
+            return numeric_dataframe
+
+        raise ValueError(
+            "Could not parse text as CSV/whitespace table. "
+            f"Read attempts: {'; '.join(read_errors)}"
+        )
+
+    @classmethod
+    def _parse_numeric_whitespace_text(cls, text: str) -> pd.DataFrame | None:
+        """Parse headerless numeric text with year/doy and an F10.7-like column.
+
+        This fallback is deliberately conservative. It is used only when pandas
+        cannot infer a table, and it requires the first two numeric columns to
+        resemble year and day-of-year.
+        """
+        rows: list[list[float]] = []
+        for raw_line in text.splitlines():
+            line: str = raw_line.strip()
+            if not line:
+                continue
+            if any(line.startswith(prefix) for prefix in _NUMERIC_TEXT_COMMENT_PREFIXES):
+                continue
+            if re.search(r"[A-Za-z]", line):
+                continue
+
+            tokens: list[str] = re.split(r"[\s,]+", line)
+            numeric_values: list[float] = []
+            for token in tokens:
+                if not token:
+                    continue
+                try:
+                    numeric_values.append(float(token))
+                except ValueError:
+                    numeric_values = []
+                    break
+
+            if len(numeric_values) >= 3:
+                rows.append(numeric_values)
+
+        if not rows:
+            return None
+
+        min_width: int = min(len(row) for row in rows)
+        if min_width < 3:
+            return None
+
+        array: np.ndarray = np.asarray([row[:min_width] for row in rows], dtype=np.float64)
+        years: np.ndarray = array[:, 0]
+        doys: np.ndarray = array[:, 1]
+
+        if not (
+            np.nanmin(years) >= 1900
+            and np.nanmax(years) <= 2200
+            and np.nanmin(doys) >= 1
+            and np.nanmax(doys) <= 366
+        ):
+            return None
+
+        f107_column_index: int | None = cls._infer_f107_numeric_column(array)
+        if f107_column_index is None:
+            return None
+
+        dataframe: pd.DataFrame = pd.DataFrame(
+            {
+                "year": years.astype(int),
+                "doy": doys.astype(int),
+                "f107": array[:, f107_column_index],
+            }
+        )
+        return dataframe
+
+    @staticmethod
+    def _infer_f107_numeric_column(array: np.ndarray) -> int | None:
+        """Infer an F10.7-like column from a numeric table."""
+        best_score: float = -math.inf
+        best_index: int | None = None
+
+        for column_index in range(2, array.shape[1]):
+            column: np.ndarray = np.asarray(array[:, column_index], dtype=np.float64)
+            finite_values: np.ndarray = column[np.isfinite(column)]
+            if finite_values.size == 0:
+                continue
+
+            cleaned_values: np.ndarray = finite_values.copy()
+            for sentinel in _MISSING_SENTINELS:
+                cleaned_values[np.isclose(cleaned_values, sentinel, rtol=0.0, atol=1.0e-9)] = np.nan
+
+            valid_values: np.ndarray = cleaned_values[np.isfinite(cleaned_values)]
+            if valid_values.size == 0:
+                continue
+
+            median_value: float = float(np.median(valid_values))
+            fraction_plausible: float = float(
+                np.mean((valid_values >= 40.0) & (valid_values <= 400.0))
+            )
+
+            score: float = fraction_plausible
+            if 50.0 <= median_value <= 250.0:
+                score += 0.5
+            if valid_values.size == finite_values.size:
+                score += 0.1
+
+            if score > best_score:
+                best_score = score
+                best_index = column_index
+
+        if best_score < 0.5:
+            return None
+        return best_index
+
+    @classmethod
+    def _normalize_dataframe(
+        cls,
+        dataframe: pd.DataFrame,
+        source_label: str,
+    ) -> pd.DataFrame:
+        """Normalize raw F10.7 data to date/f107/source columns."""
+        if not isinstance(dataframe, pd.DataFrame):
+            raise TypeError(
+                f"Expected pandas.DataFrame, got {type(dataframe).__name__}."
+            )
+        if dataframe.empty:
+            raise ValueError("F10.7 table is empty.")
+
+        working_dataframe: pd.DataFrame = dataframe.copy()
+        working_dataframe.columns = [
+            cls._safe_column_name(column) for column in working_dataframe.columns
+        ]
+
+        date_series: pd.Series = cls._extract_date_series(working_dataframe)
+        f107_series: pd.Series = cls._extract_f107_series(working_dataframe)
+
+        normalized_dataframe: pd.DataFrame = pd.DataFrame(
+            {
+                "date": pd.to_datetime(date_series, errors="coerce").dt.normalize(),
+                "f107": pd.to_numeric(f107_series, errors="coerce"),
+            }
+        )
+
+        normalized_dataframe["f107"] = cls._clean_f107_values(
+            normalized_dataframe["f107"]
+        )
+
+        normalized_dataframe = normalized_dataframe.dropna(subset=["date"])
+        if normalized_dataframe.empty:
+            raise ValueError("No usable F10.7 dates remain after parsing.")
+
+        if normalized_dataframe["f107"].notna().sum() == 0:
+            raise ValueError(
+                "All F10.7 values are missing after parsing and sentinel cleanup."
+            )
+
+        normalized_dataframe = normalized_dataframe.sort_values("date")
+        normalized_dataframe = normalized_dataframe.drop_duplicates(
+            subset=["date"],
+            keep="last",
+        )
+        normalized_dataframe = normalized_dataframe.reset_index(drop=True)
+        normalized_dataframe["source"] = str(source_label)
+
+        return normalized_dataframe[["date", "f107", "source"]]
+
+    @classmethod
+    def _extract_date_series(cls, dataframe: pd.DataFrame) -> pd.Series:
+        """Extract or construct a date series from a raw DataFrame."""
+        canonical_to_column: dict[str, str] = {
+            cls._canonical_column_name(column): column for column in dataframe.columns
+        }
+
+        for alias in _DIRECT_DATE_ALIASES:
+            canonical_alias: str = cls._canonical_column_name(alias)
+            if canonical_alias in canonical_to_column:
+                column_name: str = canonical_to_column[canonical_alias]
+                parsed_dates: pd.Series = cls._parse_direct_date_column(
+                    dataframe[column_name]
+                )
+                if parsed_dates.notna().any():
+                    return parsed_dates
+
+        # Try any column that looks date-like by name.
+        for column_name in dataframe.columns:
+            canonical_name: str = cls._canonical_column_name(column_name)
+            if "date" in canonical_name or "time" in canonical_name or "utc" in canonical_name:
+                parsed_dates = cls._parse_direct_date_column(dataframe[column_name])
+                if parsed_dates.notna().any():
+                    return parsed_dates
+
+        year_column: str | None = cls._find_column_by_aliases(dataframe, _YEAR_ALIASES)
+        doy_column: str | None = cls._find_column_by_aliases(dataframe, _DOY_ALIASES)
+        if year_column is not None and doy_column is not None:
+            return cls._date_from_year_doy(
+                year_values=dataframe[year_column],
+                doy_values=dataframe[doy_column],
+            )
+
+        month_column: str | None = cls._find_column_by_aliases(dataframe, _MONTH_ALIASES)
+        day_column: str | None = cls._find_column_by_aliases(
+            dataframe,
+            _DAY_OF_MONTH_ALIASES,
+        )
+        if year_column is not None and month_column is not None and day_column is not None:
+            return cls._date_from_year_month_day(
+                year_values=dataframe[year_column],
+                month_values=dataframe[month_column],
+                day_values=dataframe[day_column],
+            )
+
+        # Last resort: parse the first column as dates if it clearly works.
+        for column_name in dataframe.columns:
+            parsed_dates = cls._parse_direct_date_column(dataframe[column_name])
+            if parsed_dates.notna().sum() >= max(1, int(0.8 * len(dataframe))):
+                return parsed_dates
+
+        raise ValueError(
+            "Could not identify date information in F10.7 table. Expected a "
+            "date/datetime/time column, year+doy columns, or year+month+day columns."
+        )
+
+    @classmethod
+    def _extract_f107_series(cls, dataframe: pd.DataFrame) -> pd.Series:
+        """Extract the F10.7 numeric column from a raw DataFrame."""
+        scored_columns: list[tuple[int, str]] = []
+
+        for column_name in dataframe.columns:
+            canonical_name: str = cls._canonical_column_name(column_name)
+            score: int = 0
+
+            if canonical_name in {
+                cls._canonical_column_name(alias) for alias in _F107_EXACT_ALIASES
+            }:
+                score += 100
+
+            lowered_original: str = str(column_name).strip().lower()
+            for pattern in _F107_NAME_PATTERNS:
+                if pattern in lowered_original or cls._canonical_column_name(pattern) in canonical_name:
+                    score += 50
+
+            if "flux" in canonical_name and ("solar" in canonical_name or "radio" in canonical_name):
+                score += 20
+            if "index" in canonical_name and ("f10" in canonical_name or "f107" in canonical_name):
+                score += 20
+
+            if score > 0:
+                scored_columns.append((score, column_name))
+
+        if scored_columns:
+            scored_columns.sort(key=lambda item: (-item[0], item[1]))
+            return dataframe[scored_columns[0][1]]
+
+        # Conservative fallback for simple two-column caches: if one column is
+        # date-like, choose the other numeric/plausible column.
+        candidate_columns: list[str] = []
+        for column_name in dataframe.columns:
+            canonical_name = cls._canonical_column_name(column_name)
+            if canonical_name in _YEAR_ALIASES or canonical_name in _DOY_ALIASES:
+                continue
+            if canonical_name in _MONTH_ALIASES or canonical_name in _DAY_OF_MONTH_ALIASES:
+                continue
+            if canonical_name in _DIRECT_DATE_ALIASES:
+                continue
+            numeric_values: pd.Series = pd.to_numeric(dataframe[column_name], errors="coerce")
+            if numeric_values.notna().any():
+                cleaned_values: pd.Series = cls._clean_f107_values(numeric_values)
+                valid_values: pd.Series = cleaned_values.dropna()
+                if not valid_values.empty:
+                    plausible_fraction: float = float(
+                        ((valid_values >= 40.0) & (valid_values <= 400.0)).mean()
+                    )
+                    if plausible_fraction >= 0.5:
+                        candidate_columns.append(column_name)
+
+        if len(candidate_columns) == 1:
+            return dataframe[candidate_columns[0]]
+
+        raise ValueError(
+            "Could not identify F10.7 column in cached/downloaded table. "
+            "Recognized names include f107, F10.7, f10.7, f107_sfu, "
+            "F10_INDEX, and F10.7_INDEX."
+        )
+
+    @staticmethod
+    def _parse_direct_date_column(series: pd.Series) -> pd.Series:
+        """Parse a direct date-like column."""
+        raw_series: pd.Series = series.copy()
+
+        # Numeric YYYYMMDD values are common in simple daily solar-flux caches.
+        numeric_values: pd.Series = pd.to_numeric(raw_series, errors="coerce")
+        if numeric_values.notna().any():
+            finite_values: pd.Series = numeric_values.dropna()
+            if not finite_values.empty:
+                min_value: float = float(finite_values.min())
+                max_value: float = float(finite_values.max())
+                if 19000101 <= min_value <= 22001231 and 19000101 <= max_value <= 22001231:
+                    return pd.to_datetime(
+                        numeric_values.round().astype("Int64").astype(str),
+                        format="%Y%m%d",
+                        errors="coerce",
+                    )
+
+        return pd.to_datetime(raw_series, errors="coerce")
+
+    @staticmethod
+    def _date_from_year_doy(
+        year_values: pd.Series,
+        doy_values: pd.Series,
+    ) -> pd.Series:
+        """Construct dates from year and day-of-year columns."""
+        years: pd.Series = pd.to_numeric(year_values, errors="coerce")
+        doys: pd.Series = pd.to_numeric(doy_values, errors="coerce")
+
+        dates: list[pd.Timestamp | pd.NaT] = []
+        for year_value, doy_value in zip(years, doys, strict=False):
+            if pd.isna(year_value) or pd.isna(doy_value):
+                dates.append(pd.NaT)
+                continue
+
+            year_int: int = int(year_value)
+            doy_int: int = int(doy_value)
+            if year_int < 1900 or year_int > 2200 or doy_int < 1 or doy_int > 366:
+                dates.append(pd.NaT)
+                continue
+
+            try:
+                dates.append(
+                    pd.Timestamp(datetime(year_int, 1, 1))
+                    + pd.Timedelta(days=doy_int - 1)
+                )
+            except (ValueError, OverflowError):
+                dates.append(pd.NaT)
+
+        return pd.Series(dates, index=year_values.index)
+
+    @staticmethod
+    def _date_from_year_month_day(
+        year_values: pd.Series,
+        month_values: pd.Series,
+        day_values: pd.Series,
+    ) -> pd.Series:
+        """Construct dates from year, month, and day-of-month columns."""
+        years: pd.Series = pd.to_numeric(year_values, errors="coerce")
+        months: pd.Series = pd.to_numeric(month_values, errors="coerce")
+        days: pd.Series = pd.to_numeric(day_values, errors="coerce")
+
+        dates: list[pd.Timestamp | pd.NaT] = []
+        for year_value, month_value, day_value in zip(years, months, days, strict=False):
+            if pd.isna(year_value) or pd.isna(month_value) or pd.isna(day_value):
+                dates.append(pd.NaT)
+                continue
+
+            try:
+                dates.append(
+                    pd.Timestamp(
+                        datetime(
+                            int(year_value),
+                            int(month_value),
+                            int(day_value),
+                        )
+                    )
+                )
+            except (ValueError, OverflowError):
+                dates.append(pd.NaT)
+
+        return pd.Series(dates, index=year_values.index)
+
+    @classmethod
+    def _find_column_by_aliases(
+        cls,
+        dataframe: pd.DataFrame,
+        aliases: frozenset[str],
+    ) -> str | None:
+        """Find a DataFrame column matching one of the aliases."""
+        canonical_aliases: set[str] = {
+            cls._canonical_column_name(alias) for alias in aliases
+        }
+        for column_name in dataframe.columns:
+            if cls._canonical_column_name(column_name) in canonical_aliases:
+                return column_name
+
+        for column_name in dataframe.columns:
+            canonical_name: str = cls._canonical_column_name(column_name)
+            if any(alias in canonical_name for alias in canonical_aliases):
+                return column_name
+
+        return None
+
+    @staticmethod
+    def _clean_f107_values(series: pd.Series) -> pd.Series:
+        """Convert F10.7 values to numeric and replace missing sentinels."""
+        numeric_series: pd.Series = pd.to_numeric(series, errors="coerce").astype(float)
+
+        cleaned_series: pd.Series = numeric_series.copy()
+        for sentinel in _MISSING_SENTINELS:
+            cleaned_series = cleaned_series.mask(
+                np.isclose(cleaned_series, sentinel, rtol=0.0, atol=1.0e-9)
+            )
+
+        cleaned_series = cleaned_series.mask(cleaned_series <= 0.0)
+
+        return cleaned_series
+
+    @staticmethod
+    def _safe_column_name(column: Any) -> str:
+        """Convert a raw column label into a stable string label."""
+        text: str = str(column).strip()
+        if not text or text.lower().startswith("unnamed:"):
+            return f"column_{abs(hash(text)) % 1_000_000}"
+        return text
+
+    @staticmethod
+    def _canonical_column_name(column: Any) -> str:
+        """Canonicalize column names for robust alias matching."""
+        text: str = str(column).strip().lower()
+        text = text.replace("10.7", "107")
+        text = text.replace("f10.7", "f107")
+        text = text.replace("f_10_7", "f107")
+        text = text.replace("f-10-7", "f107")
+        text = re.sub(r"[^a-z0-9]+", "", text)
+        return text
+
+    @staticmethod
+    def _source_label_from_url(source_url: str) -> str:
+        """Return a compact source label for URL-derived data."""
+        parsed_url = urlparse(source_url)
+        if parsed_url.netloc:
+            return parsed_url.netloc
+        return source_url
+
+
+__all__ = ["F107Loader"]
+```

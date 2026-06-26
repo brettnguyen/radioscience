@@ -1,0 +1,717 @@
+## Logic Analysis: `src/io/writers.py`
+
+### 1. Purpose and Scope
+
+`src/io/writers.py` implements the persistence layer for the reproduction pipeline. Its responsibility is to save results and diagnostics produced by synthetic experiments, real COSMIC-2 processing, monthly map aggregation, L1/L2 comparison, and debugging workflows.
+
+Per the design, this module must implement only the `ResultWriter` class with the following public interface:
+
+```text
+class ResultWriter {
+    +__init__(output_dir: Path)
+    +write_results(results: list~GeolocationResult~, name: str) Path
+    +write_dataframe(df: DataFrame, name: str) Path
+    +write_diagnostics(obj: Any, name: str) Path
+}
+```
+
+This module must **not** perform scientific computation, filtering, QC, geolocation logic, plotting, or experiment orchestration. It only serializes already-computed objects.
+
+---
+
+### 2. Paper and Configuration Alignment
+
+The paper requires saving several classes of outputs:
+
+1. Per-interval COSMIC-2 geolocation results.
+2. Monthly `3° × 3°` post-sunset geolocation maps for 2021 and 2023.
+3. L1/L2 comparison outputs for the configured period.
+4. Diagnostic objects such as:
+   - `V(L)` curves,
+   - smoothed `V(L)` curves,
+   - `D(L_mf)` curves,
+   - zero-crossing diagnostics,
+   - synthetic experiment outputs.
+
+The configuration file enables these output categories under:
+
+```yaml
+outputs:
+  save_interval_results: true
+  save_diagnostics: true
+  save_v_curves_for_debug_cases: true
+  save_d_curves_for_debug_cases: true
+  save_monthly_maps: true
+  save_l1_l2_histogram: true
+  save_f107_plot: true
+```
+
+However, `ResultWriter` should **not** decide whether an output should be saved. Those booleans should be checked by `main.py`, `SyntheticExperiments`, `RealDataExperiments`, or other orchestration code. `ResultWriter` should assume that if a caller invokes one of its methods, the caller has already decided saving is desired.
+
+The writer should use the configured output directory passed from:
+
+```yaml
+paths:
+  output_dir: "outputs"
+```
+
+via:
+
+```python
+ResultWriter(config.output_dir)
+```
+
+---
+
+### 3. Dependencies
+
+Allowed dependencies for this module:
+
+- Standard library:
+  - `pathlib.Path`
+  - `json`
+  - `datetime`
+  - `dataclasses`
+  - `typing.Any`
+- External:
+  - `numpy`
+  - `pandas`
+  - `pyarrow` indirectly through `pandas.to_parquet`
+- Project:
+  - `src/core/types.py`
+
+This module should **not** import:
+
+- `BackpropProcessor`
+- `Geolocator`
+- `QualityController`
+- `SyntheticExperiments`
+- `RealDataExperiments`
+- plotting modules
+- data loaders
+- geometry modules
+- propagation modules
+
+This keeps persistence independent from computation.
+
+---
+
+### 4. Inputs and Outputs
+
+#### 4.1 Constructor
+
+```python
+ResultWriter(output_dir: Path)
+```
+
+Responsibilities:
+
+1. Store the output directory.
+2. Create the output directory if it does not exist.
+3. Avoid validating dataset availability because that belongs to configuration/data loading logic.
+
+Expected behavior:
+
+```text
+outputs/
+```
+
+is created if missing.
+
+Potential nested names such as:
+
+```text
+diagnostics/event_001_v_curve.npz
+```
+
+should also be supported by creating parent directories before writing.
+
+---
+
+### 5. `write_results(results, name)`
+
+#### 5.1 Purpose
+
+Serialize a list of `GeolocationResult` objects.
+
+The `GeolocationResult` type contains the accepted/rejected status, rejection reason, distance, latitude, longitude, altitude, local time, scintillation metrics, QC metrics, and multi-valued flag.
+
+This is essential for reproducing paper-level statistics such as:
+
+- accepted geolocation counts:
+  - 2021 expected: `332000`
+  - 2023 expected: `1108000`
+- multi-valued rejection rate, about `8%`
+- rejection reason statistics
+- accepted post-sunset monthly maps
+- L1/L2 common-case pairing
+
+#### 5.2 Input
+
+```python
+results: list[GeolocationResult]
+name: str
+```
+
+Each `GeolocationResult` exposes:
+
+```python
+to_dict() -> dict
+```
+
+per the design.
+
+#### 5.3 Serialization Logic
+
+The method should:
+
+1. Convert each result using `result.to_dict()`.
+2. Build a `pandas.DataFrame`.
+3. Delegate actual tabular writing to `write_dataframe(df, name)`.
+4. Return the written path.
+
+Conceptual flow:
+
+```text
+list[GeolocationResult]
+        ↓
+list[dict] via GeolocationResult.to_dict()
+        ↓
+pandas.DataFrame
+        ↓
+write_dataframe()
+        ↓
+Path
+```
+
+#### 5.4 Empty Results
+
+If `results` is empty, the writer should still produce a valid empty table.
+
+This matters because some test periods or synthetic validation subsets may produce no accepted geolocations after QC.
+
+The empty table should still be writable, preferably with columns inferred only if available. If no schema is available, an empty DataFrame is acceptable.
+
+#### 5.5 No Filtering
+
+`write_results` must not:
+
+- remove rejected cases,
+- remove multi-valued cases,
+- apply `Q > 1.2`,
+- apply `cos_alpha > 0.1`,
+- apply local time filtering,
+- apply signal filtering.
+
+Those decisions belong to upstream modules.
+
+---
+
+### 6. `write_dataframe(df, name)`
+
+#### 6.1 Purpose
+
+Write arbitrary tabular outputs, including:
+
+- per-window geolocation tables,
+- monthly binned counts,
+- L1/L2 paired comparison tables,
+- F10.7 cached/processed tables,
+- rejection statistics,
+- aggregate summaries.
+
+#### 6.2 Input
+
+```python
+df: pandas.DataFrame
+name: str
+```
+
+Examples from the program call flow:
+
+```text
+geolocations.parquet
+monthly_bins.parquet
+l1_l2_pairs.parquet
+```
+
+#### 6.3 Path Resolution
+
+`name` should be interpreted relative to `output_dir`.
+
+For example:
+
+```python
+ResultWriter(Path("outputs")).write_dataframe(df, "geolocations.parquet")
+```
+
+writes:
+
+```text
+outputs/geolocations.parquet
+```
+
+If `name` includes a subdirectory:
+
+```text
+diagnostics/monthly_bins_2021.parquet
+```
+
+then the writer should create:
+
+```text
+outputs/diagnostics/
+```
+
+before writing.
+
+#### 6.4 Format Selection
+
+The file format should be inferred from the suffix of `name`.
+
+Recommended behavior:
+
+| Suffix | Writer |
+|---|---|
+| `.parquet` | `df.to_parquet(path, index=False)` |
+| `.csv` | `df.to_csv(path, index=False)` |
+| `.json` | `df.to_json(path, orient="records", date_format="iso")` |
+| `.jsonl` | `df.to_json(path, orient="records", lines=True, date_format="iso")` |
+
+If `name` has no suffix, the safest default is to append `.parquet`, because the task specifically identifies `pandas/pyarrow` for tabular outputs and the program call flow uses parquet names.
+
+Unsupported suffixes should raise a clear `ValueError`.
+
+#### 6.5 Date and Time Handling
+
+The geolocation result contains fields such as:
+
+```text
+mid_time
+```
+
+and F10.7 outputs contain dates.
+
+For parquet, pandas preserves datetime columns well.
+
+For JSON/CSV, datetimes should be serialized in ISO-compatible form. This can be handled by pandas’ `date_format="iso"` for JSON. CSV naturally stringifies datetimes.
+
+#### 6.6 Numeric Precision
+
+The writer should not round values by default.
+
+The paper’s reproduction depends on preserving diagnostics such as:
+
+- `distance_km`
+- `latitude_deg`
+- `longitude_deg`
+- `altitude_km`
+- `sigma_phi_rad`
+- `s4`
+- `q`
+- `cos_alpha`
+- `d_slope`
+
+Rounding should be left to plotting or reporting layers.
+
+---
+
+### 7. `write_diagnostics(obj, name)`
+
+#### 7.1 Purpose
+
+Serialize non-tabular or semi-structured diagnostic objects.
+
+Important diagnostics include:
+
+- `BpCurve`
+- `DCurve`
+- synthetic experiment dictionaries
+- raw arrays from synthetic experiments
+- selected `V(L)` and `D(L_mf)` debug products
+
+The paper emphasizes diagnostic curves:
+
+```text
+V(L) = <A^2> / <A>^2 - 1
+D(L_mf) = L0 - L_mf
+```
+
+These curves are required to reproduce Figures 16–20 style outputs.
+
+#### 7.2 Input
+
+```python
+obj: Any
+name: str
+```
+
+Supported diagnostic object categories should include:
+
+1. `BpCurve`
+2. `DCurve`
+3. `dict`
+4. generic NumPy-array-containing structures where possible
+
+The method should depend only on `src/core/types.py`, so type checks against `BpCurve` and `DCurve` are allowed because they are core shared types.
+
+#### 7.3 Format Selection
+
+As with `write_dataframe`, infer format from suffix.
+
+Recommended behavior:
+
+| Suffix | Use case |
+|---|---|
+| `.npz` | array-heavy diagnostics such as `BpCurve`, `DCurve`, synthetic arrays |
+| `.json` | small metadata dictionaries |
+| `.parquet` | tabular diagnostic summaries if passed as DataFrame |
+| no suffix | default to `.npz` for diagnostics |
+
+Unsupported suffixes should raise a clear `ValueError`.
+
+#### 7.4 `BpCurve` Serialization
+
+`BpCurve` contains:
+
+```text
+l_mf_km
+distances_km
+v_raw
+v_smooth
+l0_km
+v0
+l1_km
+l2_km
+v1
+v2
+q
+has_valid_minimum
+```
+
+For `.npz`, store:
+
+```text
+l_mf_km
+distances_km
+v_raw
+v_smooth
+l0_km
+v0
+l1_km
+l2_km
+v1
+v2
+q
+has_valid_minimum
+```
+
+This directly preserves the information needed to reconstruct the paper’s `V(L)` diagnostic plots.
+
+For `.json`, arrays must be converted to lists, but JSON is less efficient for these curves.
+
+#### 7.5 `DCurve` Serialization
+
+`DCurve` contains:
+
+```text
+l_mf_km
+d_km
+l0_km
+q
+cos_alpha
+zero_crossings_km
+is_multivalued
+```
+
+For `.npz`, store:
+
+```text
+l_mf_km
+d_km
+l0_km
+q
+cos_alpha
+zero_crossings_km
+is_multivalued
+```
+
+This preserves the information needed to reproduce:
+
+- `D(L_mf)` zero-crossing plots,
+- multi-valued diagnostics,
+- `cos(alpha)` versus distance plots.
+
+#### 7.6 Dictionary Serialization
+
+Synthetic experiment outputs may be dictionaries containing:
+
+- scalars,
+- lists,
+- nested dicts,
+- NumPy arrays.
+
+For `.npz`, the writer should flatten or directly store array-compatible entries where possible.
+
+For `.json`, the writer must convert non-JSON-native objects:
+
+| Type | JSON conversion |
+|---|---|
+| `np.ndarray` | `.tolist()` |
+| `np.floating` | `float()` |
+| `np.integer` | `int()` |
+| `np.bool_` | `bool()` |
+| `datetime` | `.isoformat()` |
+| `Path` | `str()` |
+
+Nested dictionaries and lists should be recursively converted.
+
+#### 7.7 DataFrame Diagnostics
+
+If `obj` is already a `pandas.DataFrame`, `write_diagnostics` may delegate to `write_dataframe`.
+
+This is useful for diagnostic summaries such as rejection counts.
+
+---
+
+### 8. Output Directory Structure
+
+`ResultWriter` should not impose a rigid structure, but it should support the structure expected by callers.
+
+Likely output examples:
+
+```text
+outputs/
+  geolocations_2021_L1.parquet
+  geolocations_2023_L1.parquet
+  monthly_bins_2021_L1.parquet
+  monthly_bins_2023_L1.parquet
+  l1_l2_pairs.parquet
+  synthetic/
+    single_phase_screen.npz
+    orientation_error.json
+    thermal_noise.npz
+  diagnostics/
+    event_001_v_curve.npz
+    event_001_d_curve.npz
+```
+
+The writer should create parent directories automatically.
+
+---
+
+### 9. Error Handling
+
+#### 9.1 Invalid Suffix
+
+If the suffix is unsupported, raise:
+
+```python
+ValueError("Unsupported output format: ...")
+```
+
+#### 9.2 Missing Parent Directory
+
+Automatically create parent directories using:
+
+```python
+path.parent.mkdir(parents=True, exist_ok=True)
+```
+
+#### 9.3 Non-Serializable JSON Object
+
+For JSON diagnostics, recursively convert known scientific types. If an object still cannot be serialized, raise a clear `TypeError` identifying the problematic object type.
+
+#### 9.4 Parquet Engine
+
+Since `pyarrow` is listed in required packages, parquet should use the pyarrow backend implicitly or explicitly.
+
+If parquet writing fails because pyarrow is unavailable, the error should surface clearly; no silent fallback is recommended because parquet outputs are part of the planned reproducibility pipeline.
+
+---
+
+### 10. Reproducibility Considerations
+
+The writer supports reproducibility by ensuring outputs preserve:
+
+1. Rejected and accepted cases.
+2. QC metrics:
+   - `q`
+   - `cos_alpha`
+   - `d_slope`
+   - `is_multivalued`
+3. Scintillation metrics:
+   - `sigma_phi_rad`
+   - `s4`
+   - `mean_snr_vv`
+4. Geolocation products:
+   - `distance_km`
+   - `latitude_deg`
+   - `longitude_deg`
+   - `altitude_km`
+   - `local_time_hr`
+5. Diagnostic curves:
+   - raw `V(L)`
+   - smoothed `V(L)`
+   - `D(L_mf)`
+   - zero crossings
+   - scan-angle curve via `cos_alpha`
+
+The writer must avoid modifying values, filtering rows, or dropping diagnostic arrays.
+
+---
+
+### 11. Interaction With Other Modules
+
+#### 11.1 Used by `main.py`
+
+From the program call flow:
+
+```text
+MAIN -> WR: write_diagnostics(synthetic_results, synthetic.json)
+MAIN -> WR: write_dataframe(results, geolocations.parquet)
+MAIN -> WR: write_dataframe(monthly_binned_counts, monthly_bins.parquet)
+MAIN -> WR: write_dataframe(paired_results, l1_l2_pairs.parquet)
+```
+
+#### 11.2 Used by Synthetic Experiments
+
+`SyntheticExperiments.run_all()` returns a dictionary. `ResultWriter.write_diagnostics()` should be able to serialize this dictionary.
+
+Synthetic outputs should include enough information to reproduce experiments configured under:
+
+```yaml
+synthetic_experiments:
+  phase_screen:
+    spectral_index_p: 1.5
+    outer_scale_km: 10
+  modeled_cases:
+    orientation_error:
+      delta_alpha_deg: 0.6
+    thermal_noise:
+      snr_1hz_cases_vv:
+        - 200
+        - 400
+        - 600
+```
+
+The writer does not generate this metadata, but it should preserve it if present in the object passed by the caller.
+
+#### 11.3 Used by Real Data Experiments
+
+`RealDataExperiments.process_year()` returns a DataFrame of results. `write_dataframe()` saves it.
+
+`RealDataExperiments.make_monthly_bins()` returns a DataFrame of monthly `3° × 3°` counts. `write_dataframe()` saves it.
+
+`RealDataExperiments.pair_l1_l2()` returns paired L1/L2 results. `write_dataframe()` saves it.
+
+---
+
+### 12. Internal Helper Logic
+
+Although the public design only exposes three methods, implementation may use private internal helpers.
+
+Recommended private helpers:
+
+```python
+_resolve_path(name: str, default_suffix: str) -> Path
+_ensure_parent(path: Path) -> None
+_json_safe(obj: Any) -> Any
+_curve_to_dict(obj: BpCurve | DCurve) -> dict
+_write_npz(mapping: dict, path: Path) -> None
+```
+
+These should remain private and should not become part of the public API.
+
+---
+
+### 13. Data-Type Conversion Rules
+
+#### 13.1 `GeolocationResult`
+
+Use the public method:
+
+```python
+GeolocationResult.to_dict()
+```
+
+Do not manually access or reinterpret fields unless necessary.
+
+#### 13.2 `BpCurve`
+
+Preserve arrays as NumPy arrays in `.npz`.
+
+For JSON, convert arrays to lists.
+
+#### 13.3 `DCurve`
+
+Preserve arrays as NumPy arrays in `.npz`.
+
+For JSON, convert arrays and zero-crossing list to JSON-safe values.
+
+#### 13.4 `datetime`
+
+Convert to ISO strings for JSON diagnostics.
+
+For DataFrames, let pandas handle datetime serialization.
+
+#### 13.5 Booleans
+
+Ensure NumPy boolean scalars are converted for JSON.
+
+For `.npz`, booleans can be stored directly.
+
+---
+
+### 14. Testing Strategy
+
+Tests for this module should verify:
+
+1. `ResultWriter` creates the output directory.
+2. `write_dataframe()` writes parquet.
+3. `write_dataframe()` writes CSV.
+4. `write_dataframe()` writes JSON.
+5. Unsupported dataframe suffix raises `ValueError`.
+6. `write_results()` correctly serializes a list of `GeolocationResult`.
+7. `write_results()` handles an empty list.
+8. `write_diagnostics()` writes a `BpCurve` to `.npz`.
+9. `write_diagnostics()` writes a `DCurve` to `.npz`.
+10. `write_diagnostics()` writes nested dicts with NumPy arrays to JSON.
+11. Parent directories are created automatically.
+12. Values are preserved after reading saved files back.
+
+---
+
+### 15. Non-Responsibilities
+
+`src/io/writers.py` must not:
+
+- download COSMIC-2 data,
+- download F10.7 data,
+- compute `sigma_phi`,
+- compute `S4`,
+- compute `V(L)`,
+- smooth `V(L)`,
+- find zero crossings,
+- apply QC,
+- bin maps,
+- pair L1/L2 records,
+- create plots,
+- decide whether output saving is enabled,
+- infer signal wavelengths,
+- interpret paper-specific geolocation physics.
+
+It is purely a persistence utility.
+
+---
+
+### 16. Implementation Summary
+
+`src/io/writers.py` should implement a small, robust `ResultWriter` class that:
+
+1. Receives `output_dir` from `config.paths.output_dir`.
+2. Writes `GeolocationResult` lists by converting them with `to_dict()`.
+3. Writes DataFrames to parquet, CSV, JSON, or JSONL based on filename suffix.
+4. Writes diagnostics such as `BpCurve` and `DCurve` to compressed `.npz` or JSON.
+5. Preserves all numerical arrays and QC metadata needed to reproduce the paper’s figures and reported counts.
+6. Avoids all scientific logic and depends only on core types plus I/O libraries.

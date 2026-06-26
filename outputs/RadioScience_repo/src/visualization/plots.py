@@ -1,0 +1,1246 @@
+"""Visualization utilities for COSMIC-2 BP geolocation reproduction.
+
+This module implements the downstream plotting layer for the COSMIC-2
+back-propagation geolocation reproduction. It displays precomputed diagnostic
+curves, monthly geolocation-bin products, L1/L2 comparison products, F10.7
+solar-flux time series, and synthetic experiment outputs.
+
+The module intentionally does not perform scientific processing:
+    * no propagation,
+    * no geolocation,
+    * no quality-control decisions,
+    * no V-curve smoothing,
+    * no D-curve zero-crossing detection,
+    * no reprocessing of COSMIC-2 observations.
+
+Only display-oriented reshaping of already computed arrays/DataFrames is
+performed, such as arranging monthly bin counts on a map grid or choosing
+histogram edges for a precomputed zonal-difference column.
+"""
+
+from __future__ import annotations
+
+from calendar import month_abbr
+from pathlib import Path
+import math
+from typing import Any, Iterable, Mapping
+
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.colors import Normalize
+from matplotlib.figure import Figure
+import numpy as np
+from numpy.typing import NDArray
+import pandas as pd
+
+from src.core import constants
+from src.core.types import BpCurve, DCurve
+
+
+_DEFAULT_DPI: int = 200
+_DEFAULT_LINE_WIDTH: float = 1.8
+_DEFAULT_RAW_LINE_WIDTH: float = 1.0
+_DEFAULT_MARKER_SIZE: float = 36.0
+_DEFAULT_MAP_CMAP: str = "viridis"
+_DEFAULT_CURVE_CMAP: str = "tab10"
+
+_COS_ALPHA_QC_THRESHOLD: float = constants.DEFAULT_COS_ALPHA_THRESHOLD
+_L1_L2_HIST_BIN_DEG: float = constants.DEFAULT_L1_L2_HISTOGRAM_BIN_DEG
+_MONTHLY_MAP_BIN_DEG: float = constants.DEFAULT_MAP_BIN_DEG
+_POSTSUNSET_START_HOUR: float = constants.DEFAULT_POSTSUNSET_START_HOUR
+_POSTSUNSET_END_HOUR: float = constants.DEFAULT_POSTSUNSET_END_HOUR
+
+_EMPTY_ARRAY: NDArray[np.float64] = np.empty(0, dtype=np.float64)
+
+
+class Plotter:
+    """Create reproduction and diagnostic figures from precomputed products.
+
+    Public methods follow the project design:
+        * ``plot_v_curve(curve, output_path)``
+        * ``plot_d_curve(d_curve, output_path)``
+        * ``plot_monthly_maps(binned, output_dir)``
+        * ``plot_l1_l2_histogram(pairs, output_path)``
+        * ``plot_f107(f107, output_path)``
+        * ``plot_synthetic_outputs(results, output_dir)``
+    """
+
+    def plot_v_curve(self, curve: BpCurve, output_path: Path) -> None:
+        """Plot one BP amplitude-variance curve V(L).
+
+        Args:
+            curve: Precomputed ``BpCurve`` diagnostic.
+            output_path: Image path to save.
+
+        Raises:
+            TypeError: If ``curve`` is not a ``BpCurve``.
+            ValueError: If required curve arrays have incompatible lengths.
+        """
+        if not isinstance(curve, BpCurve):
+            raise TypeError(f"curve must be a BpCurve, got {type(curve).__name__}.")
+
+        output_file: Path = self._resolve_output_file(output_path)
+        distances_km: NDArray[np.float64] = self._as_float_array(
+            curve.distances_km,
+            "curve.distances_km",
+        )
+        v_raw: NDArray[np.float64] = self._as_float_array(curve.v_raw, "curve.v_raw")
+        v_smooth: NDArray[np.float64] = self._as_float_array(
+            curve.v_smooth,
+            "curve.v_smooth",
+        )
+
+        self._require_equal_lengths(
+            {"distances_km": distances_km, "v_raw": v_raw, "v_smooth": v_smooth}
+        )
+
+        figure: Figure
+        axis: Axes
+        figure, axis = plt.subplots(figsize=(9.0, 5.2), constrained_layout=True)
+
+        try:
+            if distances_km.size == 0:
+                self._annotate_empty(axis, "No V(L) samples available")
+            else:
+                if np.any(np.isfinite(v_raw)):
+                    axis.plot(
+                        distances_km,
+                        v_raw,
+                        color="0.35",
+                        linewidth=_DEFAULT_RAW_LINE_WIDTH,
+                        alpha=0.75,
+                        label="Raw V(L)",
+                    )
+
+                if np.any(np.isfinite(v_smooth)):
+                    axis.plot(
+                        distances_km,
+                        v_smooth,
+                        color="#d62728",
+                        linewidth=_DEFAULT_LINE_WIDTH,
+                        label="Smoothed V(L)",
+                    )
+                else:
+                    axis.text(
+                        0.02,
+                        0.95,
+                        "Smoothed V(L) unavailable",
+                        transform=axis.transAxes,
+                        va="top",
+                        ha="left",
+                        fontsize=9,
+                        color="0.35",
+                    )
+
+                self._draw_v_curve_minimum(axis, curve)
+                self._draw_v_curve_q_span(axis, curve)
+
+            title_parts: list[str] = [r"$V(L)$"]
+            if math.isfinite(float(curve.l_mf_km)):
+                title_parts.append(rf"$L_{{mf}}$ = {float(curve.l_mf_km):.0f} km")
+            if math.isfinite(float(curve.l0_km)):
+                title_parts.append(rf"$L_0$ = {float(curve.l0_km):.0f} km")
+            if math.isfinite(float(curve.q)):
+                title_parts.append(rf"$Q$ = {float(curve.q):.2f}")
+            title_parts.append("valid minimum" if curve.has_valid_minimum else "invalid minimum")
+
+            axis.set_title(", ".join(title_parts))
+            axis.set_xlabel("Back-propagation distance L from receiver (km)")
+            axis.set_ylabel("Normalized amplitude variance V(L)")
+            axis.grid(True, alpha=0.30)
+            axis.legend(loc="best", fontsize=9)
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def plot_d_curve(self, d_curve: DCurve, output_path: Path) -> None:
+        """Plot D(L_mf) and cos(alpha) diagnostics.
+
+        Args:
+            d_curve: Precomputed D-curve object.
+            output_path: Image path to save.
+
+        Raises:
+            TypeError: If ``d_curve`` is not a ``DCurve``.
+            ValueError: If required arrays have incompatible lengths.
+        """
+        if not isinstance(d_curve, DCurve):
+            raise TypeError(
+                f"d_curve must be a DCurve, got {type(d_curve).__name__}."
+            )
+
+        output_file: Path = self._resolve_output_file(output_path)
+        l_mf_km: NDArray[np.float64] = self._as_float_array(
+            d_curve.l_mf_km,
+            "d_curve.l_mf_km",
+        )
+        d_km: NDArray[np.float64] = self._as_float_array(d_curve.d_km, "d_curve.d_km")
+        cos_alpha: NDArray[np.float64] = self._as_float_array(
+            d_curve.cos_alpha,
+            "d_curve.cos_alpha",
+        )
+        self._require_equal_lengths(
+            {"l_mf_km": l_mf_km, "d_km": d_km, "cos_alpha": cos_alpha}
+        )
+
+        has_cos_alpha: bool = cos_alpha.size > 0 and np.any(np.isfinite(cos_alpha))
+        figure: Figure
+        axes: NDArray[Any] | list[Axes]
+        if has_cos_alpha:
+            figure, axes = plt.subplots(
+                nrows=2,
+                ncols=1,
+                figsize=(9.0, 7.0),
+                sharex=True,
+                constrained_layout=True,
+            )
+            d_axis: Axes = axes[0]  # type: ignore[index]
+            cos_axis: Axes | None = axes[1]  # type: ignore[index]
+        else:
+            figure, d_axis = plt.subplots(figsize=(9.0, 5.2), constrained_layout=True)
+            cos_axis = None
+
+        try:
+            if l_mf_km.size == 0:
+                self._annotate_empty(d_axis, "No D(L_mf) samples available")
+            else:
+                d_axis.plot(
+                    l_mf_km,
+                    d_km,
+                    color="#1f77b4",
+                    linewidth=_DEFAULT_LINE_WIDTH,
+                    marker="o",
+                    markersize=3.0,
+                    label=r"$D=L_0-L_{mf}$",
+                )
+                d_axis.axhline(0.0, color="black", linewidth=1.0, linestyle="--")
+                self._draw_d_curve_crossings(d_axis, d_curve)
+
+            title: str = "D(L_mf) zero-crossing diagnostic"
+            if d_curve.is_multivalued:
+                title += " — multivalued"
+            elif d_curve.zero_crossings_km:
+                title += " — single crossing" if len(d_curve.zero_crossings_km) == 1 else " — crossings"
+            else:
+                title += " — no zero crossing"
+
+            d_axis.set_title(title)
+            d_axis.set_ylabel(r"$D=L_0-L_{mf}$ (km)")
+            d_axis.grid(True, alpha=0.30)
+            d_axis.legend(loc="best", fontsize=9)
+
+            if cos_axis is not None:
+                cos_axis.plot(
+                    l_mf_km,
+                    cos_alpha,
+                    color="#2ca02c",
+                    linewidth=_DEFAULT_LINE_WIDTH,
+                    marker="o",
+                    markersize=3.0,
+                    label=r"$\cos(\alpha)$",
+                )
+                cos_axis.axhline(
+                    _COS_ALPHA_QC_THRESHOLD,
+                    color="#d62728",
+                    linewidth=1.2,
+                    linestyle="--",
+                    label=rf"QC threshold = {_COS_ALPHA_QC_THRESHOLD:.1f}",
+                )
+                cos_axis.set_ylim(-0.05, 1.05)
+                cos_axis.set_ylabel(r"$\cos(\alpha)$")
+                cos_axis.set_xlabel("Magnetic-field candidate distance L_mf (km)")
+                cos_axis.grid(True, alpha=0.30)
+                cos_axis.legend(loc="best", fontsize=9)
+            else:
+                d_axis.set_xlabel("Magnetic-field candidate distance L_mf (km)")
+
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def plot_monthly_maps(self, binned: pd.DataFrame, output_dir: Path) -> None:
+        """Plot monthly 3° x 3° geolocation density maps.
+
+        Args:
+            binned: Monthly binned geolocation counts from
+                ``RealDataExperiments.make_monthly_bins``.
+            output_dir: Directory where one image per year is written.
+
+        Raises:
+            TypeError: If ``binned`` is not a DataFrame.
+            ValueError: If required columns cannot be inferred.
+        """
+        if not isinstance(binned, pd.DataFrame):
+            raise TypeError(
+                f"binned must be a pandas.DataFrame, got {type(binned).__name__}."
+            )
+
+        output_directory: Path = Path(output_dir).expanduser()
+        output_directory.mkdir(parents=True, exist_ok=True)
+
+        if binned.empty:
+            figure, axis = plt.subplots(figsize=(8.0, 4.0), constrained_layout=True)
+            try:
+                self._annotate_empty(axis, "No monthly binned geolocations available")
+                axis.set_axis_off()
+                self._save_figure(figure, output_directory / "monthly_maps_empty.png")
+            finally:
+                plt.close(figure)
+            return
+
+        columns: _MonthlyColumns = self._infer_monthly_columns(binned)
+        working: pd.DataFrame = self._normalize_monthly_dataframe(binned, columns)
+
+        years: list[int] = sorted(int(year) for year in working["year"].dropna().unique())
+        if not years:
+            raise ValueError("Monthly binned DataFrame contains no valid years.")
+
+        for year in years:
+            year_data: pd.DataFrame = working.loc[working["year"] == year].copy()
+            output_file: Path = output_directory / f"monthly_geolocation_maps_{year}.png"
+            self._plot_monthly_map_year(year_data=year_data, year=year, output_file=output_file)
+
+    def plot_l1_l2_histogram(self, pairs: pd.DataFrame, output_path: Path) -> None:
+        """Plot L1-L2 zonal geolocation-difference histogram.
+
+        Args:
+            pairs: Paired accepted L1/L2 geolocation DataFrame.
+            output_path: Image path to save.
+
+        Raises:
+            TypeError: If ``pairs`` is not a DataFrame.
+            ValueError: If no zonal-difference column is available.
+        """
+        if not isinstance(pairs, pd.DataFrame):
+            raise TypeError(
+                f"pairs must be a pandas.DataFrame, got {type(pairs).__name__}."
+            )
+
+        output_file: Path = self._resolve_output_file(output_path)
+        diff_column: str = self._infer_column(
+            pairs,
+            candidates=(
+                "zonal_difference_deg",
+                "delta_lon_deg",
+                "l1_minus_l2_lon_deg",
+                "l1_l2_zonal_difference_deg",
+            ),
+            required=True,
+            context="L1/L2 zonal-difference histogram",
+        )
+        differences_deg: NDArray[np.float64] = pd.to_numeric(
+            pairs[diff_column],
+            errors="coerce",
+        ).to_numpy(dtype=np.float64)
+        differences_deg = differences_deg[np.isfinite(differences_deg)]
+
+        figure, axis = plt.subplots(figsize=(8.5, 5.0), constrained_layout=True)
+        try:
+            if differences_deg.size == 0:
+                self._annotate_empty(axis, "No paired L1/L2 zonal differences available")
+            else:
+                bins: NDArray[np.float64] = self._histogram_bins(
+                    values=differences_deg,
+                    bin_width=_L1_L2_HIST_BIN_DEG,
+                )
+                axis.hist(
+                    differences_deg,
+                    bins=bins,
+                    color="#4c78a8",
+                    edgecolor="white",
+                    linewidth=0.5,
+                )
+                axis.axvline(0.0, color="black", linewidth=1.2, linestyle="--")
+
+                mean_value: float = float(np.mean(differences_deg))
+                median_value: float = float(np.median(differences_deg))
+                std_value: float = float(np.std(differences_deg, ddof=0))
+                summary_text: str = (
+                    f"N = {differences_deg.size:,}\n"
+                    f"mean = {mean_value:.2f}°\n"
+                    f"median = {median_value:.2f}°\n"
+                    f"std = {std_value:.2f}°"
+                )
+                axis.text(
+                    0.98,
+                    0.95,
+                    summary_text,
+                    transform=axis.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize=9,
+                    bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
+                )
+
+            axis.set_title("L1 - L2 zonal geolocation differences")
+            axis.set_xlabel("L1 - L2 zonal geolocation difference (deg)")
+            axis.set_ylabel("Number of paired 10-s geolocations")
+            axis.grid(True, axis="y", alpha=0.30)
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def plot_f107(self, f107: pd.DataFrame, output_path: Path) -> None:
+        """Plot daily F10.7 solar radio flux.
+
+        Args:
+            f107: DataFrame containing date and F10.7 columns.
+            output_path: Image path to save.
+
+        Raises:
+            TypeError: If ``f107`` is not a DataFrame.
+            ValueError: If required columns cannot be inferred.
+        """
+        if not isinstance(f107, pd.DataFrame):
+            raise TypeError(f"f107 must be a pandas.DataFrame, got {type(f107).__name__}.")
+
+        output_file: Path = self._resolve_output_file(output_path)
+        figure, axis = plt.subplots(figsize=(10.0, 4.8), constrained_layout=True)
+
+        try:
+            if f107.empty:
+                self._annotate_empty(axis, "No F10.7 data available")
+            else:
+                date_column: str = self._infer_column(
+                    f107,
+                    candidates=("date", "datetime", "time", "utc"),
+                    required=True,
+                    context="F10.7 date",
+                )
+                f107_column: str = self._infer_column(
+                    f107,
+                    candidates=("f107", "f10_7", "f10.7", "f107_sfu", "f107_index"),
+                    required=True,
+                    context="F10.7 value",
+                )
+                dates: pd.Series = pd.to_datetime(f107[date_column], errors="coerce")
+                values: pd.Series = pd.to_numeric(f107[f107_column], errors="coerce")
+                valid_mask: pd.Series = dates.notna() & values.notna()
+
+                if not bool(valid_mask.any()):
+                    self._annotate_empty(axis, "No valid F10.7 date/value pairs available")
+                else:
+                    axis.plot(
+                        dates.loc[valid_mask],
+                        values.loc[valid_mask],
+                        color="#1f77b4",
+                        linewidth=1.2,
+                        label="Daily F10.7",
+                    )
+                    self._shade_year(axis, 2021, color="#f2c94c", alpha=0.18)
+                    self._shade_year(axis, 2023, color="#eb5757", alpha=0.12)
+                    axis.legend(loc="best", fontsize=9)
+
+            axis.set_title("Daily F10.7 solar radio flux")
+            axis.set_xlabel("Date")
+            axis.set_ylabel("F10.7 solar flux")
+            axis.grid(True, alpha=0.30)
+            axis.xaxis.set_major_locator(mdates.AutoDateLocator())
+            axis.xaxis.set_major_formatter(mdates.ConciseDateFormatter(axis.xaxis.get_major_locator()))
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def plot_synthetic_outputs(self, results: dict, output_dir: Path) -> None:
+        """Plot available synthetic experiment outputs.
+
+        Args:
+            results: Dictionary returned by ``SyntheticExperiments.run_all`` or a
+                compatible partial dictionary.
+            output_dir: Directory where synthetic figures are written.
+
+        Raises:
+            TypeError: If ``results`` is not a dictionary.
+        """
+        if not isinstance(results, dict):
+            raise TypeError(f"results must be a dict, got {type(results).__name__}.")
+
+        output_directory: Path = Path(output_dir).expanduser()
+        output_directory.mkdir(parents=True, exist_ok=True)
+
+        if "single_phase_screen" in results:
+            self._plot_synthetic_single_phase_screen(
+                results["single_phase_screen"],
+                output_directory / "synthetic_single_phase_screen.png",
+            )
+        if "outer_scale_estimation" in results:
+            self._plot_synthetic_outer_scale(
+                results["outer_scale_estimation"],
+                output_directory / "synthetic_outer_scale_estimation.png",
+            )
+        if "orientation_error" in results:
+            self._plot_synthetic_orientation_error(
+                results["orientation_error"],
+                output_directory / "synthetic_orientation_error.png",
+            )
+        if "two_screens_aligned" in results:
+            self._plot_synthetic_two_screens_aligned(
+                results["two_screens_aligned"],
+                output_directory / "synthetic_two_screens_aligned.png",
+            )
+        if "two_screens_misaligned" in results:
+            self._plot_synthetic_two_screens_misaligned(
+                results["two_screens_misaligned"],
+                output_directory / "synthetic_two_screens_misaligned.png",
+            )
+        if "thermal_noise" in results:
+            self._plot_synthetic_thermal_noise(
+                results["thermal_noise"],
+                output_directory / "synthetic_thermal_noise.png",
+            )
+        if "multivalued_geometry" in results:
+            self._plot_synthetic_multivalued(
+                results["multivalued_geometry"],
+                output_directory / "synthetic_multivalued_geometry.png",
+            )
+
+    def _draw_v_curve_minimum(self, axis: Axes, curve: BpCurve) -> None:
+        """Draw V-curve L0 marker when available."""
+        l0_km: float = float(curve.l0_km)
+        v0: float = float(curve.v0)
+        if not (math.isfinite(l0_km) and math.isfinite(v0)):
+            return
+
+        axis.axvline(
+            l0_km,
+            color="#9467bd",
+            linestyle="--",
+            linewidth=1.2,
+            label=r"$L_0$",
+        )
+        axis.scatter(
+            [l0_km],
+            [v0],
+            s=_DEFAULT_MARKER_SIZE,
+            color="#9467bd",
+            zorder=5,
+        )
+
+    def _draw_v_curve_q_span(self, axis: Axes, curve: BpCurve) -> None:
+        """Draw L1/L2 Q-span markers if available."""
+        l0_km: float = float(curve.l0_km)
+        l1_km: float = float(curve.l1_km)
+        l2_km: float = float(curve.l2_km)
+
+        if not all(math.isfinite(value) for value in (l0_km, l1_km, l2_km)):
+            return
+
+        left_km: float = l0_km - l1_km
+        right_km: float = l0_km + l2_km
+        for label, distance_km in ((r"$L_0-L_1$", left_km), (r"$L_0+L_2$", right_km)):
+            if math.isfinite(distance_km):
+                axis.axvline(
+                    distance_km,
+                    color="0.45",
+                    linestyle=":",
+                    linewidth=1.0,
+                    label=label,
+                )
+
+    def _draw_d_curve_crossings(self, axis: Axes, d_curve: DCurve) -> None:
+        """Draw D-curve zero-crossing markers."""
+        crossings: list[float] = [
+            float(value)
+            for value in d_curve.zero_crossings_km
+            if math.isfinite(float(value))
+        ]
+
+        if not crossings:
+            axis.text(
+                0.02,
+                0.95,
+                "No zero crossing",
+                transform=axis.transAxes,
+                ha="left",
+                va="top",
+                fontsize=9,
+                bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
+            )
+            return
+
+        for index, crossing_km in enumerate(crossings, start=1):
+            axis.axvline(
+                crossing_km,
+                color="#d62728",
+                linestyle="--",
+                linewidth=1.2,
+                label="Zero crossing" if index == 1 else None,
+            )
+
+        note: str = "Multivalued" if d_curve.is_multivalued or len(crossings) > 1 else "Single-valued"
+        axis.text(
+            0.02,
+            0.95,
+            f"{note}\nCrossings: {', '.join(f'{value:.0f} km' for value in crossings)}",
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
+        )
+
+    def _plot_monthly_map_year(
+        self,
+        year_data: pd.DataFrame,
+        year: int,
+        output_file: Path,
+    ) -> None:
+        """Plot one 12-panel monthly map figure for a year."""
+        projection = ccrs.PlateCarree()
+        figure, axes = plt.subplots(
+            nrows=3,
+            ncols=4,
+            figsize=(16.0, 8.5),
+            subplot_kw={"projection": projection},
+            constrained_layout=True,
+        )
+
+        axes_flat: NDArray[Any] = np.asarray(axes, dtype=object).ravel()
+        vmax: float = float(year_data["count"].max()) if not year_data.empty else 1.0
+        if not math.isfinite(vmax) or vmax <= 0.0:
+            vmax = 1.0
+
+        norm: Normalize = Normalize(vmin=0.0, vmax=vmax)
+        mesh: Any | None = None
+
+        try:
+            for month in range(1, 13):
+                axis: Axes = axes_flat[month - 1]
+                month_data: pd.DataFrame = year_data.loc[year_data["month"] == month]
+                mesh = self._draw_month_panel(axis, month_data, year, month, norm)
+
+            title: str = (
+                "COSMIC-2 L1 geolocations, post-sunset "
+                f"{_POSTSUNSET_START_HOUR:.0f}–{_POSTSUNSET_END_HOUR:.0f} LT, "
+                f"{_MONTHLY_MAP_BIN_DEG:.0f}° × {_MONTHLY_MAP_BIN_DEG:.0f}° bins — {year}"
+            )
+            figure.suptitle(title, fontsize=14)
+
+            if mesh is not None:
+                colorbar = figure.colorbar(
+                    mesh,
+                    ax=axes_flat.tolist(),
+                    orientation="horizontal",
+                    shrink=0.75,
+                    pad=0.04,
+                )
+                colorbar.set_label("Geolocation count per bin")
+
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def _draw_month_panel(
+        self,
+        axis: Axes,
+        month_data: pd.DataFrame,
+        year: int,
+        month: int,
+        norm: Normalize,
+    ) -> Any | None:
+        """Draw one monthly geolocation count map panel."""
+        axis.set_global()
+        axis.coastlines(linewidth=0.45)
+        axis.add_feature(cfeature.BORDERS, linewidth=0.25, alpha=0.5)
+        axis.gridlines(draw_labels=False, linewidth=0.25, color="0.5", alpha=0.35)
+
+        month_title: str = f"{month_abbr[month]} {year}"
+        axis.set_title(month_title, fontsize=10)
+
+        if month_data.empty:
+            axis.text(
+                0.5,
+                0.5,
+                "no data",
+                transform=axis.transAxes,
+                ha="center",
+                va="center",
+                fontsize=9,
+                bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.75},
+            )
+            return None
+
+        lon_edges, lat_edges, grid = self._monthly_grid(month_data)
+        mesh = axis.pcolormesh(
+            lon_edges,
+            lat_edges,
+            np.ma.masked_invalid(grid),
+            cmap=_DEFAULT_MAP_CMAP,
+            norm=norm,
+            transform=ccrs.PlateCarree(),
+            shading="flat",
+        )
+
+        lat_min: float = float(np.nanmin(lat_edges))
+        lat_max: float = float(np.nanmax(lat_edges))
+        lat_pad: float = max(3.0, 0.1 * max(1.0, lat_max - lat_min))
+        axis.set_extent(
+            [-180.0, 180.0, max(-90.0, lat_min - lat_pad), min(90.0, lat_max + lat_pad)],
+            crs=ccrs.PlateCarree(),
+        )
+        return mesh
+
+    def _monthly_grid(
+        self,
+        month_data: pd.DataFrame,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        """Convert monthly binned rows into pcolormesh edges/grid."""
+        bin_size_lat: float = self._infer_bin_size_from_min_max(
+            month_data,
+            "lat_bin_min",
+            "lat_bin_max",
+            default=_MONTHLY_MAP_BIN_DEG,
+        )
+        bin_size_lon: float = self._infer_bin_size_from_min_max(
+            month_data,
+            "lon_bin_min",
+            "lon_bin_max",
+            default=_MONTHLY_MAP_BIN_DEG,
+        )
+
+        lat_min: float = float(np.floor(month_data["lat_bin_min"].min() / bin_size_lat) * bin_size_lat)
+        lat_max: float = float(np.ceil(month_data["lat_bin_max"].max() / bin_size_lat) * bin_size_lat)
+        lon_min: float = -180.0
+        lon_max: float = 180.0
+
+        lat_edges: NDArray[np.float64] = np.arange(
+            lat_min,
+            lat_max + 0.5 * bin_size_lat,
+            bin_size_lat,
+            dtype=np.float64,
+        )
+        lon_edges: NDArray[np.float64] = np.arange(
+            lon_min,
+            lon_max + 0.5 * bin_size_lon,
+            bin_size_lon,
+            dtype=np.float64,
+        )
+
+        grid: NDArray[np.float64] = np.full(
+            (lat_edges.size - 1, lon_edges.size - 1),
+            np.nan,
+            dtype=np.float64,
+        )
+
+        for row in month_data.itertuples(index=False):
+            lat_bin_min: float = float(getattr(row, "lat_bin_min"))
+            lon_bin_min: float = float(getattr(row, "lon_bin_min"))
+            count: float = float(getattr(row, "count"))
+
+            lat_index: int = int(round((lat_bin_min - lat_edges[0]) / bin_size_lat))
+            lon_index: int = int(round((lon_bin_min - lon_edges[0]) / bin_size_lon))
+            if 0 <= lat_index < grid.shape[0] and 0 <= lon_index < grid.shape[1]:
+                grid[lat_index, lon_index] = count
+
+        return lon_edges, lat_edges, grid
+
+    def _plot_synthetic_single_phase_screen(self, result: Mapping[str, Any], output_file: Path) -> None:
+        """Plot synthetic single phase-screen V(L) result."""
+        figure, axis = plt.subplots(figsize=(8.5, 5.0), constrained_layout=True)
+        try:
+            distances_km = self._array_from_mapping(result, "distances_km")
+            v_curve = self._array_from_mapping(result, "v_curve")
+            if distances_km.size and v_curve.size:
+                axis.plot(distances_km, v_curve, color="#1f77b4", linewidth=_DEFAULT_LINE_WIDTH)
+
+            params: Mapping[str, Any] = self._mapping_value(result, "parameters")
+            true_distance_km: float = self._float_from_mapping(
+                params,
+                "true_distance_km",
+                default=math.nan,
+            )
+            estimated_distance_km: float = self._float_from_mapping(
+                result,
+                "estimated_distance_km",
+                default=math.nan,
+            )
+
+            if math.isfinite(true_distance_km):
+                axis.axvline(true_distance_km, color="black", linestyle="--", label="True screen")
+            if math.isfinite(estimated_distance_km):
+                axis.axvline(estimated_distance_km, color="#d62728", linestyle=":", label="BP minimum")
+
+            axis.set_title("Synthetic single phase-screen BP localization")
+            axis.set_xlabel("Back-propagation distance L from receiver (km)")
+            axis.set_ylabel("V(L)")
+            axis.grid(True, alpha=0.30)
+            axis.legend(loc="best", fontsize=9)
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def _plot_synthetic_outer_scale(self, result: Mapping[str, Any], output_file: Path) -> None:
+        """Plot configured outer-scale estimation diagnostics."""
+        cases: list[Mapping[str, Any]] = list(result.get("cases", [])) if isinstance(result, Mapping) else []
+        figure, axis = plt.subplots(figsize=(8.0, 5.0), constrained_layout=True)
+        try:
+            if not cases:
+                self._annotate_empty(axis, "No outer-scale cases available")
+            else:
+                outer_scales: list[float] = []
+                ratios: list[float] = []
+                for case in cases:
+                    outer_scales.append(float(case.get("outer_scale_km", math.nan)))
+                    ratios.append(float(case.get("computed_sigma_phi_over_s4_rad", math.nan)))
+                axis.plot(outer_scales, ratios, marker="o", linewidth=_DEFAULT_LINE_WIDTH, label="Computed cases")
+
+            axis.axhline(
+                constants.DEFAULT_OBSERVED_SIGMA_PHI_OVER_S4_RAD,
+                color="#d62728",
+                linestyle="--",
+                label=r"Observed $\sigma_\phi/S_4$ = 5.25 rad",
+            )
+            axis.axvline(
+                constants.DEFAULT_ESTIMATED_OUTER_SCALE_KM,
+                color="black",
+                linestyle=":",
+                label=r"Estimated $l_0$ = 9.7 km",
+            )
+            axis.set_title("Synthetic outer-scale estimation diagnostic")
+            axis.set_xlabel("Outer scale l0 (km)")
+            axis.set_ylabel(r"$\sigma_\phi/S_4$ (rad)")
+            axis.grid(True, alpha=0.30)
+            axis.legend(loc="best", fontsize=9)
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def _plot_synthetic_orientation_error(self, result: Mapping[str, Any], output_file: Path) -> None:
+        """Plot orientation-error table values."""
+        table: list[Mapping[str, Any]] = list(result.get("table", [])) if isinstance(result, Mapping) else []
+        figure, axis = plt.subplots(figsize=(8.0, 5.0), constrained_layout=True)
+        try:
+            if not table:
+                self._annotate_empty(axis, "No orientation-error table available")
+            else:
+                frame: pd.DataFrame = pd.DataFrame(table)
+                for alpha_deg, group in frame.groupby("alpha_deg"):
+                    group_sorted: pd.DataFrame = group.sort_values("distance_km")
+                    axis.plot(
+                        group_sorted["distance_km"],
+                        group_sorted["delta_l_km"],
+                        marker="o",
+                        linewidth=_DEFAULT_LINE_WIDTH,
+                        label=rf"$\alpha$ = {float(alpha_deg):.0f}°",
+                    )
+
+            delta_alpha_deg: float = float(result.get("delta_alpha_deg", constants.DEFAULT_ORIENTATION_ERROR_DELTA_ALPHA_DEG))
+            axis.set_title(rf"Orientation-error relation, $\Delta\alpha$ = {delta_alpha_deg:.1f}°")
+            axis.set_xlabel("True distance L (km)")
+            axis.set_ylabel(r"Geolocation error $\Delta L$ (km)")
+            axis.grid(True, alpha=0.30)
+            axis.legend(loc="best", fontsize=9)
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def _plot_synthetic_two_screens_aligned(self, result: Mapping[str, Any], output_file: Path) -> None:
+        """Plot aligned two-screen synthetic cases."""
+        figure, axes = plt.subplots(nrows=1, ncols=3, figsize=(16.0, 4.8), constrained_layout=True)
+        try:
+            cases: tuple[tuple[str, str], ...] = (
+                ("equal_strength", "Equal strengths"),
+                ("closer_screen_stronger", "Closer screen stronger"),
+                ("farther_screen_stronger", "Farther screen stronger"),
+            )
+            screen_distances: Mapping[str, Any] = self._mapping_value(result, "screen_distances_km")
+            true_distances: list[float] = [
+                float(screen_distances.get("closer_screen", math.nan)),
+                float(screen_distances.get("farther_screen", math.nan)),
+            ]
+
+            for axis, (key, title) in zip(axes, cases, strict=False):
+                case: Mapping[str, Any] = self._mapping_value(result, key)
+                distances_km = self._array_from_mapping(case, "distances_km")
+                v_curve = self._array_from_mapping(case, "v_curve")
+                if distances_km.size and v_curve.size:
+                    axis.plot(distances_km, v_curve, linewidth=_DEFAULT_LINE_WIDTH)
+                for distance_km in true_distances:
+                    if math.isfinite(distance_km):
+                        axis.axvline(distance_km, color="black", linestyle="--", linewidth=1.0)
+                estimated_minimum_km: float = self._float_from_mapping(
+                    case,
+                    "estimated_minimum_km",
+                    default=math.nan,
+                )
+                if math.isfinite(estimated_minimum_km):
+                    axis.axvline(estimated_minimum_km, color="#d62728", linestyle=":", linewidth=1.2)
+                axis.set_title(title)
+                axis.set_xlabel("Distance L (km)")
+                axis.set_ylabel("V(L)")
+                axis.grid(True, alpha=0.30)
+
+            figure.suptitle("Synthetic two aligned phase-screen BP diagnostics", fontsize=14)
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def _plot_synthetic_two_screens_misaligned(self, result: Mapping[str, Any], output_file: Path) -> None:
+        """Plot misaligned two-screen synthetic cases."""
+        cases: list[Mapping[str, Any]] = list(result.get("cases", [])) if isinstance(result, Mapping) else []
+        panel_count: int = max(1, len(cases))
+        figure, axes = plt.subplots(
+            nrows=panel_count,
+            ncols=1,
+            figsize=(9.0, 4.6 * panel_count),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        try:
+            if not cases:
+                self._annotate_empty(axes[0, 0], "No misaligned-screen cases available")
+            else:
+                for axis, case in zip(axes.ravel(), cases, strict=False):
+                    distances_km = self._array_from_mapping(case, "distances_km")
+                    v1 = self._array_from_mapping(case, "v_curve_for_alpha1_plane")
+                    v2 = self._array_from_mapping(case, "v_curve_for_alpha2_plane")
+                    alpha1 = float(case.get("alpha1_deg", math.nan))
+                    alpha2 = float(case.get("alpha2_deg", math.nan))
+
+                    if distances_km.size and v1.size:
+                        axis.plot(distances_km, v1, label=rf"BP plane $\alpha_1$={alpha1:.0f}°")
+                    if distances_km.size and v2.size:
+                        axis.plot(distances_km, v2, label=rf"BP plane $\alpha_2$={alpha2:.0f}°")
+
+                    for distance_key in ("screen1_distance_km", "screen2_distance_km"):
+                        distance_km: float = float(case.get(distance_key, math.nan))
+                        if math.isfinite(distance_km):
+                            axis.axvline(distance_km, color="black", linestyle="--", linewidth=1.0)
+
+                    axis.set_title(rf"Misaligned screens: $\alpha_1$={alpha1:.0f}°, $\alpha_2$={alpha2:.0f}°")
+                    axis.set_xlabel("Distance L (km)")
+                    axis.set_ylabel("V(L)")
+                    axis.grid(True, alpha=0.30)
+                    axis.legend(loc="best", fontsize=9)
+
+            figure.suptitle("Synthetic misaligned phase-screen BP diagnostics", fontsize=14)
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def _plot_synthetic_thermal_noise(self, result: Mapping[str, Any], output_file: Path) -> None:
+        """Plot synthetic thermal-noise V(L) cases."""
+        cases: list[Mapping[str, Any]] = list(result.get("cases", [])) if isinstance(result, Mapping) else []
+        figure, axes = plt.subplots(nrows=1, ncols=2, figsize=(14.0, 5.0), constrained_layout=True)
+        try:
+            if not cases:
+                for axis in axes:
+                    self._annotate_empty(axis, "No thermal-noise cases available")
+            else:
+                frame: pd.DataFrame = pd.DataFrame(cases)
+                sigma_values: list[float] = sorted(
+                    float(value)
+                    for value in frame["sigma_phi_rad"].dropna().unique()
+                    if math.isfinite(float(value))
+                )
+                for axis_index, sigma_phi_rad in enumerate(sigma_values[:2]):
+                    axis = axes[axis_index]
+                    subset: pd.DataFrame = frame.loc[np.isclose(frame["sigma_phi_rad"], sigma_phi_rad)]
+                    for _, row in subset.iterrows():
+                        distances_km = self._coerce_array(row.get("distances_km", _EMPTY_ARRAY))
+                        v_curve = self._coerce_array(row.get("v_curve", _EMPTY_ARRAY))
+                        if distances_km.size == 0 or v_curve.size == 0:
+                            continue
+                        snr_value: float = float(row.get("snr_1hz_vv", math.nan))
+                        label: str = "noiseless" if math.isinf(snr_value) else f"SNR={snr_value:.0f} V/V"
+                        axis.plot(distances_km, v_curve, linewidth=1.2, label=label)
+
+                    axis.set_title(rf"$\sigma_\phi$ = {sigma_phi_rad:.2f} rad")
+                    axis.set_xlabel("Distance L (km)")
+                    axis.set_ylabel("V(L)")
+                    axis.grid(True, alpha=0.30)
+                    axis.legend(loc="best", fontsize=8)
+
+                for axis in axes[len(sigma_values[:2]):]:
+                    self._annotate_empty(axis, "No case")
+                    axis.set_axis_off()
+
+            figure.suptitle("Synthetic thermal-noise effect on V(L)", fontsize=14)
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    def _plot_synthetic_multivalued(self, result: Mapping[str, Any], output_file: Path) -> None:
+        """Plot or annotate synthetic multivalued-geometry output."""
+        figure, axis = plt.subplots(figsize=(8.5, 4.8), constrained_layout=True)
+        try:
+            status: str = str(result.get("status", "unknown")) if isinstance(result, Mapping) else "unknown"
+            if status == "skipped":
+                message: str = str(result.get("reason", "Multivalued experiment skipped."))
+                self._annotate_empty(axis, message)
+                axis.set_title("Synthetic multivalued geometry diagnostic")
+                axis.set_axis_off()
+            else:
+                distances_km = self._array_from_mapping(result, "distances_km")
+                cos_alpha = self._array_from_mapping(result, "cos_alpha")
+                if distances_km.size and cos_alpha.size:
+                    axis.plot(distances_km, cos_alpha, linewidth=_DEFAULT_LINE_WIDTH)
+                    axis.set_xlabel("Distance L (km)")
+                    axis.set_ylabel(r"$\cos(\alpha)$")
+                    axis.grid(True, alpha=0.30)
+                else:
+                    self._annotate_empty(axis, "No multivalued geometry curves available")
+                axis.set_title("Synthetic multivalued geometry diagnostic")
+
+            self._save_figure(figure, output_file)
+        finally:
+            plt.close(figure)
+
+    @staticmethod
+    def _resolve_output_file(output_path: Path) -> Path:
+        """Resolve and create parent directory for an output file."""
+        output_file: Path = Path(output_path).expanduser()
+        if output_file.suffix == "":
+            output_file = output_file.with_suffix(".png")
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        return output_file
+
+    @staticmethod
+    def _save_figure(figure: Figure, output_file: Path) -> None:
+        """Save a matplotlib figure to disk."""
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(output_file, dpi=_DEFAULT_DPI, bbox_inches="tight")
+
+    @staticmethod
+    def _as_float_array(values: Any, name: str) -> NDArray[np.float64]:
+        """Convert values to a one-dimensional float array."""
+        array: NDArray[np.float64] = np.asarray(values, dtype=np.float64)
+        if array.ndim != 1:
+            raise ValueError(f"{name} must be one-dimensional, got {array.ndim}D.")
+        return array
+
+    @staticmethod
+    def _coerce_array(values: Any) -> NDArray[np.float64]:
+        """Best-effort one-dimensional float-array conversion for optional data."""
+        try:
+            array: NDArray[np.float64] = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError):
+            return _EMPTY_ARRAY.copy()
+        if array.ndim != 1:
+            return np.ravel(array).astype(np.float64, copy=False)
+        return array.astype(np.float64, copy=False)
+
+    @staticmethod
+    def _require_equal_lengths(arrays: Mapping[str, NDArray[np.float64]]) -> None:
+        """Validate named arrays have equal length."""
+        lengths: dict[str, int] = {name: int(array.size) for name, array in arrays.items()}
+        if len(set(lengths.values())) > 1:
+            raise ValueError(f"Expected equal array lengths, got {lengths}.")
+
+    @staticmethod
+    def _annotate_empty(axis: Axes, message: str) -> None:
+        """Annotate an empty plot region."""
+        axis.text(
+            0.5,
+            0.5,
+            message,
+            transform=axis.transAxes,
+            ha="center",
+            va="center",
+            fontsize=11,
+            bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
+        )
+
+    @staticmethod
+    def _histogram_bins(values: NDArray[np.float64], bin_width: float) -> NDArray[np.float64]:
+        """Return symmetric histogram bins for a precomputed difference array."""
+        if values.size == 0:
+            return np.arange(-1.0, 1.0 + bin_width, bin_width, dtype=np.float64)
+
+        max_abs: float = float(np.nanmax(np.abs(values)))
+        if not math.isfinite(max_abs) or max_abs <= 0.0:
+            max_abs = bin_width
+
+        edge: float = math.ceil(max_abs / bin_width) * bin_width
+        edge = max(edge, bin_width)
+        return np.arange(-edge, edge + 0.5 * bin_width, bin_width, dtype=np.float64)
+
+    @staticmethod
+    def _shade_year(axis: Axes, year: int, color: str, alpha: float) -> None:
+        """Shade a calendar year on a date axis."""
+        axis.axvspan(
+            pd.Timestamp(year=year, month=1, day=1),
+            pd.Timestamp(year=year, month=12, day=31),
+            color=color,
+            alpha=alpha,
+            linewidth=0.0,
+            label=str(year),
+        )
+
+    @staticmethod
+    def _infer_column(
+        dataframe: pd.DataFrame,
+        candidates: Iterable[str],
+        required: bool,
+        context: str,
+    ) -> str:
+        """Infer a DataFrame column from case-insensitive candidates."""
+        lookup: dict[str, str] = {
+            Plotter._canonical_column(column): str(column) for column in dataframe.columns
+        }
+        for candidate in candidates:
+            canonical_candidate: str = Plotter._canonical_column(candidate)
+            if canonical_candidate in lookup:
+                return lookup[canonical_candidate]
+
+        for column in dataframe.columns:
+            canonical_column: str = Plotter._canonical_column(column)
+            for candidate in candidates:
+                if Plotter._canonical_column(candidate) in canonical_column:
+                    return str(column)
+
+        if required:
+            raise ValueError(
+                f"Could not infer required column for {context}. "
+                f"Candidates: {tuple(candidates)}. Available columns: {tuple(dataframe.columns)}."
+            )
+        return ""
+
+    @staticmethod
+    def _canonical_column(column: Any) -> str:
+        """Canonicalize column names for robust matching."""
+        return str(column).strip().lower().replace(".", "_").replace("-", "_").replace(" ", "_")
+
+    def _infer_monthly_columns(self, dataframe: pd.DataFrame) -> "_MonthlyColumns":
+        """Infer monthly-bin column names."""
+        return _MonthlyColumns(
+            year=self._infer_column(dataframe, ("year",), True, "monthly year"),
+            month=self._infer_column(dataframe, ("month",), True, "monthly month"),
+            lat_min=self._infer_column(
+                dataframe,
+                ("lat_bin_min", "latitude_bin_min", "lat_min", "latitude_min"),
+                True,
+                "monthly latitude bin minimum",
+            ),
+            lat_max=self._infer_column(
+                dataframe,
+                ("lat_bin_max", "latitude_bin_max", "lat_max", "latitude_max"),
+                True,
+                "monthly latitude bin maximum",
+            ),
+            lat_center=self._infer_column(
+                dataframe,
+                ("lat_bin_center", "latitude_bin_center", "lat_center", "latitude_center"),
+                True,
+                "monthly latitude bin center",
+            ),
+            lon_min=self._infer_column(
+                dataframe,
+                ("lon_bin_min", "longitude_bin_min", "lon_min", "longitude_min"),
+                True,
+                "monthly longitude bin minimum",
+            ),
+            lon_max=self._infer_column(
+                dataframe,
+                ("lon_bin_max", "longitude_bin_max", "lon_max", "longitude_max"),
+                True,
+                "monthly longitude bin maximum",
+            ),
+            lon_center=self._infer_column(
+                dataframe,
+                ("lon_bin_center", "longitude_bin_center", "lon_center", "longitude_center"),
+                True,
+                "monthly longitude bin center",
+            ),
+            count=self._infer_column(dataframe, ("count", "counts", "n", "geolocation_count"), True, "monthly count"),
+        )
+
+    @staticmethod
+    def _normalize_monthly_dataframe(dataframe: pd.DataFrame, columns: "_MonthlyColumns") -> pd.DataFrame:
+        """Normalize monthly binned DataFrame to canonical plotting columns."""
+        working: pd.DataFrame = pd.DataFrame(
+            {
+                "year": pd.to_numeric(dataframe[columns.year], errors="coerce"),
+                "month": pd.to_numeric(dataframe[columns.month], errors="coerce"),
+                "lat_bin_min": pd.to_numeric(dataframe[columns.lat_min], errors="coerce"),
+                "lat_bin_max": pd.to_numeric(dataframe[columns.lat_max], errors="coerce"),
+                "lat_bin_center": pd.to_numeric(dataframe[columns.lat_center], errors="coerce"),
+                "lon_bin_min": pd.to_numeric(dataframe[columns.lon_min], errors="coerce"),
+                "lon_bin_max": pd.to_numeric(dataframe[columns.lon_max], errors="coerce"),
+                "lon_bin_center": pd.to_numeric(dataframe[columns.lon_center], errors="coerce"),
+                "count": pd.to_numeric(dataframe[columns.count], errors="coerce"),
+            }
+        )
+        working = working.dropna()
+        working["year"] = working["year"].astype(int)
+        working["month"] = working["month"].astype(int)
+        working["count"] = working["count"].astype(float)
+        working["lon_bin_min"] = ((working["lon_bin_min"] + 180.0) % 360.0) - 180.0
+        working["lon_bin_center"] = ((working["lon_bin_center"] + 180.0) % 360.0) - 180.0
+        return working
+
+    @staticmethod
+    def _infer_bin_size_from_min_max(
+        dataframe: pd.DataFrame,
+        min_column: str,
+        max_column: str,
+        default: float,
+    ) -> float:
+        """Infer bin size from min/max columns with fallback."""
+        if dataframe.empty:
+            return float(default)
+        widths: NDArray[np.float64] = (
+            pd.to_numeric(dataframe[max_column], errors="coerce")
+            - pd.to_numeric(dataframe[min_column], errors="coerce")
+        ).to_numpy(dtype=np.float64)
+        widths = widths[np.isfinite(widths) & (widths > 0.0)]
+        if widths.size == 0:
+            return float(default)
+        return float(np.median(widths))
+
+    @staticmethod
+    def _mapping_value(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+        """Return nested mapping value or empty mapping."""
+        value: Any = mapping.get(key, {}) if isinstance(mapping, Mapping) else {}
+        return value if isinstance(value, Mapping) else {}
+
+    @staticmethod
+    def _array_from_mapping(mapping: Mapping[str, Any], key: str) -> NDArray[np.float64]:
+        """Extract one-dimensional numeric array from mapping."""
+        if not isinstance(mapping, Mapping) or key not in mapping:
+            return _EMPTY_ARRAY.copy()
+        return Plotter._coerce_array(mapping[key])
+
+    @staticmethod
+    def _float_from_mapping(mapping: Mapping[str, Any], key: str, default: float) -> float:
+        """Extract finite float-like value from mapping."""
+        if not isinstance(mapping, Mapping) or key not in mapping:
+            return float(default)
+        try:
+            value: float = float(mapping[key])
+        except (TypeError, ValueError):
+            return float(default)
+        return value
+
+
+class _MonthlyColumns:
+    """Internal container for monthly-bin column names."""
+
+    def __init__(
+        self,
+        year: str,
+        month: str,
+        lat_min: str,
+        lat_max: str,
+        lat_center: str,
+        lon_min: str,
+        lon_max: str,
+        lon_center: str,
+        count: str,
+    ) -> None:
+        """Initialize column-name container."""
+        self.year: str = year
+        self.month: str = month
+        self.lat_min: str = lat_min
+        self.lat_max: str = lat_max
+        self.lat_center: str = lat_center
+        self.lon_min: str = lon_min
+        self.lon_max: str = lon_max
+        self.lon_center: str = lon_center
+        self.count: str = count
+
+
+__all__ = ["Plotter"]

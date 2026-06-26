@@ -1,0 +1,543 @@
+## Code: src/propagation/phase_screen.py
+```python
+"""Synthetic random phase-screen generation for BP validation experiments.
+
+This module implements the thin random phase screens used in the synthetic
+forward-propagation/back-propagation experiments described in the paper.
+
+The paper writes the phase screen as a path delay ``S0`` inside ``exp(i k S0)``.
+This implementation returns the phase perturbation directly in radians:
+
+    phi(z) = k * S0(z)
+
+Downstream synthetic code should therefore construct the post-screen field as:
+
+    u_out = exp(1j * phi)
+
+rather than applying the electromagnetic wave number again.
+
+Implemented spectra:
+    1D:
+        Phi(k_z) ~ (k0^2 + k_z^2)^(-p/2)
+
+    Oriented 2D:
+        phi(y, z) = f(s),  s = y * sin(alpha) + z * cos(alpha)
+
+where ``f`` is a 1D random process with the same spectrum. This produces
+elongated, field-aligned irregularities: the screen varies in the direction
+normal to the irregularities and is constant along the elongated direction.
+
+The 2D orientation convention follows the physical scan-angle description used
+for the synthetic experiments:
+    * alpha = 0 deg  -> phase varies along z, strong variation on a receiver
+      cut at fixed y.
+    * alpha = 90 deg -> phase varies along y, nearly constant along z at fixed
+      y.
+
+This convention is chosen to reproduce the paper's result that, for two
+misaligned phase screens with equal strength, the screen with smaller scan angle
+is preferentially localized.
+
+The generator uses a local ``numpy.random.Generator`` and never touches NumPy's
+global random state, ensuring reproducible call sequences for a fixed seed.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any
+
+import numpy as np
+from numpy.typing import NDArray
+
+from src.core import constants
+
+
+_MIN_GRID_SAMPLES_1D: int = 4
+_MIN_GRID_SAMPLES_2D_AXIS: int = 2
+_MIN_ORIENTED_1D_SAMPLES: int = 8
+_UNIFORM_GRID_RTOL: float = 1.0e-7
+_UNIFORM_GRID_ATOL_M: float = 1.0e-9
+_ZERO_STD_EPS: float = 1.0e-15
+
+
+class PhaseScreenGenerator:
+    """Generate reproducible random phase screens for synthetic experiments.
+
+    Args:
+        random_seed: Seed used to initialize a local NumPy random generator.
+            Defaults to the paper/reproduction configuration seed, ``42``.
+
+    Public methods follow the project design:
+        * ``generate_1d(z_m, p, outer_scale_km, sigma_phi_rad, wavelength_m)``
+        * ``generate_2d(y_m, z_m, alpha_rad, p, outer_scale_km,
+          sigma_phi_rad, wavelength_m)``
+    """
+
+    def __init__(self, random_seed: int = constants.DEFAULT_RANDOM_SEED) -> None:
+        """Initialize a reproducible local random-number generator.
+
+        Args:
+            random_seed: Integer seed. Sequential calls are deterministic for a
+                fixed seed and call order.
+
+        Raises:
+            ValueError: If ``random_seed`` is not integer-like.
+        """
+        if not isinstance(random_seed, (int, np.integer)):
+            raise ValueError(
+                f"random_seed must be an integer, got {type(random_seed).__name__}."
+            )
+
+        self.random_seed: int = int(random_seed)
+        self._rng: np.random.Generator = np.random.default_rng(self.random_seed)
+
+    def generate_1d(
+        self,
+        z_m: NDArray[Any],
+        p: float = constants.DEFAULT_SYNTHETIC_SPECTRAL_INDEX_P,
+        outer_scale_km: float = constants.DEFAULT_SYNTHETIC_OUTER_SCALE_KM,
+        sigma_phi_rad: float = constants.DEFAULT_OBSERVED_SIGMA_PHI_RAD,
+        wavelength_m: float = constants.GPS_L1_WAVELENGTH_M,
+    ) -> NDArray[np.float64]:
+        """Generate a one-dimensional random phase screen in radians.
+
+        The generated phase perturbation has target spectrum
+
+            Phi(k_z) ~ (k0^2 + k_z^2)^(-p/2)
+
+        with ``k0 = 2*pi / outer_scale`` and is normalized so that its
+        population standard deviation is ``sigma_phi_rad``.
+
+        Args:
+            z_m: One-dimensional uniformly spaced spatial coordinate in meters.
+            p: Spectral power index. The paper/default configuration uses
+                ``p=1.5``.
+            outer_scale_km: Outer scale ``l0`` in kilometers. The paper/default
+                configuration uses ``10 km``.
+            sigma_phi_rad: Desired standard deviation of phase perturbation in
+                radians. If zero, a zero screen is returned.
+            wavelength_m: GNSS wavelength in meters. The returned quantity is
+                phase in radians, but the wavelength is validated to preserve the
+                paper's physical interface ``phi = (2*pi/lambda) * S0``.
+
+        Returns:
+            One-dimensional phase perturbation array in radians with the same
+            shape as ``z_m``.
+
+        Raises:
+            ValueError: If inputs are invalid, the grid is not uniformly spaced,
+                or a nonzero requested screen cannot be normalized.
+        """
+        z_array_m: NDArray[np.float64] = self._validate_uniform_grid_1d(
+            values=z_m,
+            name="z_m",
+            min_samples=_MIN_GRID_SAMPLES_1D,
+        )
+        spectral_index: float = self._validate_positive_scalar(p, "p")
+        outer_scale_m: float = (
+            self._validate_positive_scalar(outer_scale_km, "outer_scale_km")
+            * constants.M_PER_KM
+        )
+        target_sigma_rad: float = self._validate_nonnegative_scalar(
+            sigma_phi_rad,
+            "sigma_phi_rad",
+        )
+        self._validate_positive_scalar(wavelength_m, "wavelength_m")
+
+        if target_sigma_rad == 0.0:
+            return np.zeros_like(z_array_m, dtype=np.float64)
+
+        spacing_m: float = self._grid_spacing_m(z_array_m, "z_m")
+        sample_count: int = int(z_array_m.size)
+
+        raw_phase_rad: NDArray[np.float64] = self._generate_1d_raw_phase(
+            sample_count=sample_count,
+            spacing_m=abs(spacing_m),
+            spectral_index=spectral_index,
+            outer_scale_m=outer_scale_m,
+        )
+
+        phase_rad: NDArray[np.float64] = self._normalize_phase(
+            phase=raw_phase_rad,
+            sigma_phi_rad=target_sigma_rad,
+            name="1D phase screen",
+        )
+
+        return phase_rad.reshape(z_array_m.shape)
+
+    def generate_2d(
+        self,
+        y_m: NDArray[Any],
+        z_m: NDArray[Any],
+        alpha_rad: float = 0.0,
+        p: float = constants.DEFAULT_SYNTHETIC_SPECTRAL_INDEX_P,
+        outer_scale_km: float = constants.DEFAULT_SYNTHETIC_OUTER_SCALE_KM,
+        sigma_phi_rad: float = constants.DEFAULT_OBSERVED_SIGMA_PHI_RAD,
+        wavelength_m: float = constants.GPS_L1_WAVELENGTH_M,
+    ) -> NDArray[np.float64]:
+        """Generate an oriented two-dimensional phase screen in radians.
+
+        The screen represents elongated anisotropic irregularities by mapping a
+        1D random process onto the normal coordinate
+
+            s(y, z) = y * sin(alpha) + z * cos(alpha)
+
+        and interpolating
+
+            phi(y, z) = f(s(y, z)).
+
+        The output shape is ``(len(y_m), len(z_m))``, matching the expected
+        ``field_yz`` convention for 3D synthetic propagation.
+
+        Args:
+            y_m: One-dimensional uniformly spaced y-coordinate grid in meters.
+            z_m: One-dimensional uniformly spaced z-coordinate grid in meters.
+            alpha_rad: Scan/orientation angle in radians. ``alpha=0`` gives
+                phase variation along z; ``alpha=pi/2`` gives phase variation
+                along y.
+            p: Spectral power index. The paper/default configuration uses
+                ``p=1.5``.
+            outer_scale_km: Outer scale in kilometers. The paper/default
+                configuration uses ``10 km``.
+            sigma_phi_rad: Desired standard deviation over the full 2D screen
+                in radians. If zero, a zero screen is returned.
+            wavelength_m: GNSS wavelength in meters. Validated for interface
+                consistency; output is phase in radians.
+
+        Returns:
+            Two-dimensional phase perturbation array in radians with shape
+            ``(len(y_m), len(z_m))``.
+
+        Raises:
+            ValueError: If inputs are invalid, grids are not uniformly spaced,
+                ``alpha_rad`` is non-finite, or a nonzero requested screen cannot
+                be normalized.
+        """
+        y_array_m: NDArray[np.float64] = self._validate_uniform_grid_1d(
+            values=y_m,
+            name="y_m",
+            min_samples=_MIN_GRID_SAMPLES_2D_AXIS,
+        )
+        z_array_m: NDArray[np.float64] = self._validate_uniform_grid_1d(
+            values=z_m,
+            name="z_m",
+            min_samples=_MIN_GRID_SAMPLES_2D_AXIS,
+        )
+        alpha_value_rad: float = self._validate_finite_scalar(alpha_rad, "alpha_rad")
+        spectral_index: float = self._validate_positive_scalar(p, "p")
+        outer_scale_value_km: float = self._validate_positive_scalar(
+            outer_scale_km,
+            "outer_scale_km",
+        )
+        target_sigma_rad: float = self._validate_nonnegative_scalar(
+            sigma_phi_rad,
+            "sigma_phi_rad",
+        )
+        self._validate_positive_scalar(wavelength_m, "wavelength_m")
+
+        output_shape: tuple[int, int] = (int(y_array_m.size), int(z_array_m.size))
+        if target_sigma_rad == 0.0:
+            return np.zeros(output_shape, dtype=np.float64)
+
+        dy_m: float = abs(self._grid_spacing_m(y_array_m, "y_m"))
+        dz_m: float = abs(self._grid_spacing_m(z_array_m, "z_m"))
+        ds_target_m: float = min(dy_m, dz_m)
+
+        y_grid_m, z_grid_m = np.meshgrid(
+            y_array_m,
+            z_array_m,
+            indexing="ij",
+        )
+
+        normal_coordinate_m: NDArray[np.float64] = (
+            y_grid_m * math.sin(alpha_value_rad)
+            + z_grid_m * math.cos(alpha_value_rad)
+        ).astype(np.float64, copy=False)
+
+        s_min_m: float = float(np.min(normal_coordinate_m))
+        s_max_m: float = float(np.max(normal_coordinate_m))
+        s_span_m: float = s_max_m - s_min_m
+
+        if not math.isfinite(s_span_m) or s_span_m <= 0.0:
+            raise ValueError(
+                "The oriented normal-coordinate span is zero or non-finite; "
+                "check y_m, z_m, and alpha_rad."
+            )
+
+        s_sample_count: int = max(
+            _MIN_ORIENTED_1D_SAMPLES,
+            int(math.ceil(s_span_m / ds_target_m)) + 1,
+        )
+        s_grid_m: NDArray[np.float64] = np.linspace(
+            s_min_m,
+            s_max_m,
+            num=s_sample_count,
+            dtype=np.float64,
+        )
+
+        # Generate an independent 1D random process along the normal coordinate.
+        phase_s_rad: NDArray[np.float64] = self.generate_1d(
+            z_m=s_grid_m,
+            p=spectral_index,
+            outer_scale_km=outer_scale_value_km,
+            sigma_phi_rad=target_sigma_rad,
+            wavelength_m=wavelength_m,
+        )
+
+        phase_2d_rad: NDArray[np.float64] = np.interp(
+            normal_coordinate_m.ravel(),
+            s_grid_m,
+            phase_s_rad,
+        ).reshape(output_shape)
+
+        phase_2d_rad = self._normalize_phase(
+            phase=phase_2d_rad,
+            sigma_phi_rad=target_sigma_rad,
+            name="2D phase screen",
+        )
+
+        return phase_2d_rad
+
+    def _generate_1d_raw_phase(
+        self,
+        sample_count: int,
+        spacing_m: float,
+        spectral_index: float,
+        outer_scale_m: float,
+    ) -> NDArray[np.float64]:
+        """Generate an unnormalized zero-mean 1D Gaussian random field.
+
+        Args:
+            sample_count: Number of spatial samples.
+            spacing_m: Positive grid spacing in meters.
+            spectral_index: Positive spectral index ``p``.
+            outer_scale_m: Positive outer scale in meters.
+
+        Returns:
+            Real-valued unnormalized phase-like random field.
+        """
+        angular_frequencies_rad_m: NDArray[np.float64] = (
+            constants.TWO_PI * np.fft.rfftfreq(sample_count, d=spacing_m)
+        )
+        k0_rad_m: float = constants.TWO_PI / outer_scale_m
+
+        power_spectrum: NDArray[np.float64] = (
+            k0_rad_m * k0_rad_m
+            + angular_frequencies_rad_m * angular_frequencies_rad_m
+        ) ** (-0.5 * spectral_index)
+
+        # Remove the DC component. A constant phase offset does not contribute
+        # to scintillation or BP amplitude variance.
+        power_spectrum[0] = 0.0
+
+        coefficient_scale: NDArray[np.float64] = np.sqrt(power_spectrum)
+
+        real_noise: NDArray[np.float64] = self._rng.normal(
+            loc=0.0,
+            scale=1.0,
+            size=coefficient_scale.shape,
+        )
+        imag_noise: NDArray[np.float64] = self._rng.normal(
+            loc=0.0,
+            scale=1.0,
+            size=coefficient_scale.shape,
+        )
+
+        coefficients: NDArray[np.complex128] = (
+            coefficient_scale * (real_noise + 1j * imag_noise)
+        ).astype(np.complex128, copy=False)
+
+        coefficients[0] = 0.0 + 0.0j
+
+        # For an even-length real FFT, the Nyquist coefficient must be real for
+        # exact Hermitian consistency.
+        if sample_count % 2 == 0 and coefficients.size > 1:
+            coefficients[-1] = complex(float(np.real(coefficients[-1])), 0.0)
+
+        raw_phase: NDArray[np.float64] = np.fft.irfft(
+            coefficients,
+            n=sample_count,
+        ).astype(np.float64, copy=False)
+
+        raw_phase = raw_phase - float(np.mean(raw_phase))
+        return raw_phase
+
+    @staticmethod
+    def _normalize_phase(
+        phase: NDArray[Any],
+        sigma_phi_rad: float,
+        name: str,
+    ) -> NDArray[np.float64]:
+        """Remove mean and normalize a phase field to target standard deviation.
+
+        Args:
+            phase: Phase-like array.
+            sigma_phi_rad: Desired population standard deviation in radians.
+            name: Human-readable label for errors.
+
+        Returns:
+            Mean-zero normalized phase array.
+
+        Raises:
+            ValueError: If the input is invalid or cannot be normalized.
+        """
+        phase_array: NDArray[np.float64] = np.asarray(phase, dtype=np.float64)
+        if phase_array.size == 0:
+            raise ValueError(f"{name} is empty.")
+        if not np.all(np.isfinite(phase_array)):
+            raise ValueError(f"{name} contains non-finite values.")
+
+        centered_phase: NDArray[np.float64] = phase_array - float(np.mean(phase_array))
+        raw_std_rad: float = float(np.std(centered_phase, ddof=0))
+
+        if sigma_phi_rad == 0.0:
+            return np.zeros_like(centered_phase, dtype=np.float64)
+
+        if not math.isfinite(raw_std_rad) or raw_std_rad <= _ZERO_STD_EPS:
+            raise ValueError(
+                f"{name} has zero or non-finite raw standard deviation and "
+                f"cannot be normalized to sigma_phi_rad={sigma_phi_rad}."
+            )
+
+        normalized_phase: NDArray[np.float64] = (
+            centered_phase * (float(sigma_phi_rad) / raw_std_rad)
+        ).astype(np.float64, copy=False)
+
+        # Remove any tiny numerical mean introduced by scaling.
+        normalized_phase = normalized_phase - float(np.mean(normalized_phase))
+
+        # A final rescaling keeps the returned standard deviation extremely
+        # close to the requested value after mean cleanup.
+        final_std_rad: float = float(np.std(normalized_phase, ddof=0))
+        if not math.isfinite(final_std_rad) or final_std_rad <= _ZERO_STD_EPS:
+            raise ValueError(
+                f"{name} lost variance during normalization and cannot be used."
+            )
+
+        normalized_phase = (
+            normalized_phase * (float(sigma_phi_rad) / final_std_rad)
+        ).astype(np.float64, copy=False)
+
+        return normalized_phase
+
+    @staticmethod
+    def _validate_uniform_grid_1d(
+        values: NDArray[Any],
+        name: str,
+        min_samples: int,
+    ) -> NDArray[np.float64]:
+        """Validate a finite, one-dimensional, uniformly spaced grid.
+
+        Args:
+            values: Array-like grid values in meters.
+            name: Name used in error messages.
+            min_samples: Minimum allowed sample count.
+
+        Returns:
+            One-dimensional float64 array.
+
+        Raises:
+            ValueError: If validation fails.
+        """
+        try:
+            grid: NDArray[np.float64] = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be convertible to a float array.") from exc
+
+        if grid.ndim != 1:
+            raise ValueError(f"{name} must be one-dimensional, got {grid.ndim}D.")
+        if grid.size < int(min_samples):
+            raise ValueError(
+                f"{name} must contain at least {int(min_samples)} samples, "
+                f"got {grid.size}."
+            )
+        if not np.all(np.isfinite(grid)):
+            raise ValueError(f"{name} must contain only finite values.")
+
+        differences: NDArray[np.float64] = np.diff(grid)
+        if not np.all(np.isfinite(differences)):
+            raise ValueError(f"{name} grid spacing contains non-finite values.")
+
+        first_spacing: float = float(differences[0])
+        if first_spacing == 0.0:
+            raise ValueError(f"{name} must have nonzero spacing.")
+
+        if np.any(differences == 0.0):
+            raise ValueError(f"{name} must not contain duplicate adjacent samples.")
+
+        if not np.allclose(
+            differences,
+            first_spacing,
+            rtol=_UNIFORM_GRID_RTOL,
+            atol=_UNIFORM_GRID_ATOL_M,
+        ):
+            raise ValueError(
+                f"{name} must be uniformly spaced for FFT phase-screen generation."
+            )
+
+        return grid.astype(np.float64, copy=False)
+
+    @staticmethod
+    def _grid_spacing_m(grid_m: NDArray[np.float64], name: str) -> float:
+        """Return validated grid spacing in meters.
+
+        Args:
+            grid_m: Validated 1D grid.
+            name: Name used in error messages.
+
+        Returns:
+            Signed grid spacing in meters.
+
+        Raises:
+            ValueError: If spacing is invalid.
+        """
+        if grid_m.size < 2:
+            raise ValueError(f"{name} must contain at least two samples.")
+        spacing_m: float = float(grid_m[1] - grid_m[0])
+        if not math.isfinite(spacing_m) or spacing_m == 0.0:
+            raise ValueError(f"{name} has invalid grid spacing {spacing_m!r}.")
+        return spacing_m
+
+    @staticmethod
+    def _validate_finite_scalar(value: float, name: str) -> float:
+        """Validate a scalar is finite.
+
+        Args:
+            value: Scalar value.
+            name: Name used in error messages.
+
+        Returns:
+            Float scalar.
+
+        Raises:
+            ValueError: If the scalar is non-finite.
+        """
+        try:
+            scalar_value: float = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a finite scalar.") from exc
+
+        if not math.isfinite(scalar_value):
+            raise ValueError(f"{name} must be finite, got {value!r}.")
+        return scalar_value
+
+    @classmethod
+    def _validate_positive_scalar(cls, value: float, name: str) -> float:
+        """Validate a scalar is finite and strictly positive."""
+        scalar_value: float = cls._validate_finite_scalar(value, name)
+        if scalar_value <= 0.0:
+            raise ValueError(f"{name} must be > 0, got {scalar_value}.")
+        return scalar_value
+
+    @classmethod
+    def _validate_nonnegative_scalar(cls, value: float, name: str) -> float:
+        """Validate a scalar is finite and nonnegative."""
+        scalar_value: float = cls._validate_finite_scalar(value, name)
+        if scalar_value < 0.0:
+            raise ValueError(f"{name} must be >= 0, got {scalar_value}.")
+        return scalar_value
+
+
+__all__ = ["PhaseScreenGenerator"]
+```

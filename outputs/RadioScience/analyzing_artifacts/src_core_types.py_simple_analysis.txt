@@ -1,0 +1,1647 @@
+## Logic Analysis: `src/core/types.py`
+
+### 1. Purpose of this file
+
+`src/core/types.py` should define the shared in-memory data contracts used across the entire COSMIC-2 back-propagation geolocation pipeline.
+
+This file is foundational. It is imported by data loading, geometry, signal preprocessing, propagation, quality control, geolocation, plotting, and writers. Therefore it must remain lightweight, stable, and free of processing logic.
+
+It should define only the data structures specified in the design:
+
+- `Vector3`
+- `StateVector`
+- `SignalWindow`
+- `ScintillationMetrics`
+- `BpPlaneGeometry`
+- `CorrectedSignal`
+- `BpCurve`
+- `DCurve`
+- `GeolocationResult`
+
+The file should not implement scientific algorithms such as scintillation calculation, BP propagation, IGRF evaluation, zero-crossing detection, or QC. Those belong to later modules.
+
+---
+
+## 2. Dependency policy
+
+`src/core/types.py` should depend only on:
+
+- Python standard library:
+  - `dataclasses`
+  - `datetime`
+  - `pathlib` only if absolutely needed, but likely unnecessary here
+  - `typing`
+  - `copy` if needed for `SignalWindow.copy()`
+- `numpy`
+  - for `ndarray`
+  - for simple vector conversion and norms
+
+Optional pandas should be avoided in this file unless absolutely needed. The design only requires `GeolocationResult.to_dict()`, which can be implemented using plain Python types.
+
+This file should not import:
+
+- `AppConfig`
+- propagation modules
+- geometry modules
+- data loaders
+- pandas
+- scipy
+- pyproj
+- pymap3d
+- ppigrf
+- matplotlib
+
+This avoids circular imports and keeps the dataclasses reusable in tests and synthetic experiments.
+
+---
+
+## 3. Global conventions enforced by these types
+
+The types should encode the project’s shared unit and representation conventions.
+
+### 3.1 Coordinate convention
+
+Unless explicitly stated otherwise:
+
+- Positions are ECEF Cartesian coordinates.
+- ECEF position units are meters.
+- ECEF velocity units are meters per second.
+- Distances used for BP/geolocation are kilometers when field names end with `_km`.
+- Propagation-grid coordinates are meters when field names end with `_m`.
+
+This matches the design and config, where:
+
+```yaml
+back_propagation.distance_grid.min_km: 100
+back_propagation.distance_grid.max_km: 6000
+back_propagation.distance_grid.step_km: 100
+```
+
+### 3.2 Time convention
+
+Each `SignalWindow` represents one 10-second processing interval, consistent with:
+
+```yaml
+processing.window_seconds: 10
+```
+
+The window stores:
+
+- `start_time`
+- `mid_time`
+- `end_time`
+- high-rate sample times in `times`
+
+The exact representation of `times` should be consistent across the pipeline. For numerical detrending and interpolation, the most practical convention is:
+
+- `times`: NumPy array of sample times in seconds relative to `start_time`
+
+Absolute datetimes are still represented by `start_time`, `mid_time`, and `end_time`.
+
+### 3.3 Phase convention
+
+- Phase is always in radians.
+- Fields ending in `_rad` are radians.
+- `SignalWindow.phase_rad` should contain the phase used for scintillation and BP after any required phase connection/unwrapping but before or after detrending depending on pipeline stage.
+- `SignalPreprocessor.prepare_window()` may return a copied `SignalWindow` whose `phase_rad` has been detrended according to the configured method.
+
+The config states:
+
+```yaml
+processing.scintillation_indices.phase_detrending.method: unspecified_in_paper
+processing.scintillation_indices.phase_detrending.default_implementation: polynomial
+processing.scintillation_indices.phase_detrending.polynomial_order: 1
+```
+
+The type should not decide the detrending method.
+
+### 3.4 Amplitude convention
+
+`SignalWindow.amplitude` is the amplitude used for complex-signal construction and BP.
+
+The paper states that COSMIC-2 amplitude is represented by SNR scaled to a 1-Hz band:
+
+```yaml
+data.cosmic2.amplitude_representation: "SNR scaled to 1-Hz band"
+```
+
+Therefore:
+
+- `snr_vv` should store the original or loaded SNR in V/V.
+- `amplitude` should store the amplitude actually used by processing after any normalization.
+- The normalization policy belongs to `SignalPreprocessor.normalize_amplitude()`, not this file.
+
+### 3.5 Accepted QC thresholds are not hard-coded here
+
+The types should not enforce thresholds such as:
+
+```yaml
+sigma_phi_threshold_rad: 0.25
+tangent_point_filter.min_height_km: 150
+q_threshold: 1.2
+cos_alpha_threshold: 0.1
+```
+
+Those thresholds belong to `QualityController` and `AppConfig`.
+
+The types should merely provide fields that can store the values needed for QC.
+
+---
+
+# 4. Class-by-class logic analysis
+
+---
+
+## 4.1 `Vector3`
+
+### Purpose
+
+Represents a 3D Cartesian vector, usually an ECEF position or velocity vector.
+
+### Required public fields
+
+As specified in the design:
+
+```text
++float x
++float y
++float z
+```
+
+### Required public methods
+
+As specified in the design:
+
+```text
++to_array() ndarray
++norm() float
++unit() Vector3
+```
+
+No additional public methods should be introduced.
+
+### Expected use
+
+Used by:
+
+- `StateVector`
+- `BpPlaneGeometry`
+- `LosGeometry`
+- `CoordinateTransformer`
+- `MagneticFieldModel`
+- `BpPlaneBuilder`
+- final geolocation calculations
+
+### Unit convention
+
+The unit depends on context:
+
+- Position vectors: meters
+- Velocity vectors: meters per second
+- Unit vectors: dimensionless
+
+The field name of the containing dataclass clarifies the unit, e.g.:
+
+```text
+position_m: Vector3
+velocity_mps: Vector3
+los_unit: Vector3
+```
+
+### Method behavior
+
+#### `to_array()`
+
+Returns:
+
+```text
+np.ndarray shape (3,)
+```
+
+with values:
+
+```text
+[x, y, z]
+```
+
+#### `norm()`
+
+Returns the Euclidean norm:
+
+\[
+\sqrt{x^2 + y^2 + z^2}
+\]
+
+#### `unit()`
+
+Returns normalized vector:
+
+\[
+\frac{\mathbf{v}}{|\mathbf{v}|}
+\]
+
+If the vector norm is zero or numerically near zero, implementation should fail clearly, because zero unit vectors would corrupt LOS, magnetic-field, and BP-plane geometry.
+
+Recommended behavior:
+
+- raise `ValueError` for zero-norm vector.
+
+This is especially important for:
+
+- LOS unit vector construction
+- magnetic-field unit vector construction
+- projected magnetic-field direction
+- BP plane basis vectors
+
+---
+
+## 4.2 `StateVector`
+
+### Purpose
+
+Stores one timestamped spacecraft or GNSS transmitter state.
+
+### Required public fields
+
+```text
++datetime time
++Vector3 position_m
++Vector3 velocity_mps
+```
+
+### Expected use
+
+Used by:
+
+- `OrbitLoader`
+- `SignalWindow.rx_states`
+- `SignalWindow.tx_states`
+- `BpPlaneBuilder.project_state()`
+- `StationaryCorrector`
+
+### Unit convention
+
+- `position_m`: ECEF meters
+- `velocity_mps`: ECEF meters per second
+- `time`: absolute UTC-like Python `datetime`
+
+The code should preserve time consistency between:
+
+- `SignalWindow.times`
+- `SignalWindow.start_time`
+- `StateVector.time`
+
+However, this file should not interpolate or validate orbit sampling.
+
+### Important invariant
+
+For a given `SignalWindow`, the number of `rx_states` and `tx_states` should match the number of high-rate signal samples:
+
+```text
+len(rx_states) == len(tx_states) == len(times) == len(phase_rad) == len(amplitude)
+```
+
+This invariant is critical for `StationaryCorrector.correct()`.
+
+The type may optionally validate this in `SignalWindow`, but the correction logic belongs downstream.
+
+---
+
+## 4.3 `SignalWindow`
+
+### Purpose
+
+Represents one high-rate 10-second COSMIC-2 scintillation processing interval.
+
+This is the central input object for:
+
+- preprocessing
+- scintillation index calculation
+- geometry construction
+- back propagation
+- final geolocation
+
+### Required public fields
+
+From the design:
+
+```text
++str event_id
++str leo_id
++str gnss_id
++str constellation
++str signal_name
++str antenna
++datetime start_time
++datetime mid_time
++datetime end_time
++float sampling_rate_hz
++ndarray times
++ndarray phase_rad
++ndarray amplitude
++ndarray snr_vv
++list~StateVector~ rx_states
++list~StateVector~ tx_states
++float tangent_height_km
+```
+
+### Required public method
+
+```text
++copy() SignalWindow
+```
+
+No other public methods should be added.
+
+### Expected source
+
+Created by `CosmicLoader.segment_to_windows()` after loading COSMIC-2 HR data and attaching orbit states.
+
+### Config alignment
+
+Each `SignalWindow` should normally span:
+
+```yaml
+processing.window_seconds: 10
+```
+
+Expected sample counts:
+
+```yaml
+data.cosmic2.sampling_rates_hz.gps: 50
+data.cosmic2.sampling_rates_hz.glonass: 100
+```
+
+Therefore typical lengths are:
+
+- GPS: about 500 samples per 10 seconds
+- GLONASS: about 1000 samples per 10 seconds
+
+The type should not hard-code these counts, because missing samples or file-specific sampling irregularities may occur.
+
+### Field semantics
+
+#### `event_id`
+
+Unique event or occultation identifier.
+
+Used for:
+
+- result tracking
+- L1/L2 pairing
+- diagnostics
+- rejection statistics
+
+#### `leo_id`
+
+COSMIC-2 receiver spacecraft identifier.
+
+#### `gnss_id`
+
+GNSS transmitter identifier, e.g. PRN or satellite ID.
+
+#### `constellation`
+
+Examples:
+
+- `"GPS"`
+- `"GLONASS"`
+
+The config notes:
+
+```yaml
+data.cosmic2.sampling_rates_hz.gps: 50
+data.cosmic2.sampling_rates_hz.glonass: 100
+```
+
+#### `signal_name`
+
+Examples:
+
+- `"L1"`
+- `"L2C"`
+- `"L2P"`
+
+For the paper’s L1/L2 comparison:
+
+```yaml
+signals.l1_l2_comparison.gps_l2_allowed:
+  - "L2C"
+signals.l1_l2_comparison.gps_l2_excluded:
+  - "L2P"
+```
+
+This type should only store the signal name. Filtering belongs to `RealDataExperiments`.
+
+#### `antenna`
+
+COSMIC-2 POD antenna direction.
+
+Config values:
+
+```yaml
+data.cosmic2.pod_antennas:
+  - velocity_facing
+  - anti_velocity_facing
+```
+
+#### `times`
+
+Recommended convention:
+
+```text
+np.ndarray shape (N,)
+```
+
+containing seconds relative to `start_time`.
+
+This supports:
+
+- phase detrending
+- sampling-rate inference
+- interpolation diagnostics
+
+#### `phase_rad`
+
+```text
+np.ndarray shape (N,)
+```
+
+High-rate carrier phase in radians.
+
+Depending on pipeline stage, this may be:
+
+- raw connected phase
+- unwrapped phase
+- detrended phase
+
+To avoid ambiguity, `SignalPreprocessor.prepare_window()` should return a copied `SignalWindow` with processed values.
+
+#### `amplitude`
+
+```text
+np.ndarray shape (N,)
+```
+
+Amplitude used in complex signal:
+
+\[
+u = A e^{i\phi}
+\]
+
+May be normalized by `SignalPreprocessor`.
+
+#### `snr_vv`
+
+```text
+np.ndarray shape (N,)
+```
+
+Original or loaded SNR in V/V, scaled to 1-Hz band, consistent with the paper.
+
+Used to compute:
+
+```text
+mean_snr_vv
+```
+
+in `ScintillationMetrics`.
+
+#### `rx_states`
+
+List of receiver `StateVector` samples.
+
+#### `tx_states`
+
+List of transmitter `StateVector` samples.
+
+#### `tangent_height_km`
+
+Minimum LOS tangent point height for the 10-second interval.
+
+Used in pre-BP QC:
+
+```yaml
+processing.tangent_point_filter.min_height_km: 150
+```
+
+### `copy()` behavior
+
+`SignalWindow.copy()` should produce an independent copy suitable for preprocessing.
+
+Recommended copy semantics:
+
+- scalar metadata copied directly
+- NumPy arrays copied with `.copy()`
+- `rx_states` and `tx_states` copied as lists
+- contained `StateVector` objects can be reused if immutable in practice, or deep-copied if needed
+
+The key requirement is that preprocessing does not mutate the original raw window unexpectedly.
+
+---
+
+## 4.4 `ScintillationMetrics`
+
+### Purpose
+
+Stores scintillation metrics calculated for one `SignalWindow`.
+
+### Required public fields
+
+```text
++float sigma_phi_rad
++float s4
++float mean_snr_vv
++bool passes_threshold
+```
+
+### Expected producer
+
+`ScintillationCalculator.compute(window)`
+
+### Expected consumer
+
+`QualityController.passes_pre_bp(metrics, tangent_height_km)`
+
+### Paper/config alignment
+
+Phase scintillation index:
+
+\[
+\sigma_\phi = \mathrm{std}(\phi_{\mathrm{detrended}})
+\]
+
+Pre-BP threshold:
+
+```yaml
+processing.scintillation_indices.sigma_phi_threshold_rad: 0.25
+```
+
+Amplitude scintillation index:
+
+```yaml
+processing.scintillation_indices.s4_definition:
+  "sqrt(<I^2> - <I>^2) / <I>, where I = A^2"
+```
+
+So downstream calculation should use:
+
+\[
+I = A^2
+\]
+
+\[
+S_4 = \frac{\sqrt{\langle I^2\rangle - \langle I\rangle^2}}{\langle I\rangle}
+\]
+
+The type only stores the result.
+
+### Sanity-check targets from the paper
+
+Accepted results should approximately show:
+
+```yaml
+synthetic_experiments.observed_average_values.sigma_phi_rad: 1.65
+synthetic_experiments.observed_average_values.s4: 0.32
+synthetic_experiments.observed_average_values.sigma_phi_over_s4_rad: 5.25
+```
+
+These are not enforced by this class.
+
+---
+
+## 4.5 `BpPlaneGeometry`
+
+### Purpose
+
+Stores the local 2D back-propagation plane geometry for one magnetic-field candidate distance \(L_{\mathrm{mf}}\).
+
+This object is produced by `BpPlaneBuilder.build()` and consumed by `StationaryCorrector` and `BackpropProcessor`.
+
+### Required public fields
+
+```text
++float l_mf_km
++Vector3 los_unit
++Vector3 x_axis
++Vector3 y_axis
++Vector3 z_axis
++Vector3 magnetic_unit
++float cos_alpha
++float alpha_rad
++float beta_rad
++Vector3 candidate_position_m
+```
+
+### Paper alignment
+
+For each candidate distance \(L_{\mathrm{mf}}\), the IGRF-13 magnetic-field vector is evaluated at the candidate point along the LOS.
+
+Config:
+
+```yaml
+data.magnetic_field.model: "IGRF-13"
+data.magnetic_field.use_field_direction_only: true
+```
+
+The field direction defines the irregularity orientation and therefore the BP plane.
+
+The paper’s geolocation criterion is:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+The `BpPlaneGeometry.l_mf_km` field identifies the \(L_{\mathrm{mf}}\) value used to build the plane.
+
+### Field semantics
+
+#### `l_mf_km`
+
+Candidate magnetic-field distance from receiver toward transmitter.
+
+Uses config grid:
+
+```yaml
+back_propagation.magnetic_field_candidate_grid.min_km: 100
+back_propagation.magnetic_field_candidate_grid.max_km: 6000
+back_propagation.magnetic_field_candidate_grid.step_km: 100
+```
+
+#### `los_unit`
+
+Unit vector along the LOS direction used by geometry.
+
+The sign convention must be verified in `LosGeometry`, as noted in config:
+
+```yaml
+back_propagation.geolocation.note:
+  "The sign convention must be verified during implementation so that the geolocation lies along the receiver-transmitter line of sight."
+```
+
+#### `x_axis`
+
+Local BP coordinate \(x\)-axis.
+
+In the paper, \(x\) is aligned with the midpoint Tx-Rx LOS.
+
+#### `y_axis`
+
+Direction associated with projected magnetic-field-aligned irregularities on the phase screen.
+
+#### `z_axis`
+
+BP plane transverse coordinate. The 2D BP computation occurs in the \(x,z\) plane.
+
+#### `magnetic_unit`
+
+Unit magnetic-field direction from IGRF-13 at `candidate_position_m`.
+
+Only direction is used.
+
+#### `cos_alpha`
+
+Cosine of scan angle \(\alpha\).
+
+Final QC uses:
+
+```yaml
+back_propagation.quality_control.cos_alpha_threshold: 0.1
+```
+
+The type stores the value. It does not apply the threshold.
+
+#### `alpha_rad`
+
+Scan angle in radians.
+
+Paper interpretation:
+
+- \(\alpha \to 90^\circ\): LOS scans along irregularity direction, producing weak useful scintillation for BP.
+- Such cases are rejected by `cos_alpha > 0.1`.
+
+#### `beta_rad`
+
+Angle between the magnetic field and its projection direction / BP reduction geometry diagnostic.
+
+The final paper QC explicitly uses `cos_alpha`, not a beta threshold.
+
+#### `candidate_position_m`
+
+ECEF position where IGRF was evaluated.
+
+---
+
+## 4.6 `CorrectedSignal`
+
+### Purpose
+
+Stores the signal after stationary-transmitter correction, phase correction, curvature correction, and interpolation to a uniform \(z\) grid for FFT BP.
+
+Produced by:
+
+```text
+StationaryCorrector.correct(...)
+```
+
+Consumed by:
+
+```text
+FftPropagator.backpropagate_2d(...)
+```
+
+### Required public fields
+
+```text
++float screen_distance_km
++ndarray z_m
++ndarray complex_signal
++ndarray amplitude
++ndarray phase_rad
++float curvature_radius_m
+```
+
+### Config alignment
+
+Stationary-transmitter correction:
+
+```yaml
+back_propagation.stationary_transmitter_correction.enabled: true
+back_propagation.stationary_transmitter_correction.default_option: 2
+```
+
+Curvature correction:
+
+```yaml
+back_propagation.wavefront_curvature_correction.enabled: true
+back_propagation.wavefront_curvature_correction.correction_path_term:
+  "z^2 * tan(alpha)^2 / (2R)"
+```
+
+### Field semantics
+
+#### `screen_distance_km`
+
+Candidate BP screen distance \(L\), not \(L_{\mathrm{mf}}\).
+
+Uses config grid:
+
+```yaml
+back_propagation.distance_grid.min_km: 100
+back_propagation.distance_grid.max_km: 6000
+back_propagation.distance_grid.step_km: 100
+```
+
+#### `z_m`
+
+Uniform transverse coordinate grid for FFT plane-wave BP.
+
+This should be in meters.
+
+#### `complex_signal`
+
+Complex corrected signal:
+
+\[
+u(z) = A(z) e^{i\phi(z)}
+\]
+
+where phase includes:
+
+- stationary-transmitter correction
+- path correction
+- wavefront-curvature correction, if enabled
+
+#### `amplitude`
+
+Amplitude array corresponding to `complex_signal`.
+
+The paper states amplitude is not corrected during the stationary Tx/Rx correction:
+
+\[
+A' = A
+\]
+
+Interpolation may still change sample positions.
+
+#### `phase_rad`
+
+Corrected phase in radians.
+
+#### `curvature_radius_m`
+
+Approximate Tx-Rx distance \(R\) used in curvature correction.
+
+The correction path term is:
+
+\[
+\Delta S_{\mathrm{curv}} =
+\frac{z^2 \tan^2 \alpha}{2R}
+\]
+
+In radians:
+
+\[
+\Delta \phi_{\mathrm{curv}} =
+k \frac{z^2 \tan^2 \alpha}{2R}
+\]
+
+---
+
+## 4.7 `BpCurve`
+
+### Purpose
+
+Stores one \(V(L)\) curve produced for a fixed magnetic-field candidate distance \(L_{\mathrm{mf}}\).
+
+For each `l_mf_km`, the BP inner loop evaluates candidate screen distances \(L\) and computes:
+
+\[
+V(L) = \frac{\langle A^2 \rangle}{\langle A\rangle^2} - 1
+\]
+
+The curve minimum gives \(L_0\).
+
+### Required public fields
+
+```text
++float l_mf_km
++ndarray distances_km
++ndarray v_raw
++ndarray v_smooth
++float l0_km
++float v0
++float l1_km
++float l2_km
++float v1
++float v2
++float q
++bool has_valid_minimum
+```
+
+### Config alignment
+
+Distance grid:
+
+```yaml
+back_propagation.distance_grid.min_km: 100
+back_propagation.distance_grid.max_km: 6000
+back_propagation.distance_grid.step_km: 100
+```
+
+Smoothing:
+
+```yaml
+back_propagation.v_curve.smoothing.enabled: true
+back_propagation.v_curve.smoothing.method: "second_order_sliding_polynomial_regression"
+back_propagation.v_curve.smoothing.window_km: 1000
+back_propagation.v_curve.smoothing.polynomial_order: 2
+```
+
+Minimum detection:
+
+```yaml
+back_propagation.minimum_detection.require_global_local_minimum: true
+back_propagation.minimum_detection.reject_endpoint_minimum: true
+back_propagation.minimum_detection.min_l1_samples: 2
+back_propagation.minimum_detection.min_l2_samples: 2
+back_propagation.minimum_detection.sample_spacing_km: 100
+```
+
+Q threshold:
+
+```yaml
+back_propagation.quality_control.q_threshold: 1.2
+```
+
+### Field semantics
+
+#### `l_mf_km`
+
+The magnetic-field candidate distance used to define this BP plane.
+
+#### `distances_km`
+
+Array of candidate BP screen distances \(L\), normally:
+
+```text
+[100, 200, ..., 6000]
+```
+
+#### `v_raw`
+
+Raw normalized amplitude variance values.
+
+#### `v_smooth`
+
+Smoothed \(V(L)\) using second-order sliding polynomial regression over 1000 km.
+
+#### `l0_km`
+
+Distance of the global local minimum of `v_smooth`.
+
+This is \(L_0\) in the paper.
+
+#### `v0`
+
+Minimum value:
+
+\[
+V_0 = V(L_0)
+\]
+
+#### `l1_km`, `l2_km`
+
+Distances from \(L_0\) to the points where monotonic increase ends on the lower- and higher-distance sides.
+
+The paper requires these not to be smaller than two 100-km samples.
+
+#### `v1`, `v2`
+
+Values at the ends of the monotonic-increase spans:
+
+\[
+V_1 = V(L_0 - L_1)
+\]
+
+\[
+V_2 = V(L_0 + L_2)
+\]
+
+#### `q`
+
+Minimum-depth metric:
+
+\[
+Q = \frac{\min(V_1, V_2)}{V_0}
+\]
+
+Final QC requires:
+
+```yaml
+back_propagation.quality_control.q_threshold: 1.2
+```
+
+#### `has_valid_minimum`
+
+Boolean indicating that the curve had a usable global local minimum satisfying local-minimum and endpoint constraints.
+
+If false, downstream `BackpropProcessor` should not use this curve to form a valid \(D\) value.
+
+---
+
+## 4.8 `DCurve`
+
+### Purpose
+
+Stores the outer-loop geolocation function:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+This curve is searched for zero crossings.
+
+### Required public fields
+
+```text
++ndarray l_mf_km
++ndarray d_km
++ndarray l0_km
++ndarray q
++ndarray cos_alpha
++list~float~ zero_crossings_km
++bool is_multivalued
+```
+
+### Config alignment
+
+Outer loop grid:
+
+```yaml
+back_propagation.magnetic_field_candidate_grid.min_km: 100
+back_propagation.magnetic_field_candidate_grid.max_km: 6000
+back_propagation.magnetic_field_candidate_grid.step_km: 100
+```
+
+Single-valued requirement:
+
+```yaml
+back_propagation.quality_control.require_single_valued_geolocation: true
+back_propagation.quality_control.discard_multivalued_geolocations: true
+```
+
+### Field semantics
+
+#### `l_mf_km`
+
+Array of candidate magnetic-field distances.
+
+#### `d_km`
+
+Array of:
+
+\[
+D = L_0 - L_{\mathrm{mf}}
+\]
+
+for each candidate.
+
+#### `l0_km`
+
+Array of \(L_0\) values obtained from the corresponding `BpCurve`.
+
+#### `q`
+
+Array of Q values from the corresponding `BpCurve`.
+
+#### `cos_alpha`
+
+Array of scan-angle cosine values for each \(L_{\mathrm{mf}}\).
+
+Final accepted geolocation uses the `cos_alpha` corresponding to the accepted crossing distance.
+
+#### `zero_crossings_km`
+
+List of candidate geolocation distances where \(D(L_{\mathrm{mf}})=0\).
+
+The paper allows:
+
+- one crossing
+- several crossings
+- no crossing
+
+If more than one valid crossing exists, the geolocation is multi-valued and discarded.
+
+#### `is_multivalued`
+
+True if more than one valid zero crossing exists.
+
+The paper states approximately 8% of COSMIC-2 cases are multi-valued and discarded.
+
+Config:
+
+```yaml
+reproducibility.log_multivalued_cases: true
+```
+
+The type only stores the flag.
+
+---
+
+## 4.9 `GeolocationResult`
+
+### Purpose
+
+Stores the final result for one 10-second `SignalWindow`.
+
+This class must represent both accepted and rejected windows so that rejection statistics can be logged reproducibly.
+
+### Required public fields
+
+```text
++str event_id
++str leo_id
++str gnss_id
++str signal_name
++datetime mid_time
++bool accepted
++str rejection_reason
++float distance_km
++float latitude_deg
++float longitude_deg
++float altitude_km
++float local_time_hr
++float sigma_phi_rad
++float s4
++float mean_snr_vv
++float q
++float cos_alpha
++float d_slope
++bool is_multivalued
+```
+
+### Required public method
+
+```text
++to_dict() dict
+```
+
+No other public methods should be added.
+
+### Field semantics
+
+#### Metadata fields
+
+```text
+event_id
+leo_id
+gnss_id
+signal_name
+mid_time
+```
+
+Used for:
+
+- output tables
+- monthly aggregation
+- L1/L2 pairing
+- diagnostics
+
+For L1/L2 pairing, downstream `RealDataExperiments.pair_l1_l2()` should use:
+
+- event ID
+- LEO ID
+- GNSS ID
+- signal name
+- time window
+
+#### `accepted`
+
+True only if all paper/config QC criteria passed.
+
+Final QC criteria from config:
+
+```yaml
+back_propagation.quality_control.require_single_valued_geolocation: true
+back_propagation.quality_control.q_threshold: 1.2
+back_propagation.quality_control.cos_alpha_threshold: 0.1
+```
+
+Pre-BP QC:
+
+```yaml
+processing.scintillation_indices.sigma_phi_threshold_rad: 0.25
+processing.tangent_point_filter.min_height_km: 150
+```
+
+#### `rejection_reason`
+
+String describing why a result was rejected.
+
+Examples should be produced by `QualityController` or `Geolocator`, not by this type.
+
+Possible values may include:
+
+- `"sigma_phi_below_threshold"`
+- `"tangent_height_below_threshold"`
+- `"no_valid_minimum"`
+- `"no_zero_crossing"`
+- `"multivalued_geolocation"`
+- `"q_below_threshold"`
+- `"cos_alpha_below_threshold"`
+- `"geometry_error"`
+
+The exact vocabulary should be centralized later, but this type stores the string.
+
+#### `distance_km`
+
+Accepted geolocation distance \(L\) from receiver toward transmitter.
+
+For rejected cases, this may be `NaN`.
+
+#### `latitude_deg`, `longitude_deg`, `altitude_km`
+
+Final geodetic coordinates of the geolocation point.
+
+The paper uses:
+
+\[
+\mathbf{R}_{geo}
+=
+\mathbf{R}_{rx}
++
+L \mathbf{n}_{rt}
+\]
+
+with sign convention noted as needing verification in config.
+
+For rejected cases, these may be `NaN`.
+
+#### `local_time_hr`
+
+Local time used for monthly map filtering.
+
+Config:
+
+```yaml
+processing.local_time_filter.start_hour: 18
+processing.local_time_filter.end_hour: 24
+processing.local_time_filter.reference: "geolocation_longitude"
+```
+
+Monthly maps should include only accepted results with:
+
+\[
+18 \le LT < 24
+\]
+
+#### `sigma_phi_rad`
+
+Phase scintillation index for the window.
+
+#### `s4`
+
+Amplitude scintillation index.
+
+#### `mean_snr_vv`
+
+Mean SNR for the window.
+
+The paper reports typical accepted SNRs:
+
+```yaml
+synthetic_experiments.modeled_cases.thermal_noise.average_snr_1hz_vv: 400
+synthetic_experiments.modeled_cases.thermal_noise.typical_snr_1hz_range_vv:
+  - 200
+  - 600
+```
+
+#### `q`
+
+Final Q value associated with the accepted crossing.
+
+For rejected cases, may be `NaN`.
+
+#### `cos_alpha`
+
+Final \(\cos\alpha\) value associated with the accepted crossing.
+
+For rejected cases, may be `NaN`.
+
+#### `d_slope`
+
+Slope diagnostic:
+
+\[
+M = \left|\frac{\Delta D}{\Delta L}\right|
+\]
+
+The paper says this may be used as an additional uncertainty measure.
+
+For rejected cases, may be `NaN`.
+
+#### `is_multivalued`
+
+True if multiple valid zero crossings were found.
+
+Config requires discarding these:
+
+```yaml
+back_propagation.quality_control.discard_multivalued_geolocations: true
+```
+
+### `to_dict()` behavior
+
+`to_dict()` should return plain Python values suitable for:
+
+- pandas DataFrame construction
+- parquet/csv/json writing
+- reproducibility logs
+
+It should convert `mid_time` into either:
+
+- a Python `datetime`, acceptable to pandas, or
+- ISO string
+
+For best compatibility with pandas/parquet, returning the `datetime` object is acceptable. For JSON diagnostics, `ResultWriter` can convert datetimes if needed.
+
+---
+
+# 5. Recommended implementation style
+
+Use `@dataclass` for these structures.
+
+Reasoning:
+
+- The objects are simple containers.
+- NumPy arrays are easier to handle in dataclasses than strict pydantic models.
+- Validation beyond basic shape checks belongs in processing modules.
+- This file should remain lightweight.
+
+Suggested properties:
+
+- `Vector3` can be a regular dataclass.
+- Other classes can also be regular dataclasses.
+- If validation is added, keep it minimal and internal.
+
+Do not introduce additional public methods beyond those in the design:
+
+- `Vector3.to_array()`
+- `Vector3.norm()`
+- `Vector3.unit()`
+- `SignalWindow.copy()`
+- `GeolocationResult.to_dict()`
+
+---
+
+# 6. Shape and consistency expectations
+
+The types should document, and optionally lightly validate, the following expected shapes.
+
+## 6.1 `SignalWindow`
+
+For `N` high-rate samples:
+
+```text
+times.shape == (N,)
+phase_rad.shape == (N,)
+amplitude.shape == (N,)
+snr_vv.shape == (N,)
+len(rx_states) == N
+len(tx_states) == N
+```
+
+## 6.2 `CorrectedSignal`
+
+For `M` corrected/interpolated grid points:
+
+```text
+z_m.shape == (M,)
+complex_signal.shape == (M,)
+amplitude.shape == (M,)
+phase_rad.shape == (M,)
+```
+
+## 6.3 `BpCurve`
+
+For `K` BP candidate distances:
+
+```text
+distances_km.shape == (K,)
+v_raw.shape == (K,)
+v_smooth.shape == (K,)
+```
+
+Normally:
+
+```text
+K = (6000 - 100) / 100 + 1 = 60
+```
+
+using config:
+
+```yaml
+back_propagation.distance_grid:
+  min_km: 100
+  max_km: 6000
+  step_km: 100
+```
+
+## 6.4 `DCurve`
+
+For `J` magnetic-field candidate distances:
+
+```text
+l_mf_km.shape == (J,)
+d_km.shape == (J,)
+l0_km.shape == (J,)
+q.shape == (J,)
+cos_alpha.shape == (J,)
+```
+
+Normally:
+
+```text
+J = 60
+```
+
+using config:
+
+```yaml
+back_propagation.magnetic_field_candidate_grid:
+  min_km: 100
+  max_km: 6000
+  step_km: 100
+```
+
+---
+
+# 7. Handling rejected or missing values
+
+Because `GeolocationResult` represents both accepted and rejected cases, missing numerical values should use `NaN`.
+
+Recommended convention:
+
+- rejected `distance_km`: `NaN`
+- rejected `latitude_deg`: `NaN`
+- rejected `longitude_deg`: `NaN`
+- rejected `altitude_km`: `NaN`
+- unavailable `q`: `NaN`
+- unavailable `cos_alpha`: `NaN`
+- unavailable `d_slope`: `NaN`
+
+This makes aggregation in pandas straightforward.
+
+The type should not itself decide whether a value is missing. `Geolocator` and `QualityController` should populate these fields.
+
+---
+
+# 8. Relationship to paper methodology
+
+These types directly support the paper’s methodological structure.
+
+## 8.1 Thin phase-screen BP
+
+`CorrectedSignal`, `BpCurve`, and `DCurve` support the paper’s core method:
+
+1. For each \(L_{\mathrm{mf}}\), define BP plane using IGRF-13.
+2. For each candidate BP distance \(L\), back-propagate the corrected complex signal.
+3. Compute:
+
+\[
+V(L) = \frac{\langle A^2\rangle}{\langle A\rangle^2} - 1
+\]
+
+4. Find \(L_0\), the minimum of \(V(L)\).
+5. Form:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+6. Search for zero crossings.
+
+These objects store the intermediate values needed for reproducibility.
+
+## 8.2 QC and accepted products
+
+`ScintillationMetrics`, `BpCurve`, `DCurve`, and `GeolocationResult` store the quantities required for all paper QC checks:
+
+- \(\sigma_\phi > 0.25\) rad
+- tangent height \(>150\) km
+- valid global local minimum
+- \(Q > 1.2\)
+- \(\cos\alpha > 0.1\)
+- single-valued geolocation only
+
+## 8.3 Multi-valued geolocation tracking
+
+`DCurve.zero_crossings_km`, `DCurve.is_multivalued`, and `GeolocationResult.is_multivalued` support the paper’s treatment of multi-valued solutions.
+
+The paper states these are discarded and that approximately 8% of COSMIC-2 cases are multi-valued.
+
+---
+
+# 9. What this file must not do
+
+`src/core/types.py` must not:
+
+1. Load COSMIC-2 files.
+2. Parse orbit products.
+3. Compute IGRF magnetic fields.
+4. Compute LOS geometry.
+5. Compute tangent-point height.
+6. Detrend phase.
+7. Compute \(\sigma_\phi\) or \(S_4\).
+8. Perform FFT propagation.
+9. Smooth \(V(L)\).
+10. Find \(D(L)=0\) crossings.
+11. Apply QC thresholds.
+12. Plot or write files.
+
+Those operations are assigned to other modules in the design.
+
+---
+
+# 10. Implementation checklist for `src/core/types.py`
+
+The file should provide the following exact public API from the design.
+
+## Required classes and fields
+
+### `Vector3`
+
+- `x: float`
+- `y: float`
+- `z: float`
+- `to_array()`
+- `norm()`
+- `unit()`
+
+### `StateVector`
+
+- `time: datetime`
+- `position_m: Vector3`
+- `velocity_mps: Vector3`
+
+### `SignalWindow`
+
+- `event_id: str`
+- `leo_id: str`
+- `gnss_id: str`
+- `constellation: str`
+- `signal_name: str`
+- `antenna: str`
+- `start_time: datetime`
+- `mid_time: datetime`
+- `end_time: datetime`
+- `sampling_rate_hz: float`
+- `times: ndarray`
+- `phase_rad: ndarray`
+- `amplitude: ndarray`
+- `snr_vv: ndarray`
+- `rx_states: list[StateVector]`
+- `tx_states: list[StateVector]`
+- `tangent_height_km: float`
+- `copy()`
+
+### `ScintillationMetrics`
+
+- `sigma_phi_rad: float`
+- `s4: float`
+- `mean_snr_vv: float`
+- `passes_threshold: bool`
+
+### `BpPlaneGeometry`
+
+- `l_mf_km: float`
+- `los_unit: Vector3`
+- `x_axis: Vector3`
+- `y_axis: Vector3`
+- `z_axis: Vector3`
+- `magnetic_unit: Vector3`
+- `cos_alpha: float`
+- `alpha_rad: float`
+- `beta_rad: float`
+- `candidate_position_m: Vector3`
+
+### `CorrectedSignal`
+
+- `screen_distance_km: float`
+- `z_m: ndarray`
+- `complex_signal: ndarray`
+- `amplitude: ndarray`
+- `phase_rad: ndarray`
+- `curvature_radius_m: float`
+
+### `BpCurve`
+
+- `l_mf_km: float`
+- `distances_km: ndarray`
+- `v_raw: ndarray`
+- `v_smooth: ndarray`
+- `l0_km: float`
+- `v0: float`
+- `l1_km: float`
+- `l2_km: float`
+- `v1: float`
+- `v2: float`
+- `q: float`
+- `has_valid_minimum: bool`
+
+### `DCurve`
+
+- `l_mf_km: ndarray`
+- `d_km: ndarray`
+- `l0_km: ndarray`
+- `q: ndarray`
+- `cos_alpha: ndarray`
+- `zero_crossings_km: list[float]`
+- `is_multivalued: bool`
+
+### `GeolocationResult`
+
+- `event_id: str`
+- `leo_id: str`
+- `gnss_id: str`
+- `signal_name: str`
+- `mid_time: datetime`
+- `accepted: bool`
+- `rejection_reason: str`
+- `distance_km: float`
+- `latitude_deg: float`
+- `longitude_deg: float`
+- `altitude_km: float`
+- `local_time_hr: float`
+- `sigma_phi_rad: float`
+- `s4: float`
+- `mean_snr_vv: float`
+- `q: float`
+- `cos_alpha: float`
+- `d_slope: float`
+- `is_multivalued: bool`
+- `to_dict()`
+
+---
+
+# 11. Summary
+
+`src/core/types.py` should be a clean, minimal, dependency-light definition of the shared scientific data structures for the reproduction pipeline.
+
+Its main responsibility is to preserve consistent units, names, and contracts across modules while remaining free of algorithmic logic.
+
+The most important design principles are:
+
+1. Keep field names exactly aligned with the provided design.
+2. Use explicit unit suffixes such as `_m`, `_km`, `_rad`, `_mps`, and `_vv`.
+3. Store all intermediate quantities needed to reproduce the paper’s BP logic:
+   - \(V(L)\)
+   - \(L_0\)
+   - \(Q\)
+   - \(D(L_{\mathrm{mf}})\)
+   - zero crossings
+   - \(\cos\alpha\)
+4. Represent rejected geolocations explicitly using `GeolocationResult`.
+5. Do not hard-code paper/config thresholds in this file.
+6. Do not add public methods beyond the specified interface.

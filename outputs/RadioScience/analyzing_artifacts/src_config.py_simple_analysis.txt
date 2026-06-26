@@ -1,0 +1,1101 @@
+## Logic Analysis: `src/config.py`
+
+### 1. Purpose of `src/config.py`
+
+`src/config.py` must implement the central configuration-loading layer for the reproduction pipeline. Its primary responsibility is to read the YAML configuration file, validate required fields, map the nested YAML structure into the project’s `AppConfig` interface, and expose:
+
+```python
+AppConfig.from_yaml(path: Path) -> AppConfig
+```
+
+This module is foundational because nearly all other modules depend on configuration values for reproducible behavior. No scientific module should hard-code methodological parameters that are specified in `config.yaml`.
+
+---
+
+## 2. Paper-Aligned Configuration Responsibilities
+
+The paper describes a deterministic signal-processing and geolocation pipeline, not a machine-learning workflow. Therefore, `src/config.py` must explicitly support the paper’s fixed experimental and processing settings, especially:
+
+### 2.1 No Training Configuration
+
+The YAML contains:
+
+```yaml
+training:
+  applicable: false
+```
+
+This is correct and should be preserved. `AppConfig` should not introduce ML-related parameters such as learning rate, epochs, optimizer, or batch size.
+
+---
+
+## 3. Required Public Interface
+
+The design specifies the following public interface:
+
+```text
+class AppConfig {
+    +Path cosmic_data_dir
+    +Path receiver_orbit_dir
+    +Path gnss_orbit_dir
+    +Path output_dir
+    +str igrf_model
+    +float sigma_phi_threshold_rad
+    +float tangent_height_min_km
+    +float bp_min_distance_km
+    +float bp_max_distance_km
+    +float bp_step_km
+    +float mf_step_km
+    +float q_threshold
+    +float cos_alpha_threshold
+    +float smoothing_window_km
+    +int smoothing_poly_order
+    +float map_bin_deg
+    +int random_seed
+    +from_yaml(path: Path) AppConfig
+}
+```
+
+`src/config.py` must implement this interface exactly.
+
+No downstream code should call public members that are not part of this design unless the design is later explicitly updated.
+
+---
+
+## 4. YAML-to-`AppConfig` Field Mapping
+
+The provided `config.yaml` is nested, while the design’s `AppConfig` is flat. Therefore, `src/config.py` should load the nested YAML and map values into the flat `AppConfig` fields.
+
+### 4.1 Path Fields
+
+Map:
+
+```yaml
+paths:
+  cosmic2_hr_data_dir: "data/cosmic2/hr"
+  receiver_orbit_dir: "data/cosmic2/orbits"
+  gnss_orbit_clock_dir: "data/gnss"
+  output_dir: "outputs"
+```
+
+to:
+
+```python
+AppConfig.cosmic_data_dir
+AppConfig.receiver_orbit_dir
+AppConfig.gnss_orbit_dir
+AppConfig.output_dir
+```
+
+Specifically:
+
+| `AppConfig` field | YAML source |
+|---|---|
+| `cosmic_data_dir` | `paths.cosmic2_hr_data_dir` |
+| `receiver_orbit_dir` | `paths.receiver_orbit_dir` |
+| `gnss_orbit_dir` | `paths.gnss_orbit_clock_dir` |
+| `output_dir` | `paths.output_dir` |
+
+The F10.7 path exists in YAML:
+
+```yaml
+paths:
+  f107_data_path: "data/f107/f107.csv"
+```
+
+but the current design does not include a public `AppConfig.f107_data_path`. Because the instruction requires following the design, `src/config.py` should not require downstream modules to access this value through a nonexistent public field unless the design is updated.
+
+---
+
+### 4.2 Magnetic Field Model
+
+Map:
+
+```yaml
+data:
+  magnetic_field:
+    model: "IGRF-13"
+```
+
+to:
+
+```python
+AppConfig.igrf_model
+```
+
+This must preserve the paper’s requirement that the IGRF-13 magnetic-field model defines irregularity orientation.
+
+---
+
+### 4.3 Scintillation Threshold
+
+Map:
+
+```yaml
+processing:
+  scintillation_indices:
+    sigma_phi_threshold_rad: 0.25
+```
+
+to:
+
+```python
+AppConfig.sigma_phi_threshold_rad
+```
+
+This value implements the paper’s pre-BP threshold:
+
+\[
+\sigma_\phi > 0.25 \ \text{rad}
+\]
+
+---
+
+### 4.4 Tangent-Point Height Threshold
+
+Map:
+
+```yaml
+processing:
+  tangent_point_filter:
+    min_height_km: 150
+```
+
+to:
+
+```python
+AppConfig.tangent_height_min_km
+```
+
+This implements the paper’s requirement to avoid sporadic E-layer contamination:
+
+\[
+h_{\tan} > 150 \ \text{km}
+\]
+
+---
+
+### 4.5 Back-Propagation Distance Grid
+
+Map:
+
+```yaml
+back_propagation:
+  distance_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+to:
+
+```python
+AppConfig.bp_min_distance_km
+AppConfig.bp_max_distance_km
+AppConfig.bp_step_km
+```
+
+This reproduces the paper’s inner BP loop:
+
+\[
+100 \ \text{km} < L < 6000 \ \text{km}
+\]
+
+with 100 km spacing.
+
+Implementation should preserve the configured values exactly:
+
+```text
+min_km = 100
+max_km = 6000
+step_km = 100
+```
+
+---
+
+### 4.6 Magnetic-Field Candidate Grid
+
+Map:
+
+```yaml
+back_propagation:
+  magnetic_field_candidate_grid:
+    step_km: 100
+```
+
+to:
+
+```python
+AppConfig.mf_step_km
+```
+
+The paper uses the same 100 km step for the outer loop over \(L_{\mathrm{mf}}\).
+
+The YAML also provides:
+
+```yaml
+magnetic_field_candidate_grid:
+  min_km: 100
+  max_km: 6000
+```
+
+but the current `AppConfig` design exposes only `mf_step_km`, not separate min/max fields. Downstream code should therefore use the BP min/max fields for the candidate grid unless the design is expanded later.
+
+---
+
+### 4.7 Quality Control Thresholds
+
+Map:
+
+```yaml
+back_propagation:
+  quality_control:
+    q_threshold: 1.2
+    cos_alpha_threshold: 0.1
+```
+
+to:
+
+```python
+AppConfig.q_threshold
+AppConfig.cos_alpha_threshold
+```
+
+These reproduce the paper’s final QC checks:
+
+\[
+Q > 1.2
+\]
+
+and
+
+\[
+\cos\alpha > 0.1
+\]
+
+The YAML also states:
+
+```yaml
+require_single_valued_geolocation: true
+discard_multivalued_geolocations: true
+```
+
+The current design does not expose these as public `AppConfig` fields. However, the paper’s methodology requires single-valued geolocations only, so later QC logic must implement this behavior consistently.
+
+---
+
+### 4.8 V-Curve Smoothing
+
+Map:
+
+```yaml
+back_propagation:
+  v_curve:
+    smoothing:
+      window_km: 1000
+      polynomial_order: 2
+```
+
+to:
+
+```python
+AppConfig.smoothing_window_km
+AppConfig.smoothing_poly_order
+```
+
+This reproduces the paper’s smoothing method:
+
+- second-order sliding polynomial regression,
+- 1000 km window.
+
+---
+
+### 4.9 Monthly Map Bin Size
+
+Map:
+
+```yaml
+real_data_experiments:
+  monthly_l1_maps:
+    bin_size_deg:
+      latitude: 3
+      longitude: 3
+```
+
+to:
+
+```python
+AppConfig.map_bin_deg
+```
+
+The design exposes one scalar field, so `src/config.py` should validate that latitude and longitude bin sizes are equal before assigning:
+
+```python
+map_bin_deg = 3
+```
+
+If they differ, that should be considered a configuration error because the paper uses:
+
+\[
+3^\circ \times 3^\circ
+\]
+
+bins.
+
+---
+
+### 4.10 Reproducibility Seed
+
+Map:
+
+```yaml
+reproducibility:
+  random_seed: 42
+```
+
+to:
+
+```python
+AppConfig.random_seed
+```
+
+This is used primarily by synthetic experiments, especially random phase-screen generation.
+
+---
+
+## 5. Validation Logic
+
+`src/config.py` should use Pydantic validation to enforce consistency with the paper and the YAML.
+
+### 5.1 Required Sections
+
+The loader should require these top-level sections:
+
+```yaml
+project
+training
+data
+paths
+signals
+processing
+back_propagation
+synthetic_experiments
+real_data_experiments
+outputs
+reproducibility
+```
+
+However, because `AppConfig` exposes only a subset of these fields, not every nested value needs to become a public attribute.
+
+---
+
+### 5.2 Required Path Values
+
+The following path values must be present:
+
+```yaml
+paths.cosmic2_hr_data_dir
+paths.receiver_orbit_dir
+paths.gnss_orbit_clock_dir
+paths.output_dir
+```
+
+They should be converted to `Path` objects.
+
+Recommended behavior:
+
+- `output_dir` may be created later by writers or main orchestration.
+- external data directories may be missing during synthetic-only runs.
+- therefore, missing COSMIC-2 or GNSS directories should not cause `from_yaml()` to fail unconditionally.
+
+This matches the task requirement:
+
+> Validate directories where appropriate but allow missing external datasets during synthetic-only runs.
+
+A practical rule:
+
+| Path | Validation behavior |
+|---|---|
+| `output_dir` | allow missing; should be creatable later |
+| `cosmic_data_dir` | allow missing at config-load time |
+| `receiver_orbit_dir` | allow missing at config-load time |
+| `gnss_orbit_dir` | allow missing at config-load time |
+
+Hard failure should be reserved for malformed or absent configuration fields, not absent downloaded datasets.
+
+---
+
+### 5.3 Numerical Range Validation
+
+The following validations should be enforced.
+
+#### `sigma_phi_threshold_rad`
+
+From YAML:
+
+```yaml
+sigma_phi_threshold_rad: 0.25
+```
+
+Must satisfy:
+
+```text
+sigma_phi_threshold_rad > 0
+```
+
+Paper value:
+
+```text
+0.25 rad
+```
+
+---
+
+#### `tangent_height_min_km`
+
+From YAML:
+
+```yaml
+min_height_km: 150
+```
+
+Must satisfy:
+
+```text
+tangent_height_min_km >= 0
+```
+
+Paper value:
+
+```text
+150 km
+```
+
+---
+
+#### BP Distance Grid
+
+From YAML:
+
+```yaml
+min_km: 100
+max_km: 6000
+step_km: 100
+```
+
+Must satisfy:
+
+```text
+bp_min_distance_km > 0
+bp_max_distance_km > bp_min_distance_km
+bp_step_km > 0
+```
+
+Also validate that the grid is compatible with integer stepping:
+
+```text
+(bp_max_distance_km - bp_min_distance_km) % bp_step_km == 0
+```
+
+For the provided values:
+
+```text
+(6000 - 100) / 100 = 59
+```
+
+so the grid produces 60 candidate distances:
+
+```text
+100, 200, ..., 6000 km
+```
+
+---
+
+#### Magnetic-Field Candidate Step
+
+From YAML:
+
+```yaml
+mf_step_km: 100
+```
+
+Must satisfy:
+
+```text
+mf_step_km > 0
+```
+
+For consistency with the paper, it should equal the BP step:
+
+```text
+mf_step_km == bp_step_km == 100
+```
+
+If not equal, this should at least produce a strong validation warning or error, because the paper uses 100 km for both loops.
+
+---
+
+#### Q Threshold
+
+From YAML:
+
+```yaml
+q_threshold: 1.2
+```
+
+Must satisfy:
+
+```text
+q_threshold > 1
+```
+
+because \(Q = \min(V_1,V_2)/V_0\), and the paper accepts sufficiently deep minima.
+
+---
+
+#### Cosine Scan-Angle Threshold
+
+From YAML:
+
+```yaml
+cos_alpha_threshold: 0.1
+```
+
+Must satisfy:
+
+```text
+0 <= cos_alpha_threshold <= 1
+```
+
+Paper value:
+
+```text
+0.1
+```
+
+---
+
+#### Smoothing Window
+
+From YAML:
+
+```yaml
+window_km: 1000
+polynomial_order: 2
+```
+
+Must satisfy:
+
+```text
+smoothing_window_km > 0
+smoothing_poly_order >= 0
+```
+
+Because the BP grid spacing is 100 km, the 1000 km smoothing window corresponds to approximately 11 samples if centered symmetrically.
+
+Validation should ensure:
+
+```text
+smoothing_window_km >= bp_step_km
+```
+
+For the paper:
+
+```text
+1000 km >= 100 km
+```
+
+---
+
+#### Map Bin Size
+
+From YAML:
+
+```yaml
+latitude: 3
+longitude: 3
+```
+
+Must satisfy:
+
+```text
+map_bin_deg > 0
+```
+
+and:
+
+```text
+latitude_bin_deg == longitude_bin_deg
+```
+
+Paper value:
+
+```text
+3 degrees
+```
+
+---
+
+#### Random Seed
+
+From YAML:
+
+```yaml
+random_seed: 42
+```
+
+Must be an integer.
+
+---
+
+## 6. Handling Defaults
+
+The task says to use Pydantic for validation and default values. However, because the paper and `config.yaml` explicitly provide the methodological parameters, defaults should not silently override missing scientific settings unless they are paper-backed.
+
+Recommended behavior:
+
+1. Define defaults only for values explicitly given in the paper/configuration.
+2. Use the provided YAML as the authoritative source.
+3. If a required scientific value is absent, fail validation rather than inventing a new value.
+
+Acceptable paper-backed defaults include:
+
+| Field | Default if YAML missing | Source |
+|---|---:|---|
+| `sigma_phi_threshold_rad` | `0.25` | paper/config |
+| `tangent_height_min_km` | `150` | paper/config |
+| `bp_min_distance_km` | `100` | paper/config |
+| `bp_max_distance_km` | `6000` | paper/config |
+| `bp_step_km` | `100` | paper/config |
+| `mf_step_km` | `100` | paper/config |
+| `q_threshold` | `1.2` | paper/config |
+| `cos_alpha_threshold` | `0.1` | paper/config |
+| `smoothing_window_km` | `1000` | paper/config |
+| `smoothing_poly_order` | `2` | paper/config |
+| `map_bin_deg` | `3` | paper/config |
+| `random_seed` | `42` | config |
+
+These are not invented values; they are directly supported by the supplied configuration and paper.
+
+---
+
+## 7. Recommended Internal Parsing Strategy
+
+Although the public design exposes a flat `AppConfig`, it is safer to parse the YAML using internal nested Pydantic helper models.
+
+Example conceptual structure:
+
+```text
+RawConfig
+├── ProjectConfig
+├── TrainingConfig
+├── DataConfig
+├── PathsConfig
+├── SignalsConfig
+├── ProcessingConfig
+├── BackPropagationConfig
+├── SyntheticExperimentsConfig
+├── RealDataExperimentsConfig
+├── OutputsConfig
+└── ReproducibilityConfig
+```
+
+Then convert:
+
+```text
+RawConfig -> AppConfig
+```
+
+This allows strict validation of the YAML while preserving the public `AppConfig` interface required by the design.
+
+The internal helper models should not be relied upon by downstream modules unless they are intentionally exposed later.
+
+---
+
+## 8. `from_yaml(path: Path)` Logic
+
+`AppConfig.from_yaml(path)` should perform the following steps.
+
+### Step 1: Load YAML
+
+Use `yaml.safe_load`.
+
+Input:
+
+```python
+path: Path
+```
+
+Output:
+
+```python
+dict
+```
+
+Failure cases:
+
+- file does not exist,
+- YAML syntax error,
+- top-level object is not a mapping.
+
+---
+
+### Step 2: Validate Raw YAML
+
+Pass the loaded dictionary into the internal Pydantic raw-config model.
+
+This catches:
+
+- missing sections,
+- incorrect scalar types,
+- invalid date/string/list structures where modeled,
+- malformed path fields.
+
+---
+
+### Step 3: Map Nested Values to Flat `AppConfig`
+
+Construct `AppConfig` with:
+
+```text
+cosmic_data_dir          = paths.cosmic2_hr_data_dir
+receiver_orbit_dir      = paths.receiver_orbit_dir
+gnss_orbit_dir          = paths.gnss_orbit_clock_dir
+output_dir              = paths.output_dir
+igrf_model              = data.magnetic_field.model
+sigma_phi_threshold_rad = processing.scintillation_indices.sigma_phi_threshold_rad
+tangent_height_min_km   = processing.tangent_point_filter.min_height_km
+bp_min_distance_km      = back_propagation.distance_grid.min_km
+bp_max_distance_km      = back_propagation.distance_grid.max_km
+bp_step_km              = back_propagation.distance_grid.step_km
+mf_step_km              = back_propagation.magnetic_field_candidate_grid.step_km
+q_threshold             = back_propagation.quality_control.q_threshold
+cos_alpha_threshold     = back_propagation.quality_control.cos_alpha_threshold
+smoothing_window_km     = back_propagation.v_curve.smoothing.window_km
+smoothing_poly_order    = back_propagation.v_curve.smoothing.polynomial_order
+map_bin_deg             = real_data_experiments.monthly_l1_maps.bin_size_deg.latitude
+random_seed             = reproducibility.random_seed
+```
+
+Before assigning `map_bin_deg`, validate:
+
+```text
+latitude bin size == longitude bin size == 3
+```
+
+---
+
+### Step 4: Validate Cross-Field Consistency
+
+After flat mapping, validate:
+
+```text
+bp_min_distance_km = 100
+bp_max_distance_km = 6000
+bp_step_km = 100
+mf_step_km = 100
+```
+
+The implementation should not necessarily hard-fail if the user intentionally changes these values for sensitivity tests, but for faithful reproduction the default configuration should match the paper.
+
+For strict reproduction mode, these should match the supplied values exactly.
+
+---
+
+### Step 5: Return `AppConfig`
+
+Return a validated `AppConfig` instance.
+
+---
+
+## 9. Relationship to Downstream Modules
+
+`src/config.py` is imported by:
+
+- `main.py`
+- `CosmicLoader`
+- `OrbitLoader`
+- `SignalPreprocessor`
+- `StationaryCorrector`
+- `QualityController`
+- `BackpropProcessor`
+- `Geolocator`
+- `SyntheticExperiments`
+- `RealDataExperiments`
+- `ResultWriter`
+
+The following downstream usage must be supported.
+
+---
+
+### 9.1 `QualityController`
+
+Uses:
+
+```python
+config.sigma_phi_threshold_rad
+config.tangent_height_min_km
+config.q_threshold
+config.cos_alpha_threshold
+config.smoothing_window_km
+config.smoothing_poly_order
+config.bp_step_km
+```
+
+These values reproduce the paper’s QC:
+
+- \(\sigma_\phi > 0.25\) rad,
+- tangent height \(> 150\) km,
+- \(Q > 1.2\),
+- \(\cos\alpha > 0.1\),
+- second-order smoothing over 1000 km,
+- L1/L2 monotonic spans at least two 100 km samples.
+
+---
+
+### 9.2 `BackpropProcessor`
+
+Uses:
+
+```python
+config.bp_min_distance_km
+config.bp_max_distance_km
+config.bp_step_km
+config.mf_step_km
+```
+
+These define the nested BP loops:
+
+```text
+L_mf = 100, 200, ..., 6000 km
+L    = 100, 200, ..., 6000 km
+```
+
+---
+
+### 9.3 `MagneticFieldModel`
+
+Uses:
+
+```python
+config.igrf_model
+```
+
+Expected value:
+
+```text
+IGRF-13
+```
+
+This implements the paper’s use of IGRF-13 to define magnetic-field-aligned irregularity orientation.
+
+---
+
+### 9.4 `CosmicLoader` and `OrbitLoader`
+
+Use:
+
+```python
+config.cosmic_data_dir
+config.receiver_orbit_dir
+config.gnss_orbit_dir
+```
+
+These correspond to:
+
+```yaml
+data/cosmic2/hr
+data/cosmic2/orbits
+data/gnss
+```
+
+The config loader should allow these paths to be absent for synthetic-only execution.
+
+---
+
+### 9.5 `ResultWriter`
+
+Uses:
+
+```python
+config.output_dir
+```
+
+Expected value:
+
+```yaml
+outputs
+```
+
+---
+
+### 9.6 `RealDataExperiments`
+
+Uses:
+
+```python
+config.map_bin_deg
+```
+
+Expected value:
+
+```text
+3
+```
+
+This reproduces the monthly maps in \(3^\circ \times 3^\circ\) bins.
+
+---
+
+### 9.7 `SyntheticExperiments`
+
+Uses:
+
+```python
+config.random_seed
+```
+
+Expected value:
+
+```text
+42
+```
+
+Other synthetic parameters such as spectral index \(p=1.5\), outer scale \(l_0=10\) km, and observed \(\sigma_\phi=1.65\) rad are specified in the YAML but are not part of the current public `AppConfig` interface. These should therefore be handled carefully in the experiment module using constants or a future config expansion, but not by inventing undocumented public members in `AppConfig`.
+
+---
+
+## 10. Ambiguities and Design Constraints
+
+### 10.1 Nested YAML Contains More Than `AppConfig`
+
+The YAML contains many fields not present in the design’s `AppConfig`, including:
+
+- `window_seconds`
+- local-time filter hours,
+- L1/L2 comparison dates,
+- F10.7 path,
+- synthetic experiment case details,
+- propagation method default,
+- stationary correction option,
+- output flags.
+
+However, the provided design’s `AppConfig` does not expose these as public fields.
+
+For this implementation stage, `src/config.py` should not silently expand the public interface beyond the design. If later modules need these values, the design should be updated explicitly.
+
+---
+
+### 10.2 `config/default.yaml` vs `config.yaml`
+
+The design file list names:
+
+```text
+config/default.yaml
+```
+
+The supplied configuration is named:
+
+```text
+config.yaml
+```
+
+`AppConfig.from_yaml(path)` should be path-driven and not assume a fixed filename. `main.py` can decide whether the default path is `config/default.yaml` or a user-provided `config.yaml`.
+
+---
+
+### 10.3 Synthetic-Only Runs
+
+The task explicitly requires:
+
+> Validate directories where appropriate but allow missing external datasets during synthetic-only runs.
+
+Because `AppConfig.from_yaml(path)` does not receive the run mode according to the design, it cannot know whether execution is synthetic-only or real-data processing.
+
+Therefore, config loading should not fail solely because external data directories are missing. Real-data modules should perform stronger existence checks when they actually need the files.
+
+---
+
+## 11. Error Handling Requirements
+
+`src/config.py` should raise clear, actionable errors for:
+
+1. Missing YAML file.
+2. Invalid YAML syntax.
+3. Missing required sections or fields.
+4. Invalid numeric ranges.
+5. Inconsistent monthly map bin sizes.
+6. Invalid BP distance grid.
+7. Invalid smoothing configuration.
+8. Invalid magnetic-field model string if unsupported.
+
+For the magnetic-field model, the supplied value is:
+
+```text
+IGRF-13
+```
+
+The implementation should accept this value. If the magnetic-field wrapper later supports aliases, that normalization should remain internal.
+
+---
+
+## 12. Reproducibility Checks
+
+After loading the supplied `config.yaml`, the resulting `AppConfig` should contain:
+
+```text
+cosmic_data_dir          = Path("data/cosmic2/hr")
+receiver_orbit_dir      = Path("data/cosmic2/orbits")
+gnss_orbit_dir          = Path("data/gnss")
+output_dir              = Path("outputs")
+igrf_model              = "IGRF-13"
+sigma_phi_threshold_rad = 0.25
+tangent_height_min_km   = 150
+bp_min_distance_km      = 100
+bp_max_distance_km      = 6000
+bp_step_km              = 100
+mf_step_km              = 100
+q_threshold             = 1.2
+cos_alpha_threshold     = 0.1
+smoothing_window_km     = 1000
+smoothing_poly_order    = 2
+map_bin_deg             = 3
+random_seed             = 42
+```
+
+These values directly correspond to the paper’s methodology and the provided configuration file.
+
+---
+
+## 13. Testing Expectations for `src/config.py`
+
+Unit tests for this module should verify:
+
+1. `AppConfig.from_yaml(valid_path)` returns an `AppConfig`.
+2. All public fields are populated with the expected values from `config.yaml`.
+3. Missing external data directories do not cause failure.
+4. Missing `paths.output_dir` causes validation failure.
+5. Negative `sigma_phi_threshold_rad` causes validation failure.
+6. `bp_max_distance_km <= bp_min_distance_km` causes validation failure.
+7. `bp_step_km <= 0` causes validation failure.
+8. unequal latitude/longitude map bins cause validation failure.
+9. invalid `cos_alpha_threshold`, such as `1.5`, causes validation failure.
+10. invalid `q_threshold <= 1` causes validation failure.
+11. non-integer `random_seed` causes validation failure.
+12. `smoothing_poly_order` loaded from YAML equals `2`.
+
+---
+
+## 14. Summary
+
+`src/config.py` should be a thin but strict reproducibility layer. It should:
+
+- load YAML using `AppConfig.from_yaml(path)`,
+- validate the nested configuration with Pydantic,
+- expose the flat `AppConfig` interface required by the design,
+- preserve paper-defined values exactly,
+- avoid hard-coding scientific parameters elsewhere,
+- allow missing external data paths for synthetic-only runs,
+- and provide clear validation errors for malformed or inconsistent configuration.
+
+The key implementation challenge is reconciling the nested `config.yaml` with the flat `AppConfig` design. The correct approach is to use internal nested parsing models and map them into the public `AppConfig` fields without changing the public interface.

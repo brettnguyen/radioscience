@@ -1,0 +1,3808 @@
+{
+    "paper_id": "",
+    "header": {
+        "generated_with": "S2ORC 1.0.0",
+        "date_generated": "2026-06-26T10:19:08.319180Z"
+    },
+    "title": "Geolocation of the Ionospheric Irregularities in the Equatorial F Layer by Back Propagation of COSMIC-2 Radio Occultation Signals",
+    "authors": [
+        {
+            "first": "S",
+            "middle": [],
+            "last": "Sokolovskiy",
+            "suffix": "",
+            "affiliation": {
+                "laboratory": "",
+                "institution": "University Corporation for Atmospheric Research",
+                "location": {
+                    "settlement": "Boulder",
+                    "region": "CO",
+                    "country": "USA"
+                }
+            },
+            "email": ""
+        },
+        {
+            "first": "I",
+            "middle": [],
+            "last": "Zakharenkova",
+            "suffix": "",
+            "affiliation": {
+                "laboratory": "",
+                "institution": "University Corporation for Atmospheric Research",
+                "location": {
+                    "settlement": "Boulder",
+                    "region": "CO",
+                    "country": "USA"
+                }
+            },
+            "email": ""
+        },
+        {
+            "first": "D",
+            "middle": [
+                "C"
+            ],
+            "last": "Hunt",
+            "suffix": "",
+            "affiliation": {
+                "laboratory": "",
+                "institution": "University Corporation for Atmospheric Research",
+                "location": {
+                    "settlement": "Boulder",
+                    "region": "CO",
+                    "country": "USA"
+                }
+            },
+            "email": ""
+        },
+        {
+            "first": "J",
+            "middle": [
+                "J"
+            ],
+            "last": "Braun",
+            "suffix": "",
+            "affiliation": {
+                "laboratory": "",
+                "institution": "University Corporation for Atmospheric Research",
+                "location": {
+                    "settlement": "Boulder",
+                    "region": "CO",
+                    "country": "USA"
+                }
+            },
+            "email": ""
+        },
+        {
+            "first": "J",
+            "middle": [
+                "P"
+            ],
+            "last": "Weiss",
+            "suffix": "",
+            "affiliation": {
+                "laboratory": "",
+                "institution": "University Corporation for Atmospheric Research",
+                "location": {
+                    "settlement": "Boulder",
+                    "region": "CO",
+                    "country": "USA"
+                }
+            },
+            "email": ""
+        },
+        {
+            "first": "W",
+            "middle": [
+                "S"
+            ],
+            "last": "Schreiner",
+            "suffix": "",
+            "affiliation": {
+                "laboratory": "",
+                "institution": "University Corporation for Atmospheric Research",
+                "location": {
+                    "settlement": "Boulder",
+                    "region": "CO",
+                    "country": "USA"
+                }
+            },
+            "email": ""
+        },
+        {
+            "first": "Iu",
+            "middle": [],
+            "last": "Cherniak",
+            "suffix": "",
+            "affiliation": {
+                "laboratory": "",
+                "institution": "University Corporation for Atmospheric Research",
+                "location": {
+                    "settlement": "Boulder",
+                    "region": "CO",
+                    "country": "USA"
+                }
+            },
+            "email": ""
+        },
+        {
+            "first": "Q",
+            "middle": [],
+            "last": "Wu",
+            "suffix": "",
+            "affiliation": {
+                "laboratory": "",
+                "institution": "University Corporation for Atmospheric Research",
+                "location": {
+                    "settlement": "Boulder",
+                    "region": "CO",
+                    "country": "USA"
+                }
+            },
+            "email": ""
+        },
+        {
+            "first": "T",
+            "middle": [],
+            "last": "Vanhove",
+            "suffix": "",
+            "affiliation": {
+                "laboratory": "",
+                "institution": "University Corporation for Atmospheric Research",
+                "location": {
+                    "settlement": "Boulder",
+                    "region": "CO",
+                    "country": "USA"
+                }
+            },
+            "email": ""
+        }
+    ],
+    "year": "",
+    "venue": null,
+    "identifiers": {},
+    "abstract": "Plasma irregularities in the ionosphere induce scintillation of radio signals. Radio occultation (RO) observations of the Global Navigation Satellite Systems (GNSS) signals from low Earth orbit (LEO) allow monitoring of the ionospheric scintillation. Under certain conditions, it is possible to localize (geolocate) plasma irregularities along the line-of-sight between the GNSS and LEO satellites. While several techniques have been considered for the localization, in this study we use the back propagation (BP) of complex RO signals (phase and amplitude) measured at a high rate (HR), 50-100 Hz. Our method is based on a numerical solution of the wave equation, originally proposed for geolocation in 2002, with some modifications. We consider theoretical aspects of the BP technique, including assumptions, approximations and limitations, and perform numerical modeling of radio wave propagation. We investigate geolocation by BP for two regions with aligned and mis-aligned irregularities and explain multi-valued geolocations. We focus on the equatorial F region, consistent with the COSMIC-2 observation sampling and use the IGRF-13 model of the Earth's magnetic field to define the orientation of plasma irregularities. We use our method for processing of COSMIC-2 HR scintillation data collected from the precise orbit determination antennas for 2 years: 2021 and 2023 (years with low and high solar activity). The results, represented by gridded monthly maps of geolocations, show clear seasonal and interannual variations. Additionally, we present comparison of the geolocations obtained independently from L1 and L2 signals for a 2-month period.",
+    "pdf_parse": {
+        "paper_id": "",
+        "_pdf_hash": "",
+        "abstract": [
+            {
+                "text": "Plasma irregularities in the ionosphere induce scintillation of radio signals. Radio occultation (RO) observations of the Global Navigation Satellite Systems (GNSS) signals from low Earth orbit (LEO) allow monitoring of the ionospheric scintillation. Under certain conditions, it is possible to localize (geolocate) plasma irregularities along the line-of-sight between the GNSS and LEO satellites. While several techniques have been considered for the localization, in this study we use the back propagation (BP) of complex RO signals (phase and amplitude) measured at a high rate (HR), 50-100 Hz. Our method is based on a numerical solution of the wave equation, originally proposed for geolocation in 2002, with some modifications. We consider theoretical aspects of the BP technique, including assumptions, approximations and limitations, and perform numerical modeling of radio wave propagation. We investigate geolocation by BP for two regions with aligned and mis-aligned irregularities and explain multi-valued geolocations. We focus on the equatorial F region, consistent with the COSMIC-2 observation sampling and use the IGRF-13 model of the Earth's magnetic field to define the orientation of plasma irregularities. We use our method for processing of COSMIC-2 HR scintillation data collected from the precise orbit determination antennas for 2 years: 2021 and 2023 (years with low and high solar activity). The results, represented by gridded monthly maps of geolocations, show clear seasonal and interannual variations. Additionally, we present comparison of the geolocations obtained independently from L1 and L2 signals for a 2-month period.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Abstract",
+                "sec_num": null
+            }
+        ],
+        "body_text": [
+            {
+                "text": "The Global Navigation Satellite Systems (GNSS) radio occultation (RO) technique has been used for remote sensing of the neutral atmosphere and ionosphere since 1995 (Hajj & Romans, 1998; Kursinski et al., 1997; Rocken et al., 1997; Schreiner et al., 1999) . Irregularities of electron density in the ionosphere, with scales of about 1 km and larger, cause scintillation of radio signals. Ionospheric scintillation introduces additional noise which degrades the neutral atmosphere profiling (Kursinski et al., 1997; Ludwig-Barbosa et al., 2020; Rocken et al., 1997; Sokolovskiy et al., 2009) . Also, scintillation disrupts radio communications and navigation (Doherty et al., 2003; de Paula et al., 2020; Ishii et al., 2024; Kintner et al., 2007) . The strongest amplitude and phase scintillations occur primarily in the equatorial region where they are induced by the small-scale irregularities embedded in the post-sunset plasma depletions (bubbles) (Kelley, 1989; Tsunoda et al., 1982) . The existence of scintillation indicates the existence of the ionospheric irregularities along the line of sight (LOS) between the GNSS transmitter (Tx) and the receiver (Rx) in low Earth orbit (LEO). However, the location of irregularities along the LOS, generally, is not known. This is shown in Figure 1 . In a most simple approach, the region with irregularities is assigned to the LOS tangent point (Dymond, 2012) . However, under certain conditions, it is possible to localize irregularities more accurately along the LOS. This is useful for studies of the morphology of irregularities. Also, localization of irregularities along the GNSS-LEO LOS may help to predict scintillation on other radio links. Various approaches have been proposed for localization (geolocation) of the ionospheric irregularities (Carrano et al., 2017 (Carrano et al., , 2019)) . In this study, we use the back propagation (BP) method (Carrano et al., 2019; Groves & Carrano, 2022; Ludwig-Barbosa et al., 2023; Sokolovskiy et al., 2002) , which requires HR 50-100 Hz sampling of the complex RO signal (phase and amplitude), to capture the spectrum of scintillation. Geolocation by BP is based on solving the wave equation in a vacuum by using the phase and amplitude, measured on the Rx trajectory, as the boundary condition.",
+                "cite_spans": [
+                    {
+                        "start": 165,
+                        "end": 186,
+                        "text": "(Hajj & Romans, 1998;",
+                        "ref_id": "BIBREF18"
+                    },
+                    {
+                        "start": 187,
+                        "end": 210,
+                        "text": "Kursinski et al., 1997;",
+                        "ref_id": "BIBREF23"
+                    },
+                    {
+                        "start": 211,
+                        "end": 231,
+                        "text": "Rocken et al., 1997;",
+                        "ref_id": "BIBREF30"
+                    },
+                    {
+                        "start": 232,
+                        "end": 255,
+                        "text": "Schreiner et al., 1999)",
+                        "ref_id": "BIBREF31"
+                    },
+                    {
+                        "start": 490,
+                        "end": 514,
+                        "text": "(Kursinski et al., 1997;",
+                        "ref_id": "BIBREF23"
+                    },
+                    {
+                        "start": 515,
+                        "end": 543,
+                        "text": "Ludwig-Barbosa et al., 2020;",
+                        "ref_id": "BIBREF25"
+                    },
+                    {
+                        "start": 544,
+                        "end": 564,
+                        "text": "Rocken et al., 1997;",
+                        "ref_id": "BIBREF30"
+                    },
+                    {
+                        "start": 565,
+                        "end": 590,
+                        "text": "Sokolovskiy et al., 2009)",
+                        "ref_id": "BIBREF34"
+                    },
+                    {
+                        "start": 658,
+                        "end": 680,
+                        "text": "(Doherty et al., 2003;",
+                        "ref_id": "BIBREF12"
+                    },
+                    {
+                        "start": 681,
+                        "end": 703,
+                        "text": "de Paula et al., 2020;",
+                        "ref_id": "BIBREF11"
+                    },
+                    {
+                        "start": 704,
+                        "end": 723,
+                        "text": "Ishii et al., 2024;",
+                        "ref_id": "BIBREF19"
+                    },
+                    {
+                        "start": 724,
+                        "end": 745,
+                        "text": "Kintner et al., 2007)",
+                        "ref_id": "BIBREF21"
+                    },
+                    {
+                        "start": 951,
+                        "end": 965,
+                        "text": "(Kelley, 1989;",
+                        "ref_id": "BIBREF20"
+                    },
+                    {
+                        "start": 966,
+                        "end": 987,
+                        "text": "Tsunoda et al., 1982)",
+                        "ref_id": "BIBREF36"
+                    },
+                    {
+                        "start": 1394,
+                        "end": 1408,
+                        "text": "(Dymond, 2012)",
+                        "ref_id": "BIBREF13"
+                    },
+                    {
+                        "start": 1802,
+                        "end": 1823,
+                        "text": "(Carrano et al., 2017",
+                        "ref_id": "BIBREF9"
+                    },
+                    {
+                        "start": 1824,
+                        "end": 1849,
+                        "text": "(Carrano et al., , 2019))",
+                        "ref_id": "BIBREF7"
+                    },
+                    {
+                        "start": 1907,
+                        "end": 1929,
+                        "text": "(Carrano et al., 2019;",
+                        "ref_id": "BIBREF7"
+                    },
+                    {
+                        "start": 1930,
+                        "end": 1953,
+                        "text": "Groves & Carrano, 2022;",
+                        "ref_id": "BIBREF17"
+                    },
+                    {
+                        "start": 1954,
+                        "end": 1982,
+                        "text": "Ludwig-Barbosa et al., 2023;",
+                        "ref_id": "BIBREF24"
+                    },
+                    {
+                        "start": 1983,
+                        "end": 2008,
+                        "text": "Sokolovskiy et al., 2002)",
+                        "ref_id": "BIBREF33"
+                    }
+                ],
+                "ref_spans": [
+                    {
+                        "start": 1295,
+                        "end": 1296,
+                        "text": "1",
+                        "ref_id": "FIGREF0"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Introduction",
+                "sec_num": "1."
+            },
+            {
+                "text": "Localization by BP relies on several assumptions and approximations. First, plasma irregularities must occupy a limited volume so that wave propagation may be approximately considered using a thin phase screen (PS) approximation (Wernik et al., 2007) . In other words, the phase fluctuations, which develop inside the volume with irregularities, are assigned to the PS while the amplitude fluctuations are considered in the free space after propagation through the PS, where they increase with the distance from the PS to Rx due to focusing/defocusing effects. The amplitude fluctuations of BP radio waves decrease from the Rx to the PS and then increase again from the PS to Tx. Thus, the location of the PS (the volume with irregularities) is estimated from the minimum of the BP amplitude fluctuation. Second, plasma irregularities must be elongated or anisotropic with a significant coefficient of anisotropy. This allows reduction of the three-dimensional (3D) BP problem to the two-dimensional (2D) one. Otherwise, the BP problem is under-determined because the phase and amplitude are measured on a one-dimensional (1D) Rx trajectory. Formal application of the 2D BP does not allow localization of the region with 3D isotropic irregularities (Sokolovskiy et al., 2002) because the transverse propagation effects are not accounted for. Third, the orientation of the irregularities should be known. This allows one to define the plane perpendicular to projection of the irregularities on the PS, project Tx and Rx trajectories onto that plane and solve the 2D wave propagation problem in that plane (hereafter called the BP plane). In this study we focus on the equatorial F region where plasma irregularities inside plasma bubbles commonly have sufficient anisotropy and are aligned with magnetic field lines (Carrano et al., 2011) , both key assumptions of the BP localization technique. This requires the model of magnetic field; in this study we use the IGRF-13 model (Alken et al., 2021) ; links to publicly available source codes and data are available in this paper. Because the location of irregularities along the LOS is not known in advance, the BP is applied for different orientations of the BP plane corresponding to different distances along the LOS where the magnetic field vector is used to define BP plane. This results in different distances from Rx to the minimum of BP amplitude fluctuation. When the distance to the point where the magnetic field model is used to define the BP plane equals the distance to the minimum of BP amplitude fluctuation found in that plane, this distance is considered the distance to irregularities. Yet another limitation of the BP localization technique, related to the orientation of Rx orbit and the structure of magnetic field along the LOS, is discussed in Section 4. 2 of 21 BP has been applied for the GNSS RO signals received in LEO in some previous studies. Mortensen and Hoeg (1998) , Gorbunov and Gurvich (1998) , Ao et al. (2003) applied BP for reduction of the diffraction and multipath effects on RO signals in the troposphere. Sokolovskiy et al. (2013) applied BP for reduction of the errors of ionospheric correction in the stratosphere. Gorbunov et al. (2002) , Cherniak et al. (2019) , Ludwig-Barbosa et al. (2023) applied BP for localization of plasma irregularities in the ionosphere (in the Es and F layers), by explicitly or implicitly assuming their horizontal orientation. In previous studies (Carrano et al., 2019; Groves & Carrano, 2022; Sokolovskiy et al., 2002) and in this study, BP is applied for localization of plasma irregularities in the F layer without an assumption of their horizontal orientation, by modeling the magnetic field instead (results of this study confirm that accounting for the orientation of plasma irregularities is important). Following (Sokolovskiy et al., 2002) , the distance to irregularities is found by BP which is applied for the RO signal in coordinate representation. Carrano et al. (2019) , Groves and Carrano (2022) apply BP for RO signal in time representation by finding the Fresnel frequency corresponding to the region with irregularities. The Fresnel frequency is then converted to distance by using relation to Fresnel radius and scan velocity as the function of the distance along the LOS. We note that Carrano et al. (2017 Carrano et al. ( , 2019 ) also considered other geolocation methods which use different estimates of the Fresnel frequency, but the same conversion to the distance using scan velocity.",
+                "cite_spans": [
+                    {
+                        "start": 229,
+                        "end": 250,
+                        "text": "(Wernik et al., 2007)",
+                        "ref_id": "BIBREF38"
+                    },
+                    {
+                        "start": 1249,
+                        "end": 1275,
+                        "text": "(Sokolovskiy et al., 2002)",
+                        "ref_id": "BIBREF33"
+                    },
+                    {
+                        "start": 1815,
+                        "end": 1837,
+                        "text": "(Carrano et al., 2011)",
+                        "ref_id": "BIBREF8"
+                    },
+                    {
+                        "start": 1977,
+                        "end": 1997,
+                        "text": "(Alken et al., 2021)",
+                        "ref_id": "BIBREF0"
+                    },
+                    {
+                        "start": 2922,
+                        "end": 2947,
+                        "text": "Mortensen and Hoeg (1998)",
+                        "ref_id": "BIBREF27"
+                    },
+                    {
+                        "start": 2950,
+                        "end": 2977,
+                        "text": "Gorbunov and Gurvich (1998)",
+                        "ref_id": "BIBREF15"
+                    },
+                    {
+                        "start": 2980,
+                        "end": 2996,
+                        "text": "Ao et al. (2003)",
+                        "ref_id": "BIBREF1"
+                    },
+                    {
+                        "start": 3097,
+                        "end": 3122,
+                        "text": "Sokolovskiy et al. (2013)",
+                        "ref_id": "BIBREF35"
+                    },
+                    {
+                        "start": 3209,
+                        "end": 3231,
+                        "text": "Gorbunov et al. (2002)",
+                        "ref_id": "BIBREF16"
+                    },
+                    {
+                        "start": 3234,
+                        "end": 3256,
+                        "text": "Cherniak et al. (2019)",
+                        "ref_id": "BIBREF10"
+                    },
+                    {
+                        "start": 3259,
+                        "end": 3287,
+                        "text": "Ludwig-Barbosa et al. (2023)",
+                        "ref_id": "BIBREF24"
+                    },
+                    {
+                        "start": 3472,
+                        "end": 3494,
+                        "text": "(Carrano et al., 2019;",
+                        "ref_id": "BIBREF7"
+                    },
+                    {
+                        "start": 3495,
+                        "end": 3518,
+                        "text": "Groves & Carrano, 2022;",
+                        "ref_id": "BIBREF17"
+                    },
+                    {
+                        "start": 3519,
+                        "end": 3544,
+                        "text": "Sokolovskiy et al., 2002)",
+                        "ref_id": "BIBREF33"
+                    },
+                    {
+                        "start": 3846,
+                        "end": 3872,
+                        "text": "(Sokolovskiy et al., 2002)",
+                        "ref_id": "BIBREF33"
+                    },
+                    {
+                        "start": 3986,
+                        "end": 4007,
+                        "text": "Carrano et al. (2019)",
+                        "ref_id": "BIBREF7"
+                    },
+                    {
+                        "start": 4010,
+                        "end": 4035,
+                        "text": "Groves and Carrano (2022)",
+                        "ref_id": "BIBREF17"
+                    },
+                    {
+                        "start": 4330,
+                        "end": 4350,
+                        "text": "Carrano et al. (2017",
+                        "ref_id": "BIBREF9"
+                    },
+                    {
+                        "start": 4351,
+                        "end": 4374,
+                        "text": "Carrano et al. ( , 2019",
+                        "ref_id": "BIBREF7"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Introduction",
+                "sec_num": "1."
+            },
+            {
+                "text": "In this study, we apply BP for COSMIC-2 (Constellation Observing System for Meteorology, Ionosphere and Climate) HR phase and amplitude data. COSMIC-2 is a constellation of six low-inclination (24 deg) LEO satellites (orbit height \u223c550 km) with GNSS receivers and antennas designed for RO sensing of the neutral atmosphere and ionosphere in low to middle latitudes, and is well suitable for monitoring of the equatorial scintillation (Schreiner et al., 2020; Weiss et al., 2022) .",
+                "cite_spans": [
+                    {
+                        "start": 434,
+                        "end": 458,
+                        "text": "(Schreiner et al., 2020;",
+                        "ref_id": "BIBREF32"
+                    },
+                    {
+                        "start": 459,
+                        "end": 478,
+                        "text": "Weiss et al., 2022)",
+                        "ref_id": "BIBREF37"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Introduction",
+                "sec_num": "1."
+            },
+            {
+                "text": "The paper is structured as follows. Section 1 introduces the problem. Before describing our geolocation algorithm, the COSMIC-2 scintillation data, and the results of data processing, we perform numerical modeling of the forward and back radio wave propagation. Section 2 describes the goals of this modeling and details of the forward propagation (FP) and BP for different scenarios which include geolocation in the presence of two regions with aligned and mis-aligned irregularities. Section 3 describes specific details of BP for real observational geometry including reduction of the problem from 3D to 2D, approximation of the stationary transmitter and correction of the curvature of wave front. Section 4 describes the COSMIC-2 HR scintillation data and the BP algorithm applied for geolocation of plasma irregularities at the COSMIC Data Analysis and Archive Center (CDAAC). Section 4 also includes examples of geolocations and provides an explanation of the multi-valued solutions. Section 5 presents monthly distributions of plasma irregularities in the equatorial F-layer obtained by the geolocation algorithm for two separate years, 2021 and 2023 (representing low and high solar activity) and compares geolocations obtained by processing L1 and L2 scintillation data during the 2-month test period. Section 6 discusses and summarizes the results.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Introduction",
+                "sec_num": "1."
+            },
+            {
+                "text": "In this section, we model FP and BP to investigate the following effects: (a) estimation of the geolocation error related to the error of assumed orientation of irregularities; (b) modeling of geolocation in the case of two regions with the same orientation of irregularities; (c) modeling of geolocation in the case of two regions with different orientations of irregularities. For modeling of the ionospheric scintillation, a region with irregularities may be represented by multiple PSs (Carrano et al., 2011; Ludwig-Barbosa et al., 2020 , 2023; Sokolovskiy et al., 2002) or by a single PS (Carrano et al., 2012a (Carrano et al., , 2012b;; Rino et al., 2019; Sokolovskiy et al., 2002) . We use the approximation of a single PS and an incident plane wave, which are sufficient for investigation of the effects in this section. As was mentioned earlier, the BP which uses observations on 1D trajectory is always 2D. However, the FP may be 2D or 3D depending on the investigated effect. For the effects (1, 2) the 2D FP is sufficient. For the effect (3) the 3D FP is applied.",
+                "cite_spans": [
+                    {
+                        "start": 490,
+                        "end": 512,
+                        "text": "(Carrano et al., 2011;",
+                        "ref_id": "BIBREF8"
+                    },
+                    {
+                        "start": 513,
+                        "end": 540,
+                        "text": "Ludwig-Barbosa et al., 2020",
+                        "ref_id": "BIBREF25"
+                    },
+                    {
+                        "start": 541,
+                        "end": 548,
+                        "text": ", 2023;",
+                        "ref_id": "BIBREF24"
+                    },
+                    {
+                        "start": 549,
+                        "end": 574,
+                        "text": "Sokolovskiy et al., 2002)",
+                        "ref_id": "BIBREF33"
+                    },
+                    {
+                        "start": 593,
+                        "end": 615,
+                        "text": "(Carrano et al., 2012a",
+                        "ref_id": "BIBREF5"
+                    },
+                    {
+                        "start": 616,
+                        "end": 642,
+                        "text": "(Carrano et al., , 2012b;;",
+                        "ref_id": "BIBREF6"
+                    },
+                    {
+                        "start": 643,
+                        "end": 661,
+                        "text": "Rino et al., 2019;",
+                        "ref_id": "BIBREF29"
+                    },
+                    {
+                        "start": 662,
+                        "end": 687,
+                        "text": "Sokolovskiy et al., 2002)",
+                        "ref_id": "BIBREF33"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Numerical Modeling of the Forward and Back Wave Propagation",
+                "sec_num": "2."
+            },
+            {
+                "text": "Figure 2 shows layout of the FP and BP in the case of PS with 1D irregularities. In this case, the wave field does not depend on y and it is sufficient to use the 2D FP in the xz plane. The wave field which would be measured on the Rx trajectory z\u02b9 is projected on z = z\u02b9 cos \u03b1, where \u03b1 is the scan angle. In this section, we assume that Rx trajectory is a straight line perpendicular to wave propagation direction, which is sufficient for investigation of the effects mentioned above. Thus, the BP is applied in the xz plane perpendicular to irregularities on the PS.",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 7,
+                        "end": 8,
+                        "text": "2",
+                        "ref_id": "FIGREF1"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Numerical Modeling of the Forward and Back Wave Propagation",
+                "sec_num": "2."
+            },
+            {
+                "text": "10.1029/2024RS008081",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "We use the solution of the wave equation in a vacuum by expansion in a series of plane waves (this solution neglects back scattered waves and is equivalent to solving the parabolic wave equation (Knepp, 1983) ). The complex amplitude of an incident 2D plane wave is: u(x, z) = A 0 exp(ikx) where k = 2\u03c0/\u03bb is the wave number, \u03bb is the wavelength, and A 0 is the amplitude. The PS at x = x 0 introduces the phase delay/advance S 0 (z) . The complex amplitude on output of the PS u out (z) = A 0 exp[ikx 0 + ikS 0 (z) ] is used as the boundary condition and expanded in the Fourier series: u out (z) = \u2211 m c m exp ik zm z) , where m is the number of harmonic and c m are Fourier coefficients. Each harmonic is associated with the 2D plane wave with the wave number",
+                "cite_spans": [
+                    {
+                        "start": 195,
+                        "end": 208,
+                        "text": "(Knepp, 1983)",
+                        "ref_id": "BIBREF22"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "k = \u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305 k 2 zm + k 2 xm \u221a",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": ". The plane waves are summated at another distance x where the solution is:",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "u(x, z) = A(x, z) exp [ikS(x, z)] = \u2211 m c m exp[ik zm z + i \u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305 k 2 k 2 zm \u221a (x x 0 )] (1)",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "The same solution is applied for BP, by using u(z) on the BP trajectory x = x BP as the boundary condition and replacing x x 0 by x x BP .",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "We use the 1D model of random phase irregularities on the PS, S 0 (z) , with the 1D power spectrum (Rino, 1979) :",
+                "cite_spans": [
+                    {
+                        "start": 99,
+                        "end": 111,
+                        "text": "(Rino, 1979)",
+                        "ref_id": "BIBREF28"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "\u03a6 k z ) \u223c k 2 0 + k 2 z ) p/2 (2)",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "where p is the spectral power index (which characterizes the slope of the spectrum in logarithm representation when k z \u226b k 0 ) and k 0 = 2\u03c0/ l 0 is the wavenumber corresponding to the outer scale l 0 of random irregularities. Both parameters, k 0 and p, can be estimated by FP modeling and comparing results to observational data by using different metrics. Figure 3a shows power spectra of the intensity fluctuations modeled for p = 1, 1.5, 2, by using l 0 = 10 km and the distance between PS and Rx L = 1, 900 km (the latter two numbers are explained below).",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 366,
+                        "end": 368,
+                        "text": "3a",
+                        "ref_id": "FIGREF2"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "Red lines show approximations of the spectral slopes which are approximately equal to 2p. For p = 1.5, the spectral slope 3.05 is consistent with the value \u223c3.1 obtained from scintillation data by Carrano et al. (2011) . In that study, they used outer scale l 0 = 10 km obtained from in situ measurements (Basu et al., 1983) . However, l 0 also can be obtained from the scintillation observations alone using the fact that for a given magnitude of the phase irregularities, the larger is their scale the smaller is their effect on amplitude. The outer scale affects the shape of the spectrum (2) that is, distribution of the phase irregularities with different scales, thus affecting the magnitude of the amplitude fluctuations for a given magnitude of the phase fluctuations. As the metric, we use the ratio of the phase and intensity scintillation indices, ",
+                "cite_spans": [
+                    {
+                        "start": 197,
+                        "end": 218,
+                        "text": "Carrano et al. (2011)",
+                        "ref_id": "BIBREF8"
+                    },
+                    {
+                        "start": 305,
+                        "end": 324,
+                        "text": "(Basu et al., 1983)",
+                        "ref_id": "BIBREF2"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "\u03c3 \u03d5 = k <S 2 > <S> 2 ) 1/ 2 and S 4 = (<A 4 > <A 2 > 2 ) 1/ 2 / < A 2 >. It",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "10.1029/2024RS008081",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "is important that for a given l 0 and distance L from PS to Rx, the \u03c3 \u03d5 / S 4 does not depend on \u03c3 \u03d5 . However, the \u03c3 \u03d5 / S 4 substantially depends on l 0 and on L. This follows from Figure 2b which shows \u03c3 \u03d5 / S 4 as functions of l 0 for different L (indicated in the figure) obtained by FP by using the spectrum (2). From statistical analysis of COSMIC-2 scintillation and geolocation data used in Section 5, it follows: <\u03c3 \u03d5 > \u2245 1.65 rad, <S 4 > \u2245 0.32, <\u03c3 \u03d5 / S 4 > \u2245 5.25 rad, <L > \u2245 1, 900 km. As seen from Figure 2b , this provides an estimate of the outer scale <l 0 > \u2245 9.7 km. This result, obtained from the scintillation data alone, is close to that obtained from in situ measurements (Basu et al., 1983) . In this study, for the FP, we will use the spectrum (2) with p = 1.5 and l 0 = 10 km.",
+                "cite_spans": [
+                    {
+                        "start": 696,
+                        "end": 715,
+                        "text": "(Basu et al., 1983)",
+                        "ref_id": "BIBREF2"
+                    }
+                ],
+                "ref_spans": [
+                    {
+                        "start": 190,
+                        "end": 192,
+                        "text": "2b",
+                        "ref_id": "FIGREF1"
+                    },
+                    {
+                        "start": 520,
+                        "end": 522,
+                        "text": "2b",
+                        "ref_id": "FIGREF1"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "Figure 4a , by using gray scale, shows the amplitude of the FP wave (from Tx to Rx) as the function of distance L = x x 0 from the PS with random phase S 0 (z) located at x 0 = 0. It is seen that amplitude fluctuations develop after propagation through the PS and increase with the distance L due to random focusing/defocusing. Figure 4b shows amplitude of the BP wave (from Rx to Tx). It is seen that amplitude fluctuations first decrease, have minimum at the location of the PS and then increase again. Figure 4c shows normalized BP amplitude variance V = < A 2 > / <A> 2 1 as the function of distance L. Location of the PS corresponds to the minimum of V. The function V(L) is the main function used for geolocation.",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 7,
+                        "end": 9,
+                        "text": "4a",
+                        "ref_id": "FIGREF3"
+                    },
+                    {
+                        "start": 335,
+                        "end": 337,
+                        "text": "4b",
+                        "ref_id": "FIGREF3"
+                    },
+                    {
+                        "start": 512,
+                        "end": 514,
+                        "text": "4c",
+                        "ref_id": "FIGREF3"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "For 2D radio waves, projecting the signal from the observation trajectory to the BP plane is equivalent to scaling z\u02b9 coordinate by a factor cos(\u03b1) , that is, z = z\u02b9 cos(\u03b1), as this is shown in Figure 2 . An error \u2206\u03b1 is equivalent to fractional error of the scaling factor tan(\u03b1) \u2206 \u03b1 which is illustrated in Figure 5 (left panel). Smaller or larger scaling factor results in finding the minimum of V(L) closer to or farther away from Rx compared to true location of the PS as shown in Figure 5 (right panel). Also, for a given fractional error of the scaling factor, the geolocation error increases with the distance L from Rx to irregularities; this also is shown in Figure 5 (right panel). Numerical modeling of FP and BP shows that for a given error \u2206\u03b1, the geolocation error \u2206L can be approximated by the linear function of distance L (consistent with scattering of radio waves at small angles):",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 201,
+                        "end": 202,
+                        "text": "2",
+                        "ref_id": "FIGREF1"
+                    },
+                    {
+                        "start": 315,
+                        "end": 316,
+                        "text": "5",
+                        "ref_id": "FIGREF4"
+                    },
+                    {
+                        "start": 492,
+                        "end": 493,
+                        "text": "5",
+                        "ref_id": "FIGREF4"
+                    },
+                    {
+                        "start": 675,
+                        "end": 676,
+                        "text": "5",
+                        "ref_id": "FIGREF4"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Geolocation Error Related to the Error of Anticipated Orientation of Irregularities",
+                "sec_num": "2.1."
+            },
+            {
+                "text": "\u2206L = 2 L tan(\u03b1)\u2206\u03b1",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Geolocation Error Related to the Error of Anticipated Orientation of Irregularities",
+                "sec_num": "2.1."
+            },
+            {
+                "text": "(3) ",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Geolocation Error Related to the Error of Anticipated Orientation of Irregularities",
+                "sec_num": "2.1."
+            },
+            {
+                "text": "10.1029/2024RS008081",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "According to Matteo and Morton (2011) , a magnetic field model such as IGRF is accurate to about 1% more than 90% of the time. Table 1 shows examples of geolocation error \u2206L for different \u03b1 and L by using fractional model error 1% as the proxy for angular error of magnetic field vector \u2206\u03b1 \u223c 0.6\u00b0. The goal of this table is not to provide accurate numbers for \u2206L (those numbers, obtained from the modeling, represent lower estimates), but to demonstrate the substantial dependency of \u2206L on \u03b1 and L, which are different for different geolocations. Thus, \u2206L can be estimated individually for each geolocation. ",
+                "cite_spans": [
+                    {
+                        "start": 13,
+                        "end": 37,
+                        "text": "Matteo and Morton (2011)",
+                        "ref_id": "BIBREF26"
+                    }
+                ],
+                "ref_spans": [
+                    {
+                        "start": 133,
+                        "end": 134,
+                        "text": "1",
+                        "ref_id": "TABREF0"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "10.1029/2024RS008081",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "One of the assumptions for geolocation by BP is the representation of irregularities by the PS. This also implies that there is one region with irregularities. Here we model geolocation for two regions, each represented by PS with the same orientation of irregularities. Such modeling was done by Ludwig-Barbosa et al. ( 2023) and our goal is comparison and verification.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Modeling of Geolocation for Two Phase Screens With the Same Orientation of Irregularities",
+                "sec_num": "2.2."
+            },
+            {
+                "text": "Figure 6 shows layout of the FP and BP for 2 PSs. Figure 7a shows functions V(L) for the separation distance 1,000 km between the PSs (similar results are obtained for other separation distances). The magnitude of phase fluctuation \u03c3 \u03d5 is the same for both PSs. Lines 1 and 2 show V(L) for only one of the PSs, either 1 or 2. Line 3 shows V(L) for both PSs 1 and 2. It is seen that locations of the 2 PSs cannot be resolved by BP. Figure 7b shows V(L) when both PSs are present but \u03c3 \u03d5 for one of the PSs (1 or 2) is 1.5 times larger than for another PS. It is seen that for the PSs with different \u03c3 \u03d5 , only the PS with larger \u03c3 \u03d5 can be localized by BP regardless of whether it is closer to or farther away from Rx, while another one cannot be localized. Overall, this result is consistent with that obtained earlier by Ludwig-Barbosa et al. (2023) . In our modeling we also see subtle increase of V(L) between PSs 1 and 2 (Figure 7a , line 3) and subtle difference of the minima 1 and 2 with the shift of minimum 1 toward 2, similar to those described by Ludwig-Barbosa et al. ( 2023), but we consider these effects insignificant as practically they most likely will be overshadowed by the difference of \u03c3 \u03d5 on the PSs and other unmodelled effects.",
+                "cite_spans": [
+                    {
+                        "start": 822,
+                        "end": 850,
+                        "text": "Ludwig-Barbosa et al. (2023)",
+                        "ref_id": "BIBREF24"
+                    }
+                ],
+                "ref_spans": [
+                    {
+                        "start": 7,
+                        "end": 8,
+                        "text": "6",
+                        "ref_id": null
+                    },
+                    {
+                        "start": 57,
+                        "end": 59,
+                        "text": "7a",
+                        "ref_id": "FIGREF5"
+                    },
+                    {
+                        "start": 438,
+                        "end": 440,
+                        "text": "7b",
+                        "ref_id": "FIGREF5"
+                    },
+                    {
+                        "start": 933,
+                        "end": 935,
+                        "text": "7a",
+                        "ref_id": "FIGREF5"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Modeling of Geolocation for Two Phase Screens With the Same Orientation of Irregularities",
+                "sec_num": "2.2."
+            },
+            {
+                "text": "Modeling of geolocation for different orientations of irregularities in different regions, to our knowledge, has not previously been considered. The goal of this modeling is to understand whether different orientations may allow localizing one of the regions when \u03c3 \u03d5 are equal or close for both regions. This modeling requires 3D FP which is performed similarly to the 2D FP (1), by expansion of the complex amplitude of radio waves in a series of plane waves in space. The complex amplitude after propagation of the incident plane wave A 0 exp (ikx) through the 2D PS with the phase S 0 ( y, z) is: ",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Modeling of Geolocation for Two Phase Screens With Different Orientations of Irregularities",
+                "sec_num": "2.3."
+            },
+            {
+                "text": "10.1029/2024RS008081 u(x, y, z) = A(x, y, z) exp[ikS(x, y, z)] = = \u2211 mn c mn exp[ik zm z + ik yn y + i \u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305 \u0305 k 2 k 2 zm k 2 yn \u221a (x x 0 )] (4)",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "Figure 8 shows the layout of FP and BP for 2 PSs with different orientations of the phase irregularities; the \u03c3 \u03d5 are set equal for both PSs. In this modeling, we set z as the Rx trajectory and use the 2D spectrum of S 0 ( y, z) :",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 7,
+                        "end": 8,
+                        "text": "8",
+                        "ref_id": "FIGREF6"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "\u03a6 k y , k z ) \u223c [k 2 0 + k y cos \u03b1 + k z sin \u03b1) 2 ] \u03bd \u03b4 k z cos \u03b1 k y sin \u03b1) (5)",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "where \u03b4(k) is the delta function. Figure 9 , by using gray scale, shows the 2D amplitude A( y, z) on the observational plane after propagation through only 1st (a), only 2nd (b) and through both PSs (c). It is important that after propagation through both PSs, the radio wave field becomes 2D on an observational plane. This means that ",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 41,
+                        "end": 42,
+                        "text": "9",
+                        "ref_id": "FIGREF7"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "10.1029/2024RS008081 projection of the signal from Rx trajectory on the BP plane, which implies the 1D radio wave field, formally does not have physical meaning (as it was mentioned earlier in Section 1). However, such a projection has to be applied in real processing which is based on the assumption of a single region (PS) with elongated irregularities.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "In our testing, we set different angles \u03b1 1 and \u03b1 2 between the Rx trajectory and normal directions to irregularities on PSs 1 and 2. Next, we apply 3D FP and use the 2D signal, originally modeled on ( y, z) plane, along z axis (Rx trajectory) only. Then we project this 1D signal on z 1 and z 2 directions and apply BP. Figure 10a shows functions V(L) for \u03b1 1 = 30\u00b0(red) and \u03b1 2 = 60\u00b0(blue). It is seen that only PS 1 is localized correctly. Figure 10b shows functions V(L) when the PSs 1 and 2 are swapped, that is, \u03b1 1 = 60\u00b0(red) and \u03b1 2 = 30\u00b0(blue). In this case only PS 2 is localized correctly. Examples in Figure 10 and results of a more detailed modeling (not shown) confirm that out the 2 PSs with the same \u03c3 \u03d5 but different angles \u03b1 1 and \u03b1 2 only the PS with smaller \u03b1 can be localized correctly, regardless of whether it is closer to or farther away from Rx. Naturally, the possibility to correctly localize the PS with smaller \u03b1 reduces with the reduction of the difference between \u03b1 1 and \u03b1 2 (vanishes when \u03b1 1 = \u03b1 2 , i.e. for aligned irregularities considered in Section 2a). Thus, the angle \u03b1 for 2 PSs with mis-aligned irregularities plays the role similar to \u03c3 \u03d5 for the 2 PSs with aligned irregularities. In the first case, only the PS with larger \u03c3 \u03d5 is localizable by BP while in the second case only the PS with smaller \u03b1 is localizable by BP. An important difference is that for a single PS or 2 PSs with aligned 1D irregularities localization by BP formally does not depend on the orientation of Rx trajectory, while for the PSs with mis-aligned irregularities it does depend. Naturally, real plasma irregularities in multiple regions may have different \u03c3 \u03d5 and different \u03b1 and one or another factor may be dominant for localization. Here we investigate the effect of receiver thermal noise on the shape of the function V(L) for the signal to noise ratios (SNRs) specific to the observations used in this study discussed in Section 4. The average SNR for the COSMIC-2 scintillation observations is about 400 V/V, and more than 90% of the geolocations are observed with the SNRs between 200 and 600 V/V. We note that the SNR provided by receiver is defined in the 1-Hz band and for higher-rate observations it is lower by a factor of 1/ \u0305\u0305\u0305 f s \u221a where f s is the sampling rate in Hz. Thermal noise is the additive noise on a complex signal u = u 1 + iu 2 = A exp(i\u03d5) where u 1 and u 2 are in-phase and quadrature components,",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 328,
+                        "end": 331,
+                        "text": "10a",
+                        "ref_id": "FIGREF8"
+                    },
+                    {
+                        "start": 450,
+                        "end": 453,
+                        "text": "10b",
+                        "ref_id": "FIGREF8"
+                    },
+                    {
+                        "start": 620,
+                        "end": 622,
+                        "text": "10",
+                        "ref_id": "FIGREF8"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "A = \u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305 u 2 1 + u 2 2 \u221a is",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "the amplitude and \u03d5 = arctan(u 2 / u 1 ) is the phase (in radians). For the open loop tracking, SNR = \u03c3 u1 /A = \u03c3 u2 /A where \u03c3 u1 and \u03c3 u2 are standard deviations of the u 1 and u 2 . From this definition, it can be readily obtained \u03c3 \u03d5 = 1/ SNR (in radians). For example, for the 1-Hz SNR = 400 V/V, the effect of thermal noise on the phase of the signal sampled at f s = 100 Hz corresponds to \u03c3 \u03d5 = 1/ 40 = 0.025 rad. Next, we need a relation between sampling in time and in spatial coordinate which only is used in the modeling. It is established by",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "Rx velocity projected on the BP plane, that is, dz/dt = (dz \u02b9/dt ) cos \u03b1 which theoretically, for the observations from LEO, can be anywhere between zero and 7 km/s, but commonly is between 2 and 4 km/s. For our estimates, we assume dz/dt = 4 km/s and f s = 100 Hz which results in 40 m sampling intervals. In our modeling we use 40-km interval in z (windowed to \u223c35 km to eliminate the end effects) and 10 m steps. Thus, we further increase the standard deviations of random noises added to u 1 and u 2 by a factor of 2.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "Figure 11 shows results of our modeling of the effect of noise on the function V(L) for the PS at 2,000 km from Rx which is close to average geolocation distance observed in the processing (introduced earlier in this section). We use the two values of \u03c3 \u03d5 . Panel A shows functions V(L) for \u03c3 \u03d5 = 1.65 rad which is the average \u03c3 \u03d5 observed in the geolocation processing (introduced earlier in this section). Different lines shown by different colors correspond to different SNR values (explained in the figure). Panel B, by using the same vertical scale as in panel A, shows V(L) for \u03c3 \u03d5 = 0.25 rad which is 10 times larger than \u03c3 \u03d5 induced by thermal noise for the average 1-Hz SNR = 400 V/ V. Panel C shows the same as panel B, but using different vertical scale to see the shapes of the functions V(L) . A distinctive feature of the effect of noise in our modeling is that the shape of the function V(L) remains unchanged, but the whole function V(L) is shifted up by increasing its value at the minimum. This affects detection of the minimum of V(L) by using the metric introduced in Section 4. For \u03c3 \u03d5 = 1.65 rad the minimum of V(L) is well detectable at any SNR while for \u03c3 \u03d5 = 0.25 rad it is detectable at high SNR and marginally or not detectable at low SNR. ",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 7,
+                        "end": 9,
+                        "text": "11",
+                        "ref_id": "FIGREF9"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "10.1029/2024RS008081",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "Solving the wave equation by expansion in the series of plane waves, used for modeling of FP and BP in Section 2, is not directly applicable for BP of real observed RO signals. First, the phase and amplitude of radio waves are measured on a LEO trajectory that is not a straight line perpendicular to the propagation direction. Second, the solution of the wave equation implies that Tx is not moving with respect to plasma irregularities (PS). Third, the incident wave is not a plane wave, that is, a finite distance to Tx results in the finite curvature of the wave front which changes after projection of the signal from Rx trajectory on the BP plane. Next we consider BP for real observational geometry.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "For stationary 2D radio waves with the complex amplitude u(r\u02b9) defined on an arbitrary trajectory, as shown in Figure 12 , the complex amplitude u(r) representing solution of wave equation in a vacuum is given by the diffraction integral (Born & Wolf, 1999; Sommerfeld, 1964) (aka Kirchhoff's integral):",
+                "cite_spans": [
+                    {
+                        "start": 238,
+                        "end": 257,
+                        "text": "(Born & Wolf, 1999;",
+                        "ref_id": "BIBREF4"
+                    },
+                    {
+                        "start": 258,
+                        "end": 275,
+                        "text": "Sommerfeld, 1964)",
+                        "ref_id": null
+                    }
+                ],
+                "ref_spans": [
+                    {
+                        "start": 118,
+                        "end": 120,
+                        "text": "12",
+                        "ref_id": "FIGREF1"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "EQUATION",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [
+                    {
+                        "start": 0,
+                        "end": 8,
+                        "text": "EQUATION",
+                        "ref_id": "EQREF",
+                        "raw_str": "u(x, z) = u(r) = \u0305\u0305\u0305\u0305\u0305\u0305 k 2\u03c0 \u221a \u222b u(r \u02b9 ) cos \u03d5 exp (ik|r r\u02b9| + i\u03c0/4) \u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305 |r r\u02b9| \u221a dr\u02b9 (",
+                        "eq_num": "6"
+                    }
+                ],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": ")",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "where \u03d5 is the angle between the normal to r\u02b9 trajectory and the direction to r, as shown in Figure 12 . The advantage of this solution over expansion into a series of plain waves (used for modeling in Section 2) is that both r \u02b9 and r trajectories can be arbitrary. The disadvantage is the increased numerical noise when r is close to Rx trajectory. In this case the region essential for integration (Fresnel's zone) is reduced and becomes comparable to the distance between samples.",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 100,
+                        "end": 102,
+                        "text": "12",
+                        "ref_id": "FIGREF1"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "Reduction of BP from 3D to 2D for real observational geometry is explained in Figure 13 . The positions of Tx and Rx at the mid-point of the interval used for BP are connected by a straight line (x direction). The vector of the magnetic field \u20d7 H (shown in green) represented by IGRF-13 model is taken at the anticipated location of irregularities assumed to be represented by the PS to which BP is performed (determination of the location of irregularities is discussed in Section 4). Vector \u20d7 H is projected on the PS, by defining the y direction, as shown in Figure 13 . We note that only the direction of \u20d7 H (not the magnitude), which has the angle \u03b2 with the y direction, is The scan angle \u03b1 represents the angle between the LOS scan trajectory on the PS and the BP plane. For immovable Tx, the scan angle \u03b1 is equal to that used in numerical modeling in Section 2. Angles \u03b1 and \u03b2 shown in Figure 13 have the following meaning. When \u03b1 is close to \u03c0/2, the LOS scans the irregularities along their orientation direction, and thus does not induce scintillation along the Rx trajectory. When \u03b2 is close to \u03c0/2, the LOS is aligned with the irregularities. Although in this case scintillation is induced, the BP cannot be reduced to 2D and its formal application does not allow localization of the irregularities.",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 85,
+                        "end": 87,
+                        "text": "13",
+                        "ref_id": "FIGREF2"
+                    },
+                    {
+                        "start": 569,
+                        "end": 571,
+                        "text": "13",
+                        "ref_id": "FIGREF2"
+                    },
+                    {
+                        "start": 903,
+                        "end": 905,
+                        "text": "13",
+                        "ref_id": "FIGREF2"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "Next, we consider a 2D BP problem in the (x, z) plane, as shown in Figure 14 . Because of the Tx motion, the radio wave field after propagation through irregularities, generally, is not stationary and formally none of the solutions (diffraction integral or expansion in series of plane waves) applies. However, approximation of the irregularities by PS allows correction of the Tx and Rx positions, which makes the radio wave field on the corrected Rx trajectory approximately stationary, as explained in Figure 14 . The x axis is defined as the straight line between Tx and Rx at the time corresponding to middle point of the interval used for BP. The PS with irregularities is set at x = 0. The stationary Tx is fixed at x = x 10 , z = 0. At any other time, the straight line between Tx (x 1 , z 1 ) and Rx (x 2 , z 2 ) crosses the PS at the height z s = z 1 x 1 (z 2 z 1 )/ (x 2 x 1 ) . The Rx coordinates (x 2 , z 2 ) are changed to (x 2 \u02b9,z 2 \u02b9 ) in such a way that straight line between the stationary Tx and Rx crosses the PS at the same height z s . We consider two options. In the first option, x 2 remains unchanged",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 74,
+                        "end": 76,
+                        "text": "14",
+                        "ref_id": "FIGREF11"
+                    },
+                    {
+                        "start": 512,
+                        "end": 514,
+                        "text": "14",
+                        "ref_id": "FIGREF11"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "x 2 \u02b9 = x 2 while in the second option x 2 is replaced by x 2 \u02b9 = x 20 corresponding to Rx position at the middle point. In both options z 2 is replaced by z 2 \u02b9 = z s (1 x 2 \u02b9/ x 10 ) . The corrected phase S\u02b9 is obtained by adding the observed excess phase S exc = S L tr where",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "L tr = \u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305 \u0305 (x 2 x 1 ) 2 + (z 2 z 1 ) 2 \u221a is the distance between Tx and Rx to corrected distance L\u02b9 tr = \u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305\u0305 \u0305 (x 2 \u02b9 x 10 ) 2 + z 2 \u02b9 2 \u221a",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": ", that is, S\u02b9 = S exc + L\u02b9 tr . The amplitude is not corrected A\u02b9 = A. The corrected signal on the corrected Rx trajectory which corresponds to the stationary Tx is used for BP to x = 0.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "The correction of the Tx and Rx positions uses the approximation of straight-line rays and neglects diffraction effects in a vacuum at short distances (compared to the distance Tx-Rx). Option 1 (x 2 \u02b9 = x 2 ) minimizes the difference of the diffraction effects between the original and corrected Tx and Rx trajectories. This option is suitable for calculation of the diffraction integral (Equation 4). Option 2 (x 2 \u02b9 = x 20 ) does not account for diffraction effects between x 2 and x 20 (x 2",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "x 20 depends on the slope of Rx trajectory), but it represents the stationary radio wave field on the trajectory perpendicular to propagation direction. After interpolation of the signal (phase and amplitude) onto a uniform z 2 \u02b9 grid, this option is suitable for solving the wave equation by expansion in the series of plane waves.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "Projection of the observation trajectory and the observed signal on the BP plane implies an incident plane wave. A finite distance R between Tx and Rx corresponds to a spherical wave with the wave front curvature radius R. The projection to the BP plane (as shown in Figure 13 ) changes (reduces) the wave front curvature radius from R to R 1 = R cos 2 \u03b1, resulting in geolocation error which increases with the distance and the scan angle \u03b1. To correct for this error, the quadratic term z 2 tan 2 \u03b1/2R is added to the phase, which restores the curvature radius R. ",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 274,
+                        "end": 276,
+                        "text": "13",
+                        "ref_id": "FIGREF2"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Back Propagation for Real Observational Geometry",
+                "sec_num": "3."
+            },
+            {
+                "text": "COSMIC-2 receivers collect HR scintillation data (phase and amplitude) from velocity and anti-velocity facing precise orbit determination (POD) antennas that have a broader field of view, but lower maximum gain compared to the occultation antennas (Weiss et al., 2022) . The high-rate data, 50 Hz for GPS and 100 Hz for GLONASS are used for calculation of the amplitude scintillation index S 4 on-board in 10-s time intervals. If the observed S 4 index exceeds certain threshold, then the high-rate phase and amplitude data for the entire occultation portion of the observation are downlinked for ground processing. GPS signals are tracked in closed-loop mode, which includes the on-board removal of data modulation and connection of the phase. GLONASS signals are tracked in the open-loop mode, which requires removal of data modulation and connection of the phase in ground processing. Thus, the phase scintillation index \u03c3 \u03d5 is calculated only in ground processing. The amplitude is represented by the signal-to-noise ratio (SNR) scaled to a 1-Hz band. The high-rate SNR and connected phase are used for BP in 10-s intervals.",
+                "cite_spans": [
+                    {
+                        "start": 248,
+                        "end": 268,
+                        "text": "(Weiss et al., 2022)",
+                        "ref_id": "BIBREF37"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "COSMIC-2 Scintillation Data and Geolocation Algorithm",
+                "sec_num": "4."
+            },
+            {
+                "text": "Figures 15a and 15b show examples of the amplitude (SNR) and the de-trended phase obtained from the COSMIC-2 POD antenna. Figure 15c shows S 4 and \u03c3 \u03d5 calculated in 10-s intervals. COSMIC-2 scintillation observations are performed in the interval of the minimal LOS tangent point height between 150 km (above the sporadic E layer) and the Rx height (about 520 km). BP is performed in 10-s intervals where \u03c3 \u03d5 exceeds certain threshold (in the example in Figure 15 , the BP is performed between 380 and 470 s). ",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 8,
+                        "end": 11,
+                        "text": "15a",
+                        "ref_id": "FIGREF12"
+                    },
+                    {
+                        "start": 16,
+                        "end": 19,
+                        "text": "15b",
+                        "ref_id": "FIGREF12"
+                    },
+                    {
+                        "start": 129,
+                        "end": 132,
+                        "text": "15c",
+                        "ref_id": "FIGREF12"
+                    },
+                    {
+                        "start": 461,
+                        "end": 463,
+                        "text": "15",
+                        "ref_id": "FIGREF12"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "COSMIC-2 Scintillation Data and Geolocation Algorithm",
+                "sec_num": "4."
+            },
+            {
+                "text": "As an example, Figure 16a , by using gray scale, shows BP amplitude calculated for 390-400 s interval in Figure 16 . Figure 16b shows normalized BP amplitude variance V as function of the distance L from Rx to Tx. BP is performed for 100 km < L < 6,000 km with a step of 100 km. We search for the global local minimum V 0 and the corresponding distance L 0 (by not considering other local minima which may exist due to effects not modeled in Section 2). The requirement of locality ensures that the minimum is not at an end of the BP interval. Next, we define the distances L 1 and L 2 counted from L 0 to the points where V(L) ends monotone increase on both sides of L 0 (shown in Figure 16 ). For the quality control (QC), we introduce parameter",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 22,
+                        "end": 25,
+                        "text": "16a",
+                        "ref_id": "FIGREF13"
+                    },
+                    {
+                        "start": 112,
+                        "end": 114,
+                        "text": "16",
+                        "ref_id": "FIGREF13"
+                    },
+                    {
+                        "start": 124,
+                        "end": 127,
+                        "text": "16b",
+                        "ref_id": "FIGREF13"
+                    },
+                    {
+                        "start": 689,
+                        "end": 691,
+                        "text": "16",
+                        "ref_id": "FIGREF13"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "10.1029/2024RS008081",
+                "sec_num": null
+            },
+            {
+                "text": "Q = min(V 1 , V 2 )/ V 0 which characterizes the depth of the global local minimum, where V 1 = V(L 0 L 1 ), V 2 = V(L 0 + L 2 ), V 0 = V(L 0 )",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "10.1029/2024RS008081",
+                "sec_num": null
+            },
+            {
+                "text": ". In many cases, the points L 0 L 1 and L 0 + L 2 are close to the ends of BP interval (as in Figure 16 ). However, sometimes, especially for weak scintillation, monotone increase of V(L) ends closer to L 0 due to variations caused by noise, thus reducing Q. To reduce this effect, we apply smoothing of V(L) by 2nd order sliding polynomial regression in a 1,000 km window. Figure 17 shows an example of the function V(L) obtained directly after BP (black) and after smoothing (red) and the corresponding",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 101,
+                        "end": 103,
+                        "text": "16",
+                        "ref_id": "FIGREF13"
+                    },
+                    {
+                        "start": 381,
+                        "end": 383,
+                        "text": "17",
+                        "ref_id": "FIGREF14"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "10.1029/2024RS008081",
+                "sec_num": null
+            },
+            {
+                "text": "L 1 , L 2 , V 1 , V 2 , Q 1 , Q 2 .",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "10.1029/2024RS008081",
+                "sec_num": null
+            },
+            {
+                "text": "We note that smoothing does not substantially change L 0 and V 0 , but it increases L 1 and L 2 and enables a more robust estimate of the parameter Q and reduces the probability of rejection of geolocations due to low Q.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "10.1029/2024RS008081",
+                "sec_num": null
+            },
+            {
+                "text": "Functions V(L) in Figures 16 and 17 are obtained for a certain orientation of the BP plane which uses the vector of magnetic field \u20d7 H at a certain distance from Rx which corresponds to anticipated location of irregularities, as this is shown in Figure 13 . Hereafter we denote this distance L mf . Generally, the orientation of the magnetic field varies along the LOS, so that different L mf result in different L 0 . This is shown in Figure 18a , where functions V(L) correspond to three different distances L mf shown by vertical dashed lines. Distances L 0 are shown by solid lines and D = L 0 L mf . The distance L mf for which L 0 = L mf , that is, D = 0, corresponds to location of plasma irregularities under the assumptions and approximations used for geolocation in this study. In practice, the geolocation is performed by two nested loops. The inner loop performs BP to different distances L with a step of 100 km for a given orientation of BP plane defined by L mf . This results in the function V(L) for a given L mf and L 0 if the minimum exists. In practice, we consider the minimum of V(L) existing if it is not closer to the ends of BP interval and L 1 and L 2 are not smaller than two 100-km samples. The outer loop cycles through the distance L mf with the step 100 km (by defining orientation of BP plane using IGRF-13 model). This results in discrete function D(L mf ) \u2261 D(L) shown in Figure 18b . We search for the distance L to the point where D(L) crosses zero. This crossing may occur at one sample or several samples (three samples in Figure 18b ) or no sample (when D(L) crosses zero at steep angle).",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 26,
+                        "end": 28,
+                        "text": "16",
+                        "ref_id": "FIGREF13"
+                    },
+                    {
+                        "start": 33,
+                        "end": 35,
+                        "text": "17",
+                        "ref_id": "FIGREF14"
+                    },
+                    {
+                        "start": 253,
+                        "end": 255,
+                        "text": "13",
+                        "ref_id": "FIGREF2"
+                    },
+                    {
+                        "start": 443,
+                        "end": 446,
+                        "text": "18a",
+                        "ref_id": "FIGREF15"
+                    },
+                    {
+                        "start": 1413,
+                        "end": 1416,
+                        "text": "18b",
+                        "ref_id": "FIGREF15"
+                    },
+                    {
+                        "start": 1568,
+                        "end": 1571,
+                        "text": "18b",
+                        "ref_id": "FIGREF15"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "10.1029/2024RS008081",
+                "sec_num": null
+            },
+            {
+                "text": "If D(L) remains positive and negative on both sides of the crossing for at least two 100-km steps in D (as is the case in Figure 18b ), we determine the crossing D(L) = 0 as the geolocation. We calculate \u2206D and \u2206L using the first samples where D > 0 and D < 0 around D = 0 (as shown in Figure 18b ) and calculate the slope M = | \u2206 D/ \u2206 L|, which may be used as an additional measure of geolocation uncertainty.",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 129,
+                        "end": 132,
+                        "text": "18b",
+                        "ref_id": "FIGREF15"
+                    },
+                    {
+                        "start": 293,
+                        "end": 296,
+                        "text": "18b",
+                        "ref_id": "FIGREF15"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "10.1029/2024RS008081",
+                "sec_num": null
+            },
+            {
+                "text": "shows functions V(L) corresponding to geolocations. Figures 19c1-19c3 shows functions cos \u03b1(L) which define the BP planes. In most cases, D(L) = 0 has a single solution (geolocation) as this is shown in panels A1,2. However, in some cases, there are multiple solutions (multi-valued ",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 60,
+                        "end": 69,
+                        "text": "19c1-19c3",
+                        "ref_id": "FIGREF16"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Figures 19a1-19a3, shows examples of functions D(L) . Figures 19b1-19b3",
+                "sec_num": null
+            },
+            {
+                "text": "10.1029/2024RS008081 geolocations), as this is shown in panel A3. It follows from Section 2 that the existence of multiple regions with irregularities does not result in multiple geolocations. It also follows from the analysis below that multi-valued geolocations are related to a certain combination of the direction of Rx trajectory and the change of direction of the vector of magnetic field along LOS, represented by cos \u03b1(L) . We note that all functions V(L) in panel B3 have the same V 0 but different slope, which is larger closer to Rx. However, as shown below, this cannot be used to select the correct solution.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "Figure 20 shows results of modeling of multi-valued geolocations. For the FP, the PS with irregularities is placed at L 0 = 2, 500 km and cos \u03b1 0 is set to 0.7 at that distance. The BP is performed for different cos \u03b1 by finding the minimum of V(L) at different L for each \u03b1. This results in the function cos \u03b1(L) shown by black solid curve in Figure 19a . Next, if FP is performed by placing the PS at any other distance and using cos \u03b1 from that function at that distance, the BP returns the same function. Naturally, there is an infinite family of such functions (as an example, several functions are shown by dashed lines in Figure 20a ). This means that for any given L 0 (location of irregularities) and cos \u03b1 0 (at that location), it is always possible to define the function cos \u03b1(L) associated with the pair (L 0 , cos \u03b1 0 ) which results in an infinite number of geolocations at all distances (hereafter called a \"degenerate\" function).",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 7,
+                        "end": 9,
+                        "text": "20",
+                        "ref_id": "FIGREF17"
+                    },
+                    {
+                        "start": 351,
+                        "end": 354,
+                        "text": "19a",
+                        "ref_id": "FIGREF16"
+                    },
+                    {
+                        "start": 636,
+                        "end": 639,
+                        "text": "20a",
+                        "ref_id": "FIGREF17"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "Naturally, this never occurs in practice. However, a real function cos \u03b1(L) may cross the \"degenerate\" function multiple times, resulting in the multivalued geolocations.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "As an example, Figure 20b shows functions V(L) obtained by BP when FP is performed for the PS placed at any one out of three locations L = 1,200 km (green), 2,500 km (red), 4,000 km (blue) by using cos \u03b1 from the \"degenerate\" function shown by solid line in Figure 20a . For each true location of irregularities, the geolocation by BP returns all three locations as the multiple solutions. For each placement of the PS denoted by a certain color in Figure 20a , the three functions V(L) (corresponding to one true and two spurious geolocations) are shown by the same color in Figure 20b . It is seen that the slope of the functions V(L) is larger closer to Rx. The same effect is seen in the functions V(L) obtained from real observations in Figure 19b3 , but this does not allow discriminating between true and spurious geolocations. Because modeling in Figure 20 uses the PS without noise, V 0 = 0 and the metric Q formally does not apply to the functions V(L) in Figure 20b . For real observations, the metric Q is also affected by location of the PS with respect to the ends of the BP interval (6,000 km). It is important that the values V 0 in Figure 19b3 are the same for all three geolocations, thus also not allowing discrimination between true and spurious geolocations. It is obvious from Figure 20a , that the complicated structure and large span of a real function cos \u03b1(L) increase the probability of crossing the \"degenerate\" function more than once and obtaining multi-valued geolocations. It is also obvious that there is a class of functions cos \u03b1(L) , which includes but is not limited to monotonically decreasing functions, which may cross the \"degenerate\" function only once, thus resulting in only single-valued geolocations.",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 22,
+                        "end": 25,
+                        "text": "20b",
+                        "ref_id": "FIGREF17"
+                    },
+                    {
+                        "start": 265,
+                        "end": 268,
+                        "text": "20a",
+                        "ref_id": "FIGREF17"
+                    },
+                    {
+                        "start": 456,
+                        "end": 459,
+                        "text": "20a",
+                        "ref_id": "FIGREF17"
+                    },
+                    {
+                        "start": 583,
+                        "end": 586,
+                        "text": "20b",
+                        "ref_id": "FIGREF17"
+                    },
+                    {
+                        "start": 749,
+                        "end": 753,
+                        "text": "19b3",
+                        "ref_id": "FIGREF16"
+                    },
+                    {
+                        "start": 862,
+                        "end": 864,
+                        "text": "20",
+                        "ref_id": "FIGREF17"
+                    },
+                    {
+                        "start": 973,
+                        "end": 976,
+                        "text": "20b",
+                        "ref_id": "FIGREF17"
+                    },
+                    {
+                        "start": 1156,
+                        "end": 1160,
+                        "text": "19b3",
+                        "ref_id": "FIGREF16"
+                    },
+                    {
+                        "start": 1306,
+                        "end": 1309,
+                        "text": "20a",
+                        "ref_id": "FIGREF17"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "The existence of \"degenerate\" functions cos \u03b1(L) is an additional limitation of the BP geolocation technique in addition to those assumptions/approximations discussed in Section 1. In our processing, when the first solution D(L) = 0 is found, the search for other solutions continues until D(L) is checked in the full BP interval (6,000 km). If more than one solution D(L) = 0 is found, all the solutions for this case (10-s interval) are considered multi-valued. For COSMIC-2 (low inclination orbits) approximately 8% of the cases are multi-valued. This percentage may be different (larger) for high inclination orbits due to different structure of cos \u03b1(L) . Based on our modeling (Figure 20 and discussion), it is not possible to discriminate between true and spurious geolocations from the observations. In this study, all multi-valued geolocations are discarded (they do not contribute to results presented in Section 5). Once the distance L from Rx to the region with plasma irregularities is found, it determines the geolocation vector",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 691,
+                        "end": 693,
+                        "text": "20",
+                        "ref_id": "FIGREF17"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "\u20d7 R geo = \u20d7 R rx + L \u20d7 n rt",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "where \u20d7 R rx is the vector of Rx in the geocentric system and",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "\u20d7n rt = \u20d7 R rx \u20d7 R tx )/ \u20d2 \u20d2 R \u0305\u2192 rx \u20d7 R tx \u20d2 \u20d2 is",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "the unit vector between Rx and Tx in the middle of 10-s interval. Polar coordinates of \u20d7 R geo provide latitude, longitude and height (over reference ellipsoid) of the region with irregularities.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "In this study, to apply BP in a 10-s interval, we first check \u03c3 \u03d5 and continue processing if \u03c3 \u03d5 is greater than 0.25 rad. Next, we check geometry and apply BP if the LOS tangent point is above 150 km (to make sure that the receiver did not occasionally track through sporadic E layer). After application of BP, to consider the geolocation successful, we perform the following checks: (a) geolocation must be single-valued; (b) Q must be greater than 1.2; (c) cos \u03b1 must be greater than 0.1. We note that results of modeling of the effect of noise in Section 2.4 shown in Figure 11 may be considered as rationales for some checks. For example, \u03c3 \u03d5 = 0.25 rad is 10 times the \u03c3 \u03d5 induced by thermal noise for the average SNR 400 V/V, as estimated in Section 2. The Q \u223c 1.2 corresponds to V(L) obtained for \u03c3 \u03d5 = 0.25 rad, average SNR 400 V/V and average distance L = 2, 000 km, as this could be visually estimated from Figure 11 , right panel. However, despite these rationales, the used checks are still to a large extent, ad hoc and can be further adjusted based on a common practical approach such as the trade-off between quality and quantity. The processing results presented in Section 5 are obtained by applying the checks explained above.",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 579,
+                        "end": 581,
+                        "text": "11",
+                        "ref_id": "FIGREF9"
+                    },
+                    {
+                        "start": 925,
+                        "end": 927,
+                        "text": "11",
+                        "ref_id": "FIGREF9"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "The BP algorithm was applied for processing of the HR scintillation data collected from the COSMIC-2 POD antennas. Figure 21 shows monthly maps of L1 geolocations obtained during post-sunset hours (18-24 hr local time) in the years 2021 and 2023. The color scale represents numbers of geolocations in 3\u00b0\u00d7 3\u00b0bins. The maps for each year show clear seasonal variation consistent with known morphology and probability of occurrence of ",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 122,
+                        "end": 124,
+                        "text": "21",
+                        "ref_id": "FIGREF18"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Results of Geolocation Using COSMIC-2 HR Scintillation Data",
+                "sec_num": "5."
+            },
+            {
+                "text": "10.1029/2024RS008081 equatorial scintillation (Gentile et al., 2006) . In December-January the scintillation occurs mainly in the American/Atlantic longitudinal sector, in May-July there are two scintillation maxima in the African and Pacific sectors and low scintillation activity in the American sector, while in September-October the scintillation occurs at all longitudes. Comparison of 2021 and 2023 shows significant increase of the scintillation in 2023; the total number of geolocations increased from 332k in 2021 to 1,108k in 2023. This increase of the scintillation is correlated with the increase of solar activity in the progression toward the maximum of the solar cycle (on average, the F10.7 index increased about twice from 2021 to 2023) (Basu et al., 2002; Gentile et al., 2006) . Figure 22 shows a series of the daily values of F10.7 index from 2020 through the most of 2024.",
+                "cite_spans": [
+                    {
+                        "start": 46,
+                        "end": 68,
+                        "text": "(Gentile et al., 2006)",
+                        "ref_id": "BIBREF14"
+                    },
+                    {
+                        "start": 754,
+                        "end": 773,
+                        "text": "(Basu et al., 2002;",
+                        "ref_id": "BIBREF3"
+                    },
+                    {
+                        "start": 774,
+                        "end": 795,
+                        "text": "Gentile et al., 2006)",
+                        "ref_id": "BIBREF14"
+                    }
+                ],
+                "ref_spans": [
+                    {
+                        "start": 805,
+                        "end": 807,
+                        "text": "22",
+                        "ref_id": "FIGREF19"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "The L1 signal is commonly used for observations of scintillation and geolocation (due to higher SNR and smaller ionospheric effect resulting in a more robust tracking compared to L2 signal). However, in this study we also compared geolocations obtained from both L1 and L2 signals (for GPS, we only used L2C, by excluding L2P due to semi-codeless tracking which may become unstable in the presence of strong scintillation) during a test period between February 19 and 1 March 2021; this resulted in 13k geolocations for L1 and 11k for L2. In 8k cases the geolocations were obtained for both L1 and L2 signals (common set). Figure 23a shows the map of individual L1 and L2 geolocations for the common set. Figure 23b shows the histogram of L1-L2 zonal geolocation differences. ",
+                "cite_spans": [],
+                "ref_spans": [
+                    {
+                        "start": 630,
+                        "end": 633,
+                        "text": "23a",
+                        "ref_id": "FIGREF20"
+                    },
+                    {
+                        "start": 712,
+                        "end": 715,
+                        "text": "23b",
+                        "ref_id": "FIGREF20"
+                    }
+                ],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "Geolocation of plasma irregularities by BP of GNSS RO signals is an observational method useful for studying the morphology of plasma irregularities and for prediction (forecasting) of possible disruptions of radio communications. Geolocation of plasma irregularities by BP in coordinate or time representations has been discussed and tested previously (Carrano et al., 2019; Cherniak et al., 2019; Gorbunov et al., 2002; Groves & Carrano, 2022; Ludwig-Barbosa et al., 2023; Sokolovskiy et al., 2002) . This study uses BP in coordinate representation, outlines assumptions and approximations used for geolocation, and accomplishes three tasks: (a) numerical modeling of geolocation, (b) development of an geolocation algorithm applicable to real observational data, and (c) testing the algorithm by processing of the 2 years of COSMIC-2 HR data, which demonstrated month-to-month and year-to-year evolution of the global distribution of equatorial scintillation.",
+                "cite_spans": [
+                    {
+                        "start": 353,
+                        "end": 375,
+                        "text": "(Carrano et al., 2019;",
+                        "ref_id": "BIBREF7"
+                    },
+                    {
+                        "start": 376,
+                        "end": 398,
+                        "text": "Cherniak et al., 2019;",
+                        "ref_id": "BIBREF10"
+                    },
+                    {
+                        "start": 399,
+                        "end": 421,
+                        "text": "Gorbunov et al., 2002;",
+                        "ref_id": "BIBREF16"
+                    },
+                    {
+                        "start": 422,
+                        "end": 445,
+                        "text": "Groves & Carrano, 2022;",
+                        "ref_id": "BIBREF17"
+                    },
+                    {
+                        "start": 446,
+                        "end": 474,
+                        "text": "Ludwig-Barbosa et al., 2023;",
+                        "ref_id": "BIBREF24"
+                    },
+                    {
+                        "start": 475,
+                        "end": 500,
+                        "text": "Sokolovskiy et al., 2002)",
+                        "ref_id": "BIBREF33"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Discussion and Conclusions",
+                "sec_num": "6."
+            },
+            {
+                "text": "Numerical modeling is applied to understand the effect of multiple regions with irregularities on geolocation. The case of two regions with aligned irregularities, which allows localization of only one region with stronger scintillation, was investigated by Ludwig-Barbosa et al. (2023) and is confirmed in this study. The case of two regions with different orientations of irregularities, which requires 3D FP, is for the first time investigated in this study. It is found that for two regions with mis-aligned irregularities the scan angle plays a role that is similar to the strength for aligned irregularities: only one region with the smaller scan angle can be localized. Another result from numerical modeling is independent estimation of the outer scale of the ionospheric turbulence from RO scintillation data. Yet another result is the explanation of the multi-valued geolocations and introduction of the \"degenerate\" functions (scan angle as the specific function of distance along the LOS) which do not allow geolocations.",
+                "cite_spans": [
+                    {
+                        "start": 258,
+                        "end": 286,
+                        "text": "Ludwig-Barbosa et al. (2023)",
+                        "ref_id": "BIBREF24"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Discussion and Conclusions",
+                "sec_num": "6."
+            },
+            {
+                "text": "A detailed description of the application of BP for real observations of GNSS Tx from LEO Rx is provided. This includes reduction of the 3D observational geometry to 2D by defining the BP plane using IGRF-13 model, correction of the Tx and Rx positions and observed phases, which makes the observed radio waves stationary, and correction of the curvature of the wave front. The description of the algorithm is illustrated by examples of the processing of COSMIC-2 HR scintillation data. It was found that in most cases the geolocations are single-valued, but in some cases, they are multi-valued. Analysis and modeling show that multivalued geolocations are not related to multiple regions with irregularities but to a certain distribution of the scan angle along the LOS resulting in \"replication\" of the scintillation region at multiple distances along the LOS in the process of BP. This is an additional limitation of the geolocation by BP. For COSMIC-2, the fraction of multi-valued geolocations is about 8%, but it may be larger for other RO missions with different observation geometry (i.e., LEO orbit inclination). In this study, multi-valued geolocations are discarded. ",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Discussion and Conclusions",
+                "sec_num": "6."
+            },
+            {
+                "text": "10.1029/2024RS008081",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "The described method of geolocation by BP is applied to 2 years of COSMIC-2 HR scintillation data. The results show seasonal variations of the global distribution of scintillation, which are consistent with the known scintillation climatology. Furthermore, a comparison of scintillation between 2 years shows differences consistent with the differences in solar flux related to the solar cycle. Comparison of the COSMIC-2 geolocations to NASA GOLD UV imaging spectrograph data was done in a separate study (Wu et al., 2024) , where it was found that the RMS zonal difference (in the east-west direction) between COSMIC-2 geolocations and GOLD detected equatorial plasma bubbles is about 1.5 deg. Application of the geolocation technique for other RO missions, validation by other observational data and further enhancements of the BP method and QC are the subjects of ongoing and future studies.",
+                "cite_spans": [
+                    {
+                        "start": 506,
+                        "end": 523,
+                        "text": "(Wu et al., 2024)",
+                        "ref_id": "BIBREF39"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "1944799x, 2025, 6, Downloaded from https://agupubs.onlinelibrary.wiley.com/doi/10.1029/2024RS008081, Wiley Online Library on [26/06/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "",
+                "sec_num": null
+            },
+            {
+                "text": "SOKOLOVSKIY ET AL.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "",
+                "sec_num": null
+            }
+        ],
+        "back_matter": [
+            {
+                "text": "This study was supported by the NSF Grant 2054356, NASA Grant C22K0658, NOAA Cooperative Agreement R4310383, NOAA IDIQ Contract NEEO0100 and USSF Contract 319C0004. The authors acknowledge NASA's Jet Propulsion Laboratory for support of the COSMIC-2 RO receivers. The authors are grateful to Dr. Charles Carrano for useful discussions and thank anonymous referees for careful reading the paper and valuable comments.",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Acknowledgments",
+                "sec_num": null
+            },
+            {
+                "text": "10.1029/2024RS008081",
+                "cite_spans": [],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Radio Science",
+                "sec_num": null
+            },
+            {
+                "text": "The data used in this study, HR phase and amplitude from COSMIC-2 receivers and receiver orbits, are available from the University Corporation for Atmospheric Research, COSMIC Data Analysis and Archive Center (https:// doi.org/10.5065/T353-C093). The GNSS orbits and clocks are available from the International GNSS Service. Links to the source codes and data for the IGRF-13 model used in this study are available in (Alken et al., 2021) . The F10.7 data are available at https://omniweb.gsfc.nasa.gov/form/dx1.html.",
+                "cite_spans": [
+                    {
+                        "start": 418,
+                        "end": 438,
+                        "text": "(Alken et al., 2021)",
+                        "ref_id": "BIBREF0"
+                    }
+                ],
+                "ref_spans": [],
+                "eq_spans": [],
+                "section": "Data Availability Statement",
+                "sec_num": null
+            }
+        ],
+        "bib_entries": {
+            "BIBREF0": {
+                "ref_id": "b0",
+                "title": "International geomagnetic reference field: The thirteenth generation",
+                "authors": [
+                    {
+                        "first": "P",
+                        "middle": [],
+                        "last": "Alken",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "E",
+                        "middle": [],
+                        "last": "Thebault",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [
+                            "D"
+                        ],
+                        "last": "Beggan",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "H",
+                        "middle": [],
+                        "last": "Amit",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [],
+                        "last": "Aubert",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [],
+                        "last": "Baerenzung",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2021,
+                "venue": "Earth Planets and Space",
+                "volume": "73",
+                "issue": "1",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1186/s40623-020-01288-x"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Alken, P., Thebault, E., Beggan, C. D., Amit, H., Aubert, J., Baerenzung, J., et al. (2021). International geomagnetic reference field: The thirteenth generation. Earth Planets and Space, 73(1), 49. https://doi.org/10.1186/s40623-020-01288-x",
+                "links": null
+            },
+            "BIBREF1": {
+                "ref_id": "b1",
+                "title": "Back propagation processing of GPS radio occultation data",
+                "authors": [
+                    {
+                        "first": "C",
+                        "middle": [
+                            "O"
+                        ],
+                        "last": "Ao",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "G",
+                        "middle": [
+                            "A"
+                        ],
+                        "last": "Hajj",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "T",
+                        "middle": [
+                            "K"
+                        ],
+                        "last": "Meehan",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "S",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Leroy",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "E",
+                        "middle": [
+                            "R"
+                        ],
+                        "last": "Kursinski",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "M",
+                        "middle": [
+                            "T"
+                        ],
+                        "last": "De La Juarez",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2003,
+                "venue": "First CHAMP mission results for gravity, magnetic and atmospheric studies",
+                "volume": "",
+                "issue": "",
+                "pages": "415--422",
+                "other_ids": {
+                    "DOI": [
+                        "10.1007/978-3-540-38366-6_57"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Ao, C. O., Hajj, G. A., Meehan, T. K., Leroy, S. S., Kursinski, E. R., de la Juarez, M. T., et al. (2003). Back propagation processing of GPS radio occultation data. In First CHAMP mission results for gravity, magnetic and atmospheric studies (Vol. 2003, pp. 415-422). Springer-Verlag Berlin Heidelberg. https://doi.org/10.1007/978-3-540-38366-6_57",
+                "links": null
+            },
+            "BIBREF2": {
+                "ref_id": "b2",
+                "title": "High resolution topside in situ data of electron densities and VHF/GHz scintillations in the equatorial region",
+                "authors": [
+                    {
+                        "first": "S",
+                        "middle": [],
+                        "last": "Basu",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "S",
+                        "middle": [],
+                        "last": "Basu",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [
+                            "P"
+                        ],
+                        "last": "Mcclure",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "W",
+                        "middle": [
+                            "B"
+                        ],
+                        "last": "Hanson",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "H",
+                        "middle": [
+                            "E"
+                        ],
+                        "last": "Whitney",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1983,
+                "venue": "Journal of Geophysical Research",
+                "volume": "88",
+                "issue": "A1",
+                "pages": "403--415",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/JA088iA01p00403"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Basu, S., Basu, S., McClure, J. P., Hanson, W. B., & Whitney, H. E. (1983). High resolution topside in situ data of electron densities and VHF/GHz scintillations in the equatorial region. Journal of Geophysical Research, 88(A1), 403-415. https://doi.org/10.1029/JA088iA01p00403",
+                "links": null
+            },
+            "BIBREF3": {
+                "ref_id": "b3",
+                "title": "Specification and forecasting of scintillations in communication/navigation links: Current status and future plans",
+                "authors": [
+                    {
+                        "first": "S",
+                        "middle": [],
+                        "last": "Basu",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "K",
+                        "middle": [
+                            "M"
+                        ],
+                        "last": "Groves",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "S",
+                        "middle": [],
+                        "last": "Basu",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "P",
+                        "middle": [
+                            "J"
+                        ],
+                        "last": "Sultan",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2002,
+                "venue": "Journal of Atmospheric and Solar-Terrestrial Physics",
+                "volume": "64",
+                "issue": "16",
+                "pages": "124--124",
+                "other_ids": {
+                    "DOI": [
+                        "10.1016/S1364-6826(02)00124-4"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Basu, S., Groves, K. M., Basu, S., & Sultan, P. J. (2002). Specification and forecasting of scintillations in communication/navigation links: Current status and future plans. Journal of Atmospheric and Solar-Terrestrial Physics, 64(16), 1745-1754. https://doi.org/10.1016/S1364-6826 (02)00124-4",
+                "links": null
+            },
+            "BIBREF4": {
+                "ref_id": "b4",
+                "title": "Principles of optics: Electromagnetic theory of propagation, interference and diffraction of light",
+                "authors": [
+                    {
+                        "first": "M",
+                        "middle": [],
+                        "last": "Born",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "E",
+                        "middle": [],
+                        "last": "Wolf",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1999,
+                "venue": "",
+                "volume": "",
+                "issue": "",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1017/CB09781139644181"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Born, M., & Wolf, E. (1999). Principles of optics: Electromagnetic theory of propagation, interference and diffraction of light. Cambridge University Press. https://doi.org/10.1017/CB09781139644181",
+                "links": null
+            },
+            "BIBREF5": {
+                "ref_id": "b5",
+                "title": "The effect of phase scintillations on the accuracy of phase screen simulation using deterministic screens derived from GPS and ALTAIR measurements",
+                "authors": [
+                    {
+                        "first": "C",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Carrano",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "K",
+                        "middle": [
+                            "M"
+                        ],
+                        "last": "Groves",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "R",
+                        "middle": [
+                            "G"
+                        ],
+                        "last": "Caton",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2012,
+                "venue": "Radio Science",
+                "volume": "47",
+                "issue": "4",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2011RS004958"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Carrano, C. S., Groves, K. M., & Caton, R. G. (2012a). The effect of phase scintillations on the accuracy of phase screen simulation using deterministic screens derived from GPS and ALTAIR measurements. Radio Science, 47(4). https://doi.org/10.1029/2011RS004958",
+                "links": null
+            },
+            "BIBREF6": {
+                "ref_id": "b6",
+                "title": "Simulating the impacts of ionospheric scintillation on L band SAR image formation",
+                "authors": [
+                    {
+                        "first": "C",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Carrano",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "K",
+                        "middle": [
+                            "M"
+                        ],
+                        "last": "Groves",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "R",
+                        "middle": [
+                            "G"
+                        ],
+                        "last": "Caton",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2012,
+                "venue": "Radio Science",
+                "volume": "47",
+                "issue": "4",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2011RS004956"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Carrano, C. S., Groves, K. M., & Caton, R. G. (2012b). Simulating the impacts of ionospheric scintillation on L band SAR image formation. Radio Science, 47(4). https://doi.org/10.1029/2011RS004956",
+                "links": null
+            },
+            "BIBREF7": {
+                "ref_id": "b7",
+                "title": "Geolocation and characterization of ionospheric irregularities using radio occultation observations of scintillation",
+                "authors": [
+                    {
+                        "first": "C",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Carrano",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "K",
+                        "middle": [
+                            "M"
+                        ],
+                        "last": "Groves",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "R",
+                        "middle": [
+                            "G"
+                        ],
+                        "last": "Caton",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [],
+                        "last": "Rino",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "P",
+                        "middle": [],
+                        "last": "Straus",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2019,
+                "venue": "Beacon Satellite Symposium",
+                "volume": "",
+                "issue": "",
+                "pages": "",
+                "other_ids": {},
+                "num": null,
+                "urls": [],
+                "raw_text": "Carrano, C. S., Groves, K. M., Caton, R. G., Rino, C., & Straus, P. (2019). Geolocation and characterization of ionospheric irregularities using radio occultation observations of scintillation. Beacon Satellite Symposium, Olsztyn, Poland, August 19-23, 2019.",
+                "links": null
+            },
+            "BIBREF8": {
+                "ref_id": "b8",
+                "title": "Multiple phase screen modeling of ionospheric scintillation along radio occultation raypaths",
+                "authors": [
+                    {
+                        "first": "C",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Carrano",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "K",
+                        "middle": [
+                            "M"
+                        ],
+                        "last": "Groves",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "R",
+                        "middle": [
+                            "G"
+                        ],
+                        "last": "Caton",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [
+                            "L"
+                        ],
+                        "last": "Rino",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "P",
+                        "middle": [],
+                        "last": "Straus",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2011,
+                "venue": "Radio Science",
+                "volume": "",
+                "issue": "6",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2010RS004591"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Carrano, C. S., Groves, K. M., Caton, R. G., Rino, C. L., & Straus, P. (2011). Multiple phase screen modeling of ionospheric scintillation along radio occultation raypaths. Radio Science, 46(6). https://doi.org/10.1029/2010RS004591",
+                "links": null
+            },
+            "BIBREF9": {
+                "ref_id": "b9",
+                "title": "A propagation model for geolocating ionospheric irregularities along radio occultation ray-paths",
+                "authors": [
+                    {
+                        "first": "C",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Carrano",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "K",
+                        "middle": [
+                            "M"
+                        ],
+                        "last": "Groves",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [
+                            "L"
+                        ],
+                        "last": "Rino",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "W",
+                        "middle": [
+                            "J"
+                        ],
+                        "last": "Mcneil",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2017,
+                "venue": "Proceedings of the 2017 USNC-URSI national radio science meeting",
+                "volume": "",
+                "issue": "",
+                "pages": "1--2",
+                "other_ids": {
+                    "DOI": [
+                        "10.1109/USNC-URSI-NRSM.2017.7878318"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Carrano, C. S., Groves, K. M., Rino, C. L., & McNeil, W. J. (2017). A propagation model for geolocating ionospheric irregularities along radio occultation ray-paths. In Proceedings of the 2017 USNC-URSI national radio science meeting (pp. 1-2). https://doi.org/10.1109/USNC-URSI- NRSM.2017.7878318",
+                "links": null
+            },
+            "BIBREF10": {
+                "ref_id": "b10",
+                "title": "Multi-instrumental observation of storm-induced ionospheric plasma bubbles at equatorial and middle latitudes",
+                "authors": [
+                    {
+                        "first": "I",
+                        "middle": [],
+                        "last": "Cherniak",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "I",
+                        "middle": [],
+                        "last": "Zakharenkova",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "S",
+                        "middle": [],
+                        "last": "Sokolovskiy",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2019,
+                "venue": "Journal of Geophysical Research: Space Physics",
+                "volume": "124",
+                "issue": "",
+                "pages": "1491--1508",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2018JA026309"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Cherniak, I., Zakharenkova, I., & Sokolovskiy, S. (2019). Multi-instrumental observation of storm-induced ionospheric plasma bubbles at equatorial and middle latitudes. Journal of Geophysical Research: Space Physics, 124, 1491-1508. https://doi.org/10.1029/2018JA026309",
+                "links": null
+            },
+            "BIBREF11": {
+                "ref_id": "b11",
+                "title": "Performance of 6 global navigation satellite system receivers at low latitude under moderate and strong scintillation",
+                "authors": [
+                    {
+                        "first": "E",
+                        "middle": [
+                            "R"
+                        ],
+                        "last": "De Paula",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "A",
+                        "middle": [
+                            "R F"
+                        ],
+                        "last": "Martinon",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "A",
+                        "middle": [
+                            "O"
+                        ],
+                        "last": "Moraes",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [],
+                        "last": "Carrano",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "A",
+                        "middle": [
+                            "C"
+                        ],
+                        "last": "Neto",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "P",
+                        "middle": [],
+                        "last": "Doherty",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2020,
+                "venue": "Earth and Space Science",
+                "volume": "8",
+                "issue": "2",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2020EA001314"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "de Paula, E. R., Martinon, A. R. F., Moraes, A. O., Carrano, C., Neto, A. C., Doherty, P., et al. (2020). Performance of 6 global navigation satellite system receivers at low latitude under moderate and strong scintillation. Earth and Space Science, 8(2). https://doi.org/10.1029/2020EA001314",
+                "links": null
+            },
+            "BIBREF12": {
+                "ref_id": "b12",
+                "title": "Ionospheric scintillation effects on GPS in the equatorial and auroral regions",
+                "authors": [
+                    {
+                        "first": "P",
+                        "middle": [
+                            "H"
+                        ],
+                        "last": "Doherty",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "S",
+                        "middle": [
+                            "H"
+                        ],
+                        "last": "Delay",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [
+                            "E"
+                        ],
+                        "last": "Valladares",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [
+                            "A"
+                        ],
+                        "last": "Klobuchar",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2003,
+                "venue": "Navigation",
+                "volume": "50",
+                "issue": "4",
+                "pages": "235--245",
+                "other_ids": {
+                    "DOI": [
+                        "10.1002/j.2161-4296.2003.tb00332.x"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Doherty, P. H., Delay, S. H., Valladares, C. E., & Klobuchar, J. A. (2003). Ionospheric scintillation effects on GPS in the equatorial and auroral regions. Navigation, 50(4), 235-245. https://doi.org/10.1002/j.2161-4296.2003.tb00332.x",
+                "links": null
+            },
+            "BIBREF13": {
+                "ref_id": "b13",
+                "title": "Global observations of L-band scintillation at solar minimum made by COSMIC",
+                "authors": [
+                    {
+                        "first": "K",
+                        "middle": [
+                            "F"
+                        ],
+                        "last": "Dymond",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2012,
+                "venue": "RS0L18",
+                "volume": "47",
+                "issue": "",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2011RS004931"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Dymond, K. F. (2012). Global observations of L-band scintillation at solar minimum made by COSMIC. Radio Science, 47(4), RS0L18. https:// doi.org/10.1029/2011RS004931",
+                "links": null
+            },
+            "BIBREF14": {
+                "ref_id": "b14",
+                "title": "A climatology of equatorial plasma bubbles from DMSP 1989-2004",
+                "authors": [
+                    {
+                        "first": "L",
+                        "middle": [
+                            "C"
+                        ],
+                        "last": "Gentile",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "W",
+                        "middle": [
+                            "J"
+                        ],
+                        "last": "Burke",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "F",
+                        "middle": [
+                            "J"
+                        ],
+                        "last": "Rich",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2006,
+                "venue": "Radio Science",
+                "volume": "",
+                "issue": "5",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2005RS003340"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Gentile, L. C., Burke, W. J., & Rich, F. J. (2006). A climatology of equatorial plasma bubbles from DMSP 1989-2004. Radio Science, 41(5). https://doi.org/10.1029/2005RS003340",
+                "links": null
+            },
+            "BIBREF15": {
+                "ref_id": "b15",
+                "title": "Microlab-1 experiment: Multipath effects in the lower troposphere",
+                "authors": [
+                    {
+                        "first": "M",
+                        "middle": [],
+                        "last": "Gorbunov",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "A",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Gurvich",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1998,
+                "venue": "Journal of Geophysical Research",
+                "volume": "103",
+                "issue": "D12",
+                "pages": "13819--13826",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/98JD00806"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Gorbunov, M., & Gurvich, A. S. (1998). Microlab-1 experiment: Multipath effects in the lower troposphere. Journal of Geophysical Research, 103(D12), 13819-13826. https://doi.org/10.1029/98JD00806",
+                "links": null
+            },
+            "BIBREF16": {
+                "ref_id": "b16",
+                "title": "Back-propagation and radio-holographic methods for investigation of sporadic ionospheric E-layers from Microlab-1 data",
+                "authors": [
+                    {
+                        "first": "M",
+                        "middle": [
+                            "E"
+                        ],
+                        "last": "Gorbunov",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "A",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Gurvich",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "A",
+                        "middle": [
+                            "V"
+                        ],
+                        "last": "Shmakov",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2002,
+                "venue": "International Journal of Remote Sensing",
+                "volume": "23",
+                "issue": "4",
+                "pages": "675--685",
+                "other_ids": {
+                    "DOI": [
+                        "10.1080/01431160010030091"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Gorbunov, M. E., Gurvich, A. S., & Shmakov, A. V. (2002). Back-propagation and radio-holographic methods for investigation of sporadic ionospheric E-layers from Microlab-1 data. International Journal of Remote Sensing, 23(4), 675-685. https://doi.org/10.1080/ 01431160010030091",
+                "links": null
+            },
+            "BIBREF17": {
+                "ref_id": "b17",
+                "title": "Ionospheric sensing with radio occultations: COSMIC-2. ISWI UN regional workshop on GNSS and space weather",
+                "authors": [
+                    {
+                        "first": "K",
+                        "middle": [
+                            "M"
+                        ],
+                        "last": "Groves",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Carrano",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2022,
+                "venue": "",
+                "volume": "",
+                "issue": "",
+                "pages": "9--13",
+                "other_ids": {},
+                "num": null,
+                "urls": [],
+                "raw_text": "Groves, K. M., & Carrano, C. S. (2022). Ionospheric sensing with radio occultations: COSMIC-2. ISWI UN regional workshop on GNSS and space weather. Rabat, Morocco, 9-13 May, 2022.",
+                "links": null
+            },
+            "BIBREF18": {
+                "ref_id": "b18",
+                "title": "Ionospheric electron density profiles obtained with the Global Positioning System: Results from the GPS/ MET experiment",
+                "authors": [
+                    {
+                        "first": "G",
+                        "middle": [
+                            "A"
+                        ],
+                        "last": "Hajj",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "L",
+                        "middle": [
+                            "J"
+                        ],
+                        "last": "Romans",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1998,
+                "venue": "Radio Science",
+                "volume": "",
+                "issue": "",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/97RS03183"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Hajj, G. A., & Romans, L. J. (1998). Ionospheric electron density profiles obtained with the Global Positioning System: Results from the GPS/ MET experiment. Radio Science. https://doi.org/10.1029/97RS03183",
+                "links": null
+            },
+            "BIBREF19": {
+                "ref_id": "b19",
+                "title": "Space weather impact on radio communication and navigation",
+                "authors": [
+                    {
+                        "first": "M",
+                        "middle": [],
+                        "last": "Ishii",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [],
+                        "last": "Berdermann",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "B",
+                        "middle": [],
+                        "last": "Forte",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "M",
+                        "middle": [],
+                        "last": "Hapgood",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "M",
+                        "middle": [
+                            "M"
+                        ],
+                        "last": "Bisi",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "V",
+                        "middle": [],
+                        "last": "Romano",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2024,
+                "venue": "Advances in Space Research",
+                "volume": "",
+                "issue": "",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1016/j.asr.2024.01.043"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Ishii, M., Berdermann, J., Forte, B., Hapgood, M., Bisi, M. M., & Romano, V. (2024). Space weather impact on radio communication and navigation. Advances in Space Research. https://doi.org/10.1016/j.asr.2024.01.043",
+                "links": null
+            },
+            "BIBREF20": {
+                "ref_id": "b20",
+                "title": "The Earth's ionosphere",
+                "authors": [
+                    {
+                        "first": "M",
+                        "middle": [],
+                        "last": "Kelley",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1989,
+                "venue": "",
+                "volume": "",
+                "issue": "",
+                "pages": "",
+                "other_ids": {},
+                "num": null,
+                "urls": [],
+                "raw_text": "Kelley, M. (1989). The Earth's ionosphere (p. 487). Academic Press.",
+                "links": null
+            },
+            "BIBREF21": {
+                "ref_id": "b21",
+                "title": "GPS and ionospheric scintillations",
+                "authors": [
+                    {
+                        "first": "P",
+                        "middle": [
+                            "M"
+                        ],
+                        "last": "Kintner",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "B",
+                        "middle": [
+                            "M"
+                        ],
+                        "last": "Ledvina",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "E",
+                        "middle": [
+                            "R"
+                        ],
+                        "last": "De Paula",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2007,
+                "venue": "Space Weather",
+                "volume": "5",
+                "issue": "9",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2006SW000260"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Kintner, P. M., Ledvina, B. M., & De Paula, E. R. (2007). GPS and ionospheric scintillations. Space Weather, 5(9). https://doi.org/10.1029/ 2006SW000260",
+                "links": null
+            },
+            "BIBREF22": {
+                "ref_id": "b22",
+                "title": "Multiple phase screen calculation of the temporal behavior of stochastic waves",
+                "authors": [
+                    {
+                        "first": "D",
+                        "middle": [
+                            "L"
+                        ],
+                        "last": "Knepp",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1983,
+                "venue": "Proceedings of the IEEE",
+                "volume": "71",
+                "issue": "",
+                "pages": "722--737",
+                "other_ids": {
+                    "DOI": [
+                        "10.1109/PROC.1983.12660"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Knepp, D. L. (1983). Multiple phase screen calculation of the temporal behavior of stochastic waves. Proceedings of the IEEE, 71(6), 722-737. https://doi.org/10.1109/PROC.1983.12660",
+                "links": null
+            },
+            "BIBREF23": {
+                "ref_id": "b23",
+                "title": "Observing Earth's atmosphere with radio occultation measurements using the Global Positioning System",
+                "authors": [
+                    {
+                        "first": "E",
+                        "middle": [
+                            "R"
+                        ],
+                        "last": "Kursinski",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "G",
+                        "middle": [
+                            "A"
+                        ],
+                        "last": "Hajj",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [
+                            "T"
+                        ],
+                        "last": "Schofield",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "R",
+                        "middle": [
+                            "P"
+                        ],
+                        "last": "Linfield",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "K",
+                        "middle": [
+                            "R"
+                        ],
+                        "last": "Hardy",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1997,
+                "venue": "Journal of Geophysical Research",
+                "volume": "102",
+                "issue": "D19",
+                "pages": "23429--23465",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/97jd01569"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Kursinski, E. R., Hajj, G. A., Schofield, J. T., Linfield, R. P., & Hardy, K. R. (1997). Observing Earth's atmosphere with radio occultation measurements using the Global Positioning System. Journal of Geophysical Research, 102(D19), 23429-23465. https://doi.org/10.1029/ 97jd01569",
+                "links": null
+            },
+            "BIBREF24": {
+                "ref_id": "b24",
+                "title": "Detection and localization of Flayer ionospheric irregularities with the back-propagation method along the radio occultation ray path",
+                "authors": [
+                    {
+                        "first": "V",
+                        "middle": [],
+                        "last": "Ludwig-Barbosa",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [],
+                        "last": "Rasch",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "T",
+                        "middle": [],
+                        "last": "Sievert",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "A",
+                        "middle": [],
+                        "last": "Carlstroem",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "M",
+                        "middle": [
+                            "I"
+                        ],
+                        "last": "Pettersson",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "V",
+                        "middle": [
+                            "T"
+                        ],
+                        "last": "Vu",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [],
+                        "last": "Christensen",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2023,
+                "venue": "Atmospheric Measurement Techniques",
+                "volume": "16",
+                "issue": "7",
+                "pages": "1849--1864",
+                "other_ids": {
+                    "DOI": [
+                        "10.5194/amt-16-1849-2023"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Ludwig-Barbosa, V., Rasch, J., Sievert, T., Carlstroem, A., Pettersson, M. I., Vu, V. T., & Christensen, J. (2023). Detection and localization of F- layer ionospheric irregularities with the back-propagation method along the radio occultation ray path. Atmospheric Measurement Techniques, 16(7), 1849-1864. https://doi.org/10.5194/amt-16-1849-2023",
+                "links": null
+            },
+            "BIBREF25": {
+                "ref_id": "b25",
+                "title": "Evaluation of ionospheric scintillation in GNSS radio occultation measurements and simulations",
+                "authors": [
+                    {
+                        "first": "V",
+                        "middle": [],
+                        "last": "Ludwig-Barbosa",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "T",
+                        "middle": [],
+                        "last": "Sievert",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [],
+                        "last": "Rasch",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "A",
+                        "middle": [],
+                        "last": "Carlstroem",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "M",
+                        "middle": [
+                            "I"
+                        ],
+                        "last": "Pettersson",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "V",
+                        "middle": [
+                            "T"
+                        ],
+                        "last": "Vu",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2020,
+                "venue": "Radio Science",
+                "volume": "",
+                "issue": "8",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2019RS006996"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Ludwig-Barbosa, V., Sievert, T., Rasch, J., Carlstroem, A., Pettersson, M. I., & Vu, V. T. (2020). Evaluation of ionospheric scintillation in GNSS radio occultation measurements and simulations. Radio Science, 55(8). https://doi.org/10.1029/2019RS006996",
+                "links": null
+            },
+            "BIBREF26": {
+                "ref_id": "b26",
+                "title": "Ionosphere geomagnetic field: Comparison of IGRF model prediction and satellite measurements 1991-2010",
+                "authors": [
+                    {
+                        "first": "N",
+                        "middle": [
+                            "A"
+                        ],
+                        "last": "Matteo",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "Y.-T",
+                        "middle": [],
+                        "last": "Morton",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2011,
+                "venue": "",
+                "volume": "46",
+                "issue": "",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2010RS004529"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Matteo, N. A., & Morton, Y.-T. (2011). Ionosphere geomagnetic field: Comparison of IGRF model prediction and satellite measurements 1991- 2010. Radio Science, 46(4). https://doi.org/10.1029/2010RS004529",
+                "links": null
+            },
+            "BIBREF27": {
+                "ref_id": "b27",
+                "title": "Inversion of GPS occultation measurements using Fresnel diffraction theory",
+                "authors": [
+                    {
+                        "first": "M",
+                        "middle": [
+                            "D"
+                        ],
+                        "last": "Mortensen",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "P",
+                        "middle": [],
+                        "last": "Hoeg",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1998,
+                "venue": "Geophysical Research Letters",
+                "volume": "25",
+                "issue": "13",
+                "pages": "2441--2444",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/98gl51838"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Mortensen, M. D., & Hoeg, P. (1998). Inversion of GPS occultation measurements using Fresnel diffraction theory. Geophysical Research Letters, 25(13), 2441-2444. https://doi.org/10.1029/98gl51838",
+                "links": null
+            },
+            "BIBREF28": {
+                "ref_id": "b28",
+                "title": "A power law phase screen model for ionospheric scintillation: 2. Strong scatter",
+                "authors": [
+                    {
+                        "first": "C",
+                        "middle": [],
+                        "last": "Rino",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1979,
+                "venue": "Radio Science",
+                "volume": "14",
+                "issue": "6",
+                "pages": "1147--1155",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/RS014i006p01147"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Rino, C. (1979). A power law phase screen model for ionospheric scintillation: 2. Strong scatter. Radio Science, 14(6), 1147-1155. https://doi.org/ 10.1029/RS014i006p01147",
+                "links": null
+            },
+            "BIBREF29": {
+                "ref_id": "b29",
+                "title": "Wave field propagation in extended highly anisotropic media",
+                "authors": [
+                    {
+                        "first": "C",
+                        "middle": [],
+                        "last": "Rino",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [],
+                        "last": "Carrano",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "K",
+                        "middle": [],
+                        "last": "Groves",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2019,
+                "venue": "Radio Science",
+                "volume": "54",
+                "issue": "7",
+                "pages": "646--659",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2019RS006793"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Rino, C., Carrano, C., & Groves, K. (2019). Wave field propagation in extended highly anisotropic media. Radio Science, 54(7), 646-659. https:// doi.org/10.1029/2019RS006793",
+                "links": null
+            },
+            "BIBREF30": {
+                "ref_id": "b30",
+                "title": "Analysis and validation of GPS/MET data in neutral atmosphere",
+                "authors": [
+                    {
+                        "first": "C",
+                        "middle": [],
+                        "last": "Rocken",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "R",
+                        "middle": [],
+                        "last": "Anthes",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "M",
+                        "middle": [],
+                        "last": "Exner",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "D",
+                        "middle": [],
+                        "last": "Hunt",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "S",
+                        "middle": [],
+                        "last": "Sokolovskiy",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "R",
+                        "middle": [],
+                        "last": "Ware",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1997,
+                "venue": "Journal of Geophysical Research",
+                "volume": "102",
+                "issue": "D25",
+                "pages": "29849--29866",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/97jd02400"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Rocken, C., Anthes, R., Exner, M., Hunt, D., Sokolovskiy, S., Ware, R., et al. (1997). Analysis and validation of GPS/MET data in neutral at- mosphere. Journal of Geophysical Research, 102(D25), 29849-29866. https://doi.org/10.1029/97jd02400",
+                "links": null
+            },
+            "BIBREF31": {
+                "ref_id": "b31",
+                "title": "Analysis and validation of GPS/MET data in the ionosphere",
+                "authors": [
+                    {
+                        "first": "W",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Schreiner",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "S",
+                        "middle": [
+                            "V"
+                        ],
+                        "last": "Sokolovskiy",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [],
+                        "last": "Rocken",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "D",
+                        "middle": [
+                            "C"
+                        ],
+                        "last": "Hunt",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1999,
+                "venue": "Radio Science",
+                "volume": "34",
+                "issue": "4",
+                "pages": "949--966",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/1999rs900034"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Schreiner, W. S., Sokolovskiy, S. V., Rocken, C., & Hunt, D. C. (1999). Analysis and validation of GPS/MET data in the ionosphere. Radio Science, 34(4), 949-966. https://doi.org/10.1029/1999rs900034",
+                "links": null
+            },
+            "BIBREF32": {
+                "ref_id": "b32",
+                "title": "COSMIC-2 radio occultation constellation: First results",
+                "authors": [
+                    {
+                        "first": "W",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Schreiner",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [
+                            "P"
+                        ],
+                        "last": "Weiss",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "R",
+                        "middle": [
+                            "A"
+                        ],
+                        "last": "Anthes",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [],
+                        "last": "Braun",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "V",
+                        "middle": [],
+                        "last": "Chu",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [],
+                        "last": "Fong",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2020,
+                "venue": "Geophysical Research Letters",
+                "volume": "47",
+                "issue": "4",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2019GL086841"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Schreiner, W. S., Weiss, J. P., Anthes, R. A., Braun, J., Chu, V., Fong, J., et al. (2020). COSMIC-2 radio occultation constellation: First results. Geophysical Research Letters, 47(4). https://doi.org/10.1029/2019GL086841",
+                "links": null
+            },
+            "BIBREF33": {
+                "ref_id": "b33",
+                "title": "Detection of high-altitude ionospheric irregularities with GPS/MET",
+                "authors": [
+                    {
+                        "first": "S",
+                        "middle": [],
+                        "last": "Sokolovskiy",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "W",
+                        "middle": [],
+                        "last": "Schreiner",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [],
+                        "last": "Rocken",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "D",
+                        "middle": [],
+                        "last": "Hunt",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2002,
+                "venue": "Geophysical Research Letters",
+                "volume": "29",
+                "issue": "3",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2001GL013398"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Sokolovskiy, S., Schreiner, W., Rocken, C., & Hunt, D. (2002). Detection of high-altitude ionospheric irregularities with GPS/MET. Geophysical Research Letters, 29(3), 1033. https://doi.org/10.1029/2001GL013398",
+                "links": null
+            },
+            "BIBREF34": {
+                "ref_id": "b34",
+                "title": "Optimal noise filtering for the ionospheric correction of GPS radio occultation signals",
+                "authors": [
+                    {
+                        "first": "S",
+                        "middle": [],
+                        "last": "Sokolovskiy",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "W",
+                        "middle": [],
+                        "last": "Schreiner",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C",
+                        "middle": [],
+                        "last": "Rocken",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "D",
+                        "middle": [],
+                        "last": "Hunt",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2009,
+                "venue": "Journal of Atmospheric and Oceanic Technology",
+                "volume": "26",
+                "issue": "7",
+                "pages": "1398--1403",
+                "other_ids": {
+                    "DOI": [
+                        "10.1175/2009JTECHA1192.1"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Sokolovskiy, S., Schreiner, W., Rocken, C., & Hunt, D. (2009). Optimal noise filtering for the ionospheric correction of GPS radio occultation signals. Journal of Atmospheric and Oceanic Technology, 26(7), 1398-1403. https://doi.org/10.1175/2009JTECHA1192.1",
+                "links": null
+            },
+            "BIBREF35": {
+                "ref_id": "b35",
+                "title": "Use of the L2C signal for inversions of GPS radio occultation data in the neutral atmosphere",
+                "authors": [
+                    {
+                        "first": "S",
+                        "middle": [
+                            "V"
+                        ],
+                        "last": "Sokolovskiy",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "W",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Schreiner",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "Z",
+                        "middle": [],
+                        "last": "Zeng",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "D",
+                        "middle": [
+                            "C"
+                        ],
+                        "last": "Hunt",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "Y.-H",
+                        "middle": [],
+                        "last": "Kuo",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "T",
+                        "middle": [
+                            "K"
+                        ],
+                        "last": "Meehan",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1964,
+                "venue": "Optics: Lectures on theoretical physics",
+                "volume": "18",
+                "issue": "",
+                "pages": "405--416",
+                "other_ids": {
+                    "DOI": [
+                        "10.1007/s10291-013-0340-x"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Sokolovskiy, S. V., Schreiner, W. S., Zeng, Z., Hunt, D. C., Kuo, Y.-H., Meehan, T. K., et al. (2013). Use of the L2C signal for inversions of GPS radio occultation data in the neutral atmosphere. GPS Solutions, 18(3), 405-416. https://doi.org/10.1007/s10291-013-0340-x Sommerfeld, A. (1964). Optics: Lectures on theoretical physics (Vol. IV). Academic Press Inc.",
+                "links": null
+            },
+            "BIBREF36": {
+                "ref_id": "b36",
+                "title": "Equatorial plasma bubbles: Vertically elongated wedges from the bottomside F layer",
+                "authors": [
+                    {
+                        "first": "R",
+                        "middle": [
+                            "T"
+                        ],
+                        "last": "Tsunoda",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "R",
+                        "middle": [
+                            "C"
+                        ],
+                        "last": "Livingston",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [
+                            "P"
+                        ],
+                        "last": "Mcclure",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "W",
+                        "middle": [
+                            "B"
+                        ],
+                        "last": "Hanson",
+                        "suffix": ""
+                    }
+                ],
+                "year": 1982,
+                "venue": "Journal of Geophysical Research: Space Physics",
+                "volume": "87",
+                "issue": "11",
+                "pages": "9171--9180",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/JA087iA11p09171"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Tsunoda, R. T., Livingston, R. C., McClure, J. P., & Hanson, W. B. (1982). Equatorial plasma bubbles: Vertically elongated wedges from the bottomside F layer. Journal of Geophysical Research: Space Physics, 87(A11), 9171-9180. https://doi.org/10.1029/JA087iA11p09171",
+                "links": null
+            },
+            "BIBREF37": {
+                "ref_id": "b37",
+                "title": "COSMIC-2 mission summary at three years in orbit",
+                "authors": [
+                    {
+                        "first": "J.-P",
+                        "middle": [],
+                        "last": "Weiss",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "W",
+                        "middle": [
+                            "S"
+                        ],
+                        "last": "Schreiner",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [
+                            "J"
+                        ],
+                        "last": "Braun",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "W",
+                        "middle": [],
+                        "last": "Xia-Serafino",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "C.-Y",
+                        "middle": [],
+                        "last": "Huang",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2022,
+                "venue": "Atmosphere",
+                "volume": "13",
+                "issue": "9",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.3390/atmos13091409"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Weiss, J.-P., Schreiner, W. S., Braun, J. J., Xia-Serafino, W., & Huang, C.-Y. (2022). COSMIC-2 mission summary at three years in orbit. Atmosphere, 13(9), 1409. https://doi.org/10.3390/atmos13091409",
+                "links": null
+            },
+            "BIBREF38": {
+                "ref_id": "b38",
+                "title": "Scintillation modeling using in situ data",
+                "authors": [
+                    {
+                        "first": "A",
+                        "middle": [
+                            "W"
+                        ],
+                        "last": "Wernik",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "L",
+                        "middle": [],
+                        "last": "Alfonsi",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "M",
+                        "middle": [],
+                        "last": "Materassi",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2007,
+                "venue": "Radio Science",
+                "volume": "42",
+                "issue": "1",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.1029/2006RS003512"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Wernik, A. W., Alfonsi, L., & Materassi, M. (2007). Scintillation modeling using in situ data. Radio Science, 42(1), RS1002. https://doi.org/10. 1029/2006RS003512",
+                "links": null
+            },
+            "BIBREF39": {
+                "ref_id": "b39",
+                "title": "GOLD plasma bubble observations comparison with geolocation of plasma irregularities by back propagation of the high-rate FORMOSA7/COSMIC 2 scintillation data",
+                "authors": [
+                    {
+                        "first": "Q",
+                        "middle": [],
+                        "last": "Wu",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J",
+                        "middle": [],
+                        "last": "Braun",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "S",
+                        "middle": [],
+                        "last": "Sokolovskiy",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "W",
+                        "middle": [],
+                        "last": "Schreiner",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "N",
+                        "middle": [],
+                        "last": "Pedatella",
+                        "suffix": ""
+                    },
+                    {
+                        "first": "J.-P",
+                        "middle": [],
+                        "last": "Weiss",
+                        "suffix": ""
+                    }
+                ],
+                "year": 2024,
+                "venue": "Frontiers in Astronomy and Space Sciences",
+                "volume": "11",
+                "issue": "",
+                "pages": "",
+                "other_ids": {
+                    "DOI": [
+                        "10.3389/fspas.2024.1407457"
+                    ]
+                },
+                "num": null,
+                "urls": [],
+                "raw_text": "Wu, Q., Braun, J., Sokolovskiy, S., Schreiner, W., Pedatella, N., Weiss, J.-P., et al. (2024). GOLD plasma bubble observations comparison with geolocation of plasma irregularities by back propagation of the high-rate FORMOSA7/COSMIC 2 scintillation data. Frontiers in Astronomy and Space Sciences, 11, 1407457. https://doi.org/10.3389/fspas.2024.1407457",
+                "links": null
+            }
+        },
+        "ref_entries": {
+            "FIGREF0": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "1",
+                "text": "Figure 1. Layout of RO observation and example of the ionospheric scintillation of RO signal (phase and amplitude)."
+            },
+            "FIGREF1": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "2",
+                "text": "Figure 2. Layout of the 2D forward and back propagation modeling (FP and BP)."
+            },
+            "FIGREF2": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "3",
+                "text": "Figure 3. Panel (a) shows power spectra of intensity calculated by FP after 1D PS with random phase fluctuations, using spectrum (2). The power spectral indices p and the corresponding slopes of the power spectra of intensity are shown in the figure. Panel (b), by skew lines, shows \u03c3 \u03d5 /S4 as functions of l 0 calculated by FP using spectrum (2) for different distances L between PS and Rx; dashed skew line corresponds to <L > \u2245 1, 900 km and horizontal line shows <\u03c3 \u03d5 /S4> \u2245 5.25 rad both estimated from geolocations in Section 5. Vertical line shows <l 0 > \u2245 9.7 km estimated from <\u03c3 \u03d5 /S4> and <L>."
+            },
+            "FIGREF3": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "4",
+                "text": "Figure 4. Panel (a) 2D amplitude (shown by gray scale) after FP through the PS. Panel (b) BP amplitude. Panel (c) Normalized BP amplitude variance V as the function of distance L. Location of the PS corresponds to the minimum of amplitude fluctuation (panel b) and the minimum of the function V(L) (panel c)."
+            },
+            "FIGREF4": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "5",
+                "text": "Figure 5. Geolocation error related to the error of anticipated orientation of irregularities. Left panel schematically shows the observation trajectory z\u02b9 and direction z normal to orientation of irregularities. Red and blue lines show anticipated directions normal to irregularities which denote the errors of knowledge of their true orientation \u00b1\u2206\u03b1. Right panel shows functions V(L) when orientation of irregularities is known exactly and with the errors \u00b1\u2206\u03b1."
+            },
+            "FIGREF5": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "7",
+                "text": "Figure 7. Geolocation of 2 PSs with the same orientation of irregularities. Panel A corresponds to the same \u03c3 \u03d5 on the screens. Dashed lines 1 and 2 show V(L) when only one of the PSs is present. Solid line 3 shows V(L) when both PSs are present. Panel B corresponds to the case when both PSs are present, but \u03c3 \u03d5 on 1 PS is 1.5 times larger than on another PS. Only the PS with larger \u03c3 \u03d5 is localizable."
+            },
+            "FIGREF6": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "8",
+                "text": "Figure 8. Layout of the 3D FP and 2D BP for 2 PSs with different orientations of irregularities."
+            },
+            "FIGREF7": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "9",
+                "text": "Figure 9. 2D amplitude on the observational plane (shown by gray scale) after 3D propagation through only 1st PS (a), only 2nd PS (b) and through both 1st and 2nd PSs (c)."
+            },
+            "FIGREF8": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "10",
+                "text": "Figure10. Geolocation of 2 PSs with different orientations of irregularities (for details see text). The \u03c3 \u03d5 is the same on both PSs. Panel A shows the case when \u03b1 1 (the angle between the scan direction and normal to irregularities on the PS) is smaller than \u03b1 2 . Panel B shows the case when \u03b1 2 is smaller than \u03b1 1 . Only the PS with smaller \u03b1 is localizable."
+            },
+            "FIGREF9": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "11",
+                "text": "Figure 11. Functions V(L) for different \u03c3 \u03d5 induced by irregularities on the PS located at 2000 km distance from Rx and different signal to noise ratio (SNR). Panel A corresponds to the average observed \u03c3 \u03d5 = 1.65 rad. Panel B corresponds to \u03c3 \u03d5 = 0.25 rad which 10 times exceeds the effect of thermal noise on the phase for the average SNR = 400 V/V. Panel C shows the same as panel B but using different vertical scale."
+            },
+            "FIGREF10": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "1213",
+                "text": "Figure 12. Explanation of notations in the Kirchhoff's Equation 6."
+            },
+            "FIGREF11": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "14",
+                "text": "Figure 14. Correction of Tx and Rx positions which makes BP problem approximately stationary."
+            },
+            "FIGREF12": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "15",
+                "text": "Figure 15. An example of COSMIC-2 HR scintillation data."
+            },
+            "FIGREF13": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "16",
+                "text": "Figure 16. Panel (a) 2D BP amplitude from 390 to 400 s interval in Figure 15 shown by gray scale. Panel (b) normalized amplitude variance V as the function of distance L from Rx to Tx."
+            },
+            "FIGREF14": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "17",
+                "text": "Figure 17. Raw and smoothed V(L) and resulting Q parameters."
+            },
+            "FIGREF15": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "18",
+                "text": "Figure 18. Panel (a) functions V(L) for different L 0 . Panel (b) function D(L)."
+            },
+            "FIGREF16": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "19",
+                "text": "Figure 19. Functions D(L) (A1-A3), V(L) (B1-B3) and cos \u03b1(L) (C1-C3) for 10-s intervals from three occultations."
+            },
+            "FIGREF17": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "20",
+                "text": "Figure 20. Panel (a) a \"family\" of degenerate functions cos \u03b1(L) obtained for cos \u03b1(L 0 ) = 0.4, \u22ef, 1 (step = 0.1) at L 0 = 2, 500 km. Panel (b) multi-valued geolocations when PS with irregularities is placed at any one of the locations: 1,200 km (green), 2,500 km (red), 4,000 km (blue) and cos \u03b1 is taken from the solid curve in panel A at those locations."
+            },
+            "FIGREF18": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "21",
+                "text": "Figure 21. Monthly maps of the post-sunset geolocations obtained from COSMIC-2 HR L1 data in 2021 and 2023. Color scale shows density of geolocations as the counts in 3\u00b0\u00d7 3\u00b0latitude/longitude bins."
+            },
+            "FIGREF19": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "22",
+                "text": "Figure 22. A series of the daily values of F10.7 index from 2020 through the most of 2024 years."
+            },
+            "FIGREF20": {
+                "type_str": "figure",
+                "num": null,
+                "uris": null,
+                "fig_num": "23",
+                "text": "Figure 23. Map of the post-sunset geolocations obtained from COSMIC-2 L1 and L2 HR data between February 19 and 1 March 2021 (a). Histogram of the L1-L2 zonal geolocation differences (deg); vertical axis denotes number of L1 and L2 pairs in 0.5 deg bins (b)."
+            },
+            "TABREF0": {
+                "type_str": "table",
+                "content": "<table><tr><td/><td colspan=\"3\">\u03b1 = 15\u00b0\u03b1 = 45\u00b0\u03b1 = 75\u00b0L</td></tr><tr><td>= 1, 000 km</td><td>6 km</td><td>21 km</td><td>78 km</td></tr><tr><td>L = 3, 000 km</td><td>17 km</td><td>63 km</td><td>235 km</td></tr><tr><td>L = 5, 000 km</td><td>28 km</td><td>105 km</td><td>392 km</td></tr></table>",
+                "num": null,
+                "html": null,
+                "text": "Geolocation Errors \u2206L for \u2206\u03b1 = 0.6\u00b0and Different \u03b1 and L"
+            }
+        }
+    }
+}

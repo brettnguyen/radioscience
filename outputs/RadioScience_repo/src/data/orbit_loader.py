@@ -1,0 +1,1880 @@
+## src/data/orbit_loader.py
+"""Orbit loading and interpolation for COSMIC-2 BP geolocation.
+
+This module implements the orbit adapter layer for the real-data reproduction
+pipeline. It supplies COSMIC-2 receiver and GNSS transmitter ``StateVector``
+objects at every high-rate sample time in a ``SignalWindow``.
+
+Public API follows the project design exactly:
+
+    OrbitLoader(config)
+    OrbitLoader.load_receiver_orbit(leo_id, date)
+    OrbitLoader.load_gnss_orbit(date)
+    OrbitLoader.interpolate_rx_states(window)
+    OrbitLoader.interpolate_tx_states(window)
+
+Scientific and engineering conventions:
+    * Positions returned to downstream modules are ECEF meters.
+    * Velocities returned to downstream modules are ECEF meters per second.
+    * Returned state-list length always equals ``len(window.times)``.
+    * ``window.times`` is interpreted as seconds relative to
+      ``window.start_time`` unless values appear to be Unix epoch seconds.
+    * No silent extrapolation is performed outside orbit coverage.
+    * Missing real-data orbit products raise explicit errors when this module is
+      invoked; synthetic runs are unaffected because they do not call it.
+
+Supported orbit inputs:
+    * IGS SP3 precise GNSS orbit files, including plain text and ``.gz`` files.
+    * Generic NetCDF/HDF/xarray-readable orbit files with common ECEF
+      position/velocity variable names.
+    * Generic receiver orbit files with time plus ECEF x/y/z variables.
+
+The exact COSMIC-2 CDAAC orbit schema and operational IGS product naming are
+not specified in the paper or configuration. Parser ambiguity is intentionally
+isolated in this module so the rest of the pipeline consumes only stable
+``StateVector`` objects.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta, timezone
+import gzip
+import math
+from pathlib import Path
+import re
+from typing import Any, Iterable, Mapping, Sequence
+
+import netCDF4
+import numpy as np
+from numpy.typing import NDArray
+from scipy.interpolate import CubicSpline, interp1d
+import xarray as xr
+
+from src.config import AppConfig
+from src.core.types import SignalWindow, StateVector, Vector3
+
+
+_M_PER_KM: float = 1000.0
+_EPOCH_SECONDS_HEURISTIC: float = 1.0e8
+_MIN_INTERPOLATION_SAMPLES: int = 2
+_CUBIC_INTERPOLATION_SAMPLES: int = 4
+_COVERAGE_TOLERANCE_S: float = 1.0e-6
+_DUPLICATE_TIME_TOLERANCE_S: float = 1.0e-9
+_RECEIVER_RADIUS_MIN_M: float = 5.0e6
+_RECEIVER_RADIUS_MAX_M: float = 9.0e6
+_GNSS_RADIUS_MIN_M: float = 1.5e7
+_GNSS_RADIUS_MAX_M: float = 5.0e7
+_PATH_DATE_PATTERNS: tuple[str, ...] = ("%Y%m%d", "%Y-%m-%d", "%Y_%m_%d")
+_SP3_SUFFIXES: frozenset[str] = frozenset({".sp3", ".eph"})
+_COMPRESSED_SUFFIXES: frozenset[str] = frozenset({".gz", ".z", ".zip"})
+_XARRAY_SUFFIXES: frozenset[str] = frozenset(
+    {".nc", ".nc4", ".cdf", ".h5", ".hdf5", ".hdf"}
+)
+_ORBIT_FILE_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".sp3",
+        ".eph",
+        ".gz",
+        ".z",
+        ".nc",
+        ".nc4",
+        ".cdf",
+        ".h5",
+        ".hdf5",
+        ".hdf",
+    }
+)
+
+_TIME_CANDIDATES: tuple[str, ...] = (
+    "time",
+    "times",
+    "timestamp",
+    "timestamps",
+    "utc",
+    "gps_time",
+    "datetime",
+    "date_time",
+    "mjd",
+)
+
+_X_CANDIDATES: tuple[str, ...] = (
+    "x",
+    "x_m",
+    "x_km",
+    "pos_x",
+    "position_x",
+    "ecef_x",
+    "x_ecef",
+    "rx_x",
+    "sc_x",
+)
+_Y_CANDIDATES: tuple[str, ...] = (
+    "y",
+    "y_m",
+    "y_km",
+    "pos_y",
+    "position_y",
+    "ecef_y",
+    "y_ecef",
+    "rx_y",
+    "sc_y",
+)
+_Z_CANDIDATES: tuple[str, ...] = (
+    "z",
+    "z_m",
+    "z_km",
+    "pos_z",
+    "position_z",
+    "ecef_z",
+    "z_ecef",
+    "rx_z",
+    "sc_z",
+)
+
+_VX_CANDIDATES: tuple[str, ...] = (
+    "vx",
+    "vx_mps",
+    "vx_kms",
+    "vel_x",
+    "velocity_x",
+    "ecef_vx",
+    "x_velocity",
+)
+_VY_CANDIDATES: tuple[str, ...] = (
+    "vy",
+    "vy_mps",
+    "vy_kms",
+    "vel_y",
+    "velocity_y",
+    "ecef_vy",
+    "y_velocity",
+)
+_VZ_CANDIDATES: tuple[str, ...] = (
+    "vz",
+    "vz_mps",
+    "vz_kms",
+    "vel_z",
+    "velocity_z",
+    "ecef_vz",
+    "z_velocity",
+)
+
+_POSITION_VECTOR_CANDIDATES: tuple[str, ...] = (
+    "position",
+    "positions",
+    "pos",
+    "ecef",
+    "ecef_position",
+    "r",
+    "xyz",
+    "rx_position",
+)
+_VELOCITY_VECTOR_CANDIDATES: tuple[str, ...] = (
+    "velocity",
+    "velocities",
+    "vel",
+    "ecef_velocity",
+    "v",
+    "vxyz",
+    "rx_velocity",
+)
+_SATELLITE_ID_CANDIDATES: tuple[str, ...] = (
+    "satellite",
+    "sat",
+    "sv",
+    "prn",
+    "gnss_id",
+    "space_vehicle",
+)
+
+
+class OrbitLoaderError(RuntimeError):
+    """Raised when orbit products cannot be found, parsed, or interpolated."""
+
+
+@dataclass(slots=True)
+class _OrbitSeries:
+    """Normalized orbit time series for one spacecraft or satellite."""
+
+    object_id: str
+    times_s: NDArray[np.float64]
+    positions_m: NDArray[np.float64]
+    velocities_mps: NDArray[np.float64] | None = None
+    source_paths: tuple[Path, ...] = field(default_factory=tuple)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _OrbitCollection:
+    """Normalized collection of orbit series keyed by object identifier."""
+
+    series_by_id: dict[str, _OrbitSeries]
+    source_paths: tuple[Path, ...] = field(default_factory=tuple)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class OrbitLoader:
+    """Load and interpolate receiver/GNSS orbits for signal windows.
+
+    Args:
+        config: Application configuration exposing ``receiver_orbit_dir`` and
+            ``gnss_orbit_dir`` from ``config.yaml``.
+
+    The loader keeps simple in-memory caches keyed by ``(leo_id, date)`` for
+    receiver orbits and by ``date`` for GNSS products. This is deterministic and
+    avoids repeated file parsing during full-year processing.
+    """
+
+    def __init__(self, config: AppConfig) -> None:
+        """Initialize orbit loader.
+
+        Args:
+            config: Validated application configuration.
+
+        Raises:
+            TypeError: If ``config`` is not an ``AppConfig``.
+        """
+        if not isinstance(config, AppConfig):
+            raise TypeError(
+                f"config must be an AppConfig, got {type(config).__name__}."
+            )
+
+        self.config: AppConfig = config
+        self.receiver_orbit_dir: Path = Path(config.receiver_orbit_dir).expanduser()
+        self.gnss_orbit_dir: Path = Path(config.gnss_orbit_dir).expanduser()
+
+        self._receiver_orbit_cache: dict[tuple[str, date], _OrbitCollection] = {}
+        self._gnss_orbit_cache: dict[date, _OrbitCollection] = {}
+
+    def load_receiver_orbit(self, leo_id: str, date: date) -> Any:
+        """Load COSMIC-2 receiver orbit data for one spacecraft and UTC date.
+
+        Args:
+            leo_id: COSMIC-2 spacecraft identifier.
+            date: UTC date to load.
+
+        Returns:
+            Private normalized orbit collection. The public return type is
+            ``Any`` by design because product schemas vary.
+
+        Raises:
+            OrbitLoaderError: If files cannot be found or parsed.
+            TypeError: If ``date`` is not a ``datetime.date``.
+            ValueError: If ``leo_id`` is empty.
+        """
+        leo_key: str = self._normalize_object_id(leo_id)
+        request_date: date = self._validate_date(date)
+
+        cache_key: tuple[str, date] = (leo_key, request_date)
+        if cache_key in self._receiver_orbit_cache:
+            return self._receiver_orbit_cache[cache_key]
+
+        self._require_directory(
+            directory=self.receiver_orbit_dir,
+            label="COSMIC-2 receiver orbit",
+        )
+
+        files: list[Path] = self._find_receiver_orbit_files(
+            leo_id=leo_key,
+            request_date=request_date,
+        )
+        if not files:
+            raise OrbitLoaderError(
+                "No COSMIC-2 receiver orbit file found for "
+                f"leo_id={leo_id!r}, date={request_date.isoformat()}, "
+                f"searched directory={self.receiver_orbit_dir}. "
+                "The paper requires COSMIC-2 receiver orbits from CDAAC."
+            )
+
+        parsed_collections: list[_OrbitCollection] = []
+        parse_errors: list[str] = []
+        for path in files:
+            try:
+                parsed_collections.append(
+                    self._parse_receiver_orbit_file(
+                        path=path,
+                        leo_id=leo_key,
+                    )
+                )
+            except Exception as exc:  # Product adapters may raise varied errors.
+                parse_errors.append(f"{path}: {exc}")
+
+        if not parsed_collections:
+            raise OrbitLoaderError(
+                "Found receiver orbit files but none could be parsed for "
+                f"leo_id={leo_id!r}, date={request_date.isoformat()}. "
+                f"Errors: {'; '.join(parse_errors)}"
+            )
+
+        collection: _OrbitCollection = self._merge_collections(parsed_collections)
+        if not collection.series_by_id:
+            raise OrbitLoaderError(
+                f"Receiver orbit files contained no usable series for {leo_id!r}."
+            )
+
+        self._receiver_orbit_cache[cache_key] = collection
+        return collection
+
+    def load_gnss_orbit(self, date: date) -> Any:
+        """Load IGS GNSS orbit data for one UTC date.
+
+        Args:
+            date: UTC date to load.
+
+        Returns:
+            Private normalized GNSS orbit collection. The public return type is
+            ``Any`` by design because product schemas vary.
+
+        Raises:
+            OrbitLoaderError: If files cannot be found or parsed.
+            TypeError: If ``date`` is not a ``datetime.date``.
+        """
+        request_date: date = self._validate_date(date)
+
+        if request_date in self._gnss_orbit_cache:
+            return self._gnss_orbit_cache[request_date]
+
+        self._require_directory(
+            directory=self.gnss_orbit_dir,
+            label="IGS GNSS orbit/clock",
+        )
+
+        files: list[Path] = self._find_gnss_orbit_files(request_date=request_date)
+        if not files:
+            raise OrbitLoaderError(
+                "No IGS GNSS orbit file found for "
+                f"date={request_date.isoformat()}, "
+                f"searched directory={self.gnss_orbit_dir}. "
+                "The paper specifies GNSS orbit/clock products from the "
+                "International GNSS Service."
+            )
+
+        parsed_collections: list[_OrbitCollection] = []
+        parse_errors: list[str] = []
+        for path in files:
+            try:
+                parsed_collections.append(self._parse_gnss_orbit_file(path=path))
+            except Exception as exc:
+                parse_errors.append(f"{path}: {exc}")
+
+        if not parsed_collections:
+            raise OrbitLoaderError(
+                "Found GNSS orbit files but none could be parsed for "
+                f"date={request_date.isoformat()}. "
+                f"Errors: {'; '.join(parse_errors)}"
+            )
+
+        collection: _OrbitCollection = self._merge_collections(parsed_collections)
+        if not collection.series_by_id:
+            raise OrbitLoaderError(
+                f"GNSS orbit files for {request_date.isoformat()} contained no "
+                "usable satellite orbit series."
+            )
+
+        self._gnss_orbit_cache[request_date] = collection
+        return collection
+
+    def interpolate_rx_states(self, window: SignalWindow) -> list[StateVector]:
+        """Interpolate receiver states to every high-rate sample in a window.
+
+        Args:
+            window: Signal window requiring receiver ECEF states.
+
+        Returns:
+            List of ``StateVector`` objects with length ``len(window.times)``.
+
+        Raises:
+            OrbitLoaderError: If receiver orbit data are missing, invalid, or
+                do not cover the requested sample times.
+            TypeError: If ``window`` is not a ``SignalWindow``.
+        """
+        self._validate_window(window)
+
+        if self._has_valid_existing_states(window.rx_states, len(window.times)):
+            return list(window.rx_states)
+
+        sample_datetimes: list[datetime] = self._window_sample_datetimes(window)
+        if not sample_datetimes:
+            return []
+
+        if not str(window.leo_id).strip():
+            raise OrbitLoaderError(
+                "Cannot interpolate receiver states: window.leo_id is empty."
+            )
+
+        collections: list[_OrbitCollection] = []
+        for request_date in self._dates_for_samples(sample_datetimes):
+            collections.append(
+                self.load_receiver_orbit(
+                    leo_id=window.leo_id,
+                    date=request_date,
+                )
+            )
+
+        collections.extend(
+            self._optional_adjacent_receiver_collections(
+                leo_id=window.leo_id,
+                sample_dates=self._dates_for_samples(sample_datetimes),
+            )
+        )
+
+        merged_collection: _OrbitCollection = self._merge_collections(collections)
+        receiver_series: _OrbitSeries = self._select_receiver_series(
+            collection=merged_collection,
+            leo_id=window.leo_id,
+        )
+
+        return self._interpolate_series_to_datetimes(
+            series=receiver_series,
+            sample_datetimes=sample_datetimes,
+            object_label=f"receiver {window.leo_id}",
+        )
+
+    def interpolate_tx_states(self, window: SignalWindow) -> list[StateVector]:
+        """Interpolate GNSS transmitter states to every high-rate sample.
+
+        Args:
+            window: Signal window requiring transmitter ECEF states.
+
+        Returns:
+            List of ``StateVector`` objects with length ``len(window.times)``.
+
+        Raises:
+            OrbitLoaderError: If GNSS orbit data are missing, the requested
+                satellite is absent, or orbit coverage is insufficient.
+            TypeError: If ``window`` is not a ``SignalWindow``.
+        """
+        self._validate_window(window)
+
+        if self._has_valid_existing_states(window.tx_states, len(window.times)):
+            return list(window.tx_states)
+
+        sample_datetimes: list[datetime] = self._window_sample_datetimes(window)
+        if not sample_datetimes:
+            return []
+
+        if not str(window.gnss_id).strip():
+            raise OrbitLoaderError(
+                "Cannot interpolate transmitter states: window.gnss_id is empty."
+            )
+
+        sample_dates: list[date] = self._dates_for_samples(sample_datetimes)
+        collections: list[_OrbitCollection] = [
+            self.load_gnss_orbit(date=request_date) for request_date in sample_dates
+        ]
+        collections.extend(
+            self._optional_adjacent_gnss_collections(sample_dates=sample_dates)
+        )
+
+        merged_collection: _OrbitCollection = self._merge_collections(collections)
+        transmitter_series: _OrbitSeries = self._select_gnss_series(
+            collection=merged_collection,
+            gnss_id=window.gnss_id,
+            constellation=window.constellation,
+        )
+
+        return self._interpolate_series_to_datetimes(
+            series=transmitter_series,
+            sample_datetimes=sample_datetimes,
+            object_label=f"GNSS transmitter {window.gnss_id}",
+        )
+
+    @staticmethod
+    def _validate_window(window: SignalWindow) -> None:
+        """Validate a SignalWindow object."""
+        if not isinstance(window, SignalWindow):
+            raise TypeError(
+                f"window must be a SignalWindow, got {type(window).__name__}."
+            )
+
+    @staticmethod
+    def _validate_date(value: date) -> date:
+        """Validate a date argument."""
+        if not isinstance(value, date):
+            raise TypeError(f"date must be datetime.date, got {type(value).__name__}.")
+        return value
+
+    @staticmethod
+    def _normalize_object_id(object_id: str) -> str:
+        """Normalize a spacecraft/satellite identifier."""
+        normalized: str = str(object_id).strip().upper().replace(" ", "")
+        if not normalized:
+            raise ValueError("Object identifier must be non-empty.")
+        return normalized
+
+    @staticmethod
+    def _require_directory(directory: Path, label: str) -> None:
+        """Ensure an input orbit directory exists when real-data loading occurs."""
+        if not directory.exists():
+            raise OrbitLoaderError(
+                f"{label} directory does not exist: {directory}. "
+                "Synthetic-only runs do not require this directory, but real "
+                "COSMIC-2 processing does."
+            )
+        if not directory.is_dir():
+            raise OrbitLoaderError(f"{label} path is not a directory: {directory}.")
+
+    def _find_receiver_orbit_files(self, leo_id: str, request_date: date) -> list[Path]:
+        """Find receiver orbit files matching spacecraft and date."""
+        files: list[Path] = self._candidate_files(self.receiver_orbit_dir)
+        scored_files: list[tuple[int, str, Path]] = []
+
+        leo_tokens: set[str] = self._identifier_tokens(leo_id)
+        date_tokens: set[str] = self._date_tokens(request_date)
+
+        for path in files:
+            lower_name: str = path.name.lower()
+            lower_full: str = str(path).lower()
+            leo_match: bool = any(token.lower() in lower_full for token in leo_tokens)
+            date_match: bool = any(token.lower() in lower_full for token in date_tokens)
+
+            if not leo_match or not date_match:
+                continue
+
+            score: int = 0
+            if any(token.lower() in lower_name for token in leo_tokens):
+                score += 2
+            if any(token.lower() in lower_name for token in date_tokens):
+                score += 2
+            if self._is_xarray_orbit_file(path):
+                score += 1
+
+            scored_files.append((score, str(path), path))
+
+        return [path for _, _, path in sorted(scored_files, reverse=True)]
+
+    def _find_gnss_orbit_files(self, request_date: date) -> list[Path]:
+        """Find GNSS orbit files matching date and likely orbit suffix."""
+        files: list[Path] = self._candidate_files(self.gnss_orbit_dir)
+        scored_files: list[tuple[int, str, Path]] = []
+        date_tokens: set[str] = self._date_tokens(request_date)
+
+        for path in files:
+            lower_full: str = str(path).lower()
+            date_match: bool = any(token.lower() in lower_full for token in date_tokens)
+            if not date_match:
+                continue
+
+            score: int = 0
+            if self._is_sp3_file(path):
+                score += 5
+            if self._is_xarray_orbit_file(path):
+                score += 2
+            if any(token in path.name.lower() for token in ("sp3", "igs", "igr", "cod", "gfz", "grg", "wum")):
+                score += 1
+
+            scored_files.append((score, str(path), path))
+
+        return [path for _, _, path in sorted(scored_files, reverse=True)]
+
+    @staticmethod
+    def _candidate_files(directory: Path) -> list[Path]:
+        """Return deterministic orbit-file candidates below a directory."""
+        candidates: list[Path] = []
+        for path in directory.rglob("*"):
+            if not path.is_file():
+                continue
+            if OrbitLoader._looks_like_orbit_file(path):
+                candidates.append(path)
+        return sorted(candidates, key=lambda item: str(item))
+
+    @staticmethod
+    def _looks_like_orbit_file(path: Path) -> bool:
+        """Return whether a path resembles a supported orbit product."""
+        suffixes: tuple[str, ...] = tuple(suffix.lower() for suffix in path.suffixes)
+        if not suffixes:
+            return False
+        if suffixes[-1] in _ORBIT_FILE_SUFFIXES:
+            return True
+        if suffixes[-1] in _COMPRESSED_SUFFIXES and len(suffixes) >= 2:
+            return suffixes[-2] in _ORBIT_FILE_SUFFIXES
+        return False
+
+    @staticmethod
+    def _is_sp3_file(path: Path) -> bool:
+        """Return whether a path is likely an SP3 precise orbit file."""
+        suffixes: tuple[str, ...] = tuple(suffix.lower() for suffix in path.suffixes)
+        if not suffixes:
+            return False
+        if suffixes[-1] in _SP3_SUFFIXES:
+            return True
+        return suffixes[-1] in _COMPRESSED_SUFFIXES and len(suffixes) >= 2 and suffixes[-2] in _SP3_SUFFIXES
+
+    @staticmethod
+    def _is_xarray_orbit_file(path: Path) -> bool:
+        """Return whether a path is likely xarray/netCDF/HDF-readable."""
+        suffixes: tuple[str, ...] = tuple(suffix.lower() for suffix in path.suffixes)
+        if not suffixes:
+            return False
+        if suffixes[-1] in _XARRAY_SUFFIXES:
+            return True
+        return suffixes[-1] in _COMPRESSED_SUFFIXES and len(suffixes) >= 2 and suffixes[-2] in _XARRAY_SUFFIXES
+
+    @staticmethod
+    def _date_tokens(request_date: date) -> set[str]:
+        """Build common date tokens for file discovery."""
+        day_of_year: int = int(request_date.strftime("%j"))
+        gps_week, gps_day = OrbitLoader._gps_week_day(request_date)
+        return {
+            request_date.strftime(pattern) for pattern in _PATH_DATE_PATTERNS
+        } | {
+            request_date.strftime("%Y%j"),
+            f"{request_date.year}{day_of_year:03d}",
+            f"{request_date.year}_{day_of_year:03d}",
+            f"{request_date.year}-{day_of_year:03d}",
+            f"{gps_week:04d}{gps_day}",
+            f"{gps_week}{gps_day}",
+        }
+
+    @staticmethod
+    def _identifier_tokens(identifier: str) -> set[str]:
+        """Build common spacecraft identifier tokens for file discovery."""
+        normalized: str = OrbitLoader._normalize_object_id(identifier)
+        tokens: set[str] = {normalized, normalized.lower()}
+
+        digit_match = re.search(r"(\d+)", normalized)
+        if digit_match:
+            digits: str = digit_match.group(1)
+            tokens.update(
+                {
+                    digits,
+                    f"C2E{int(digits):02d}",
+                    f"COSMIC2{int(digits):02d}",
+                    f"FM{int(digits):02d}",
+                    f"F{int(digits):02d}",
+                }
+            )
+
+        return tokens
+
+    @staticmethod
+    def _gps_week_day(request_date: date) -> tuple[int, int]:
+        """Compute GPS week and day-of-week for file token matching."""
+        gps_epoch: date = date(1980, 1, 6)
+        delta_days: int = (request_date - gps_epoch).days
+        gps_week: int = delta_days // 7
+        gps_day: int = delta_days % 7
+        return gps_week, gps_day
+
+    def _parse_receiver_orbit_file(self, path: Path, leo_id: str) -> _OrbitCollection:
+        """Parse one receiver orbit file."""
+        if self._is_xarray_orbit_file(path):
+            collection: _OrbitCollection = self._parse_xarray_orbit_file(
+                path=path,
+                requested_object_id=leo_id,
+                is_gnss=False,
+            )
+        elif self._is_sp3_file(path):
+            collection = self._parse_sp3_file(path)
+        else:
+            raise OrbitLoaderError(f"Unsupported receiver orbit file type: {path}")
+
+        if not collection.series_by_id:
+            raise OrbitLoaderError(f"No orbit series parsed from receiver file {path}.")
+
+        matching_series: dict[str, _OrbitSeries] = {}
+        requested_aliases: set[str] = self._object_aliases(leo_id, constellation="")
+        for object_id, series in collection.series_by_id.items():
+            series_aliases: set[str] = self._object_aliases(object_id, constellation="")
+            if requested_aliases & series_aliases:
+                matching_series[object_id] = series
+
+        if not matching_series and len(collection.series_by_id) == 1:
+            only_id, only_series = next(iter(collection.series_by_id.items()))
+            matching_series[leo_id] = _OrbitSeries(
+                object_id=leo_id,
+                times_s=only_series.times_s,
+                positions_m=only_series.positions_m,
+                velocities_mps=only_series.velocities_mps,
+                source_paths=only_series.source_paths,
+                metadata={**only_series.metadata, "original_object_id": only_id},
+            )
+
+        if not matching_series:
+            raise OrbitLoaderError(
+                f"Receiver orbit file {path} did not contain requested leo_id "
+                f"{leo_id!r}. Available series: {sorted(collection.series_by_id)}."
+            )
+
+        return _OrbitCollection(
+            series_by_id=matching_series,
+            source_paths=(path,),
+            metadata={"type": "receiver_orbit"},
+        )
+
+    def _parse_gnss_orbit_file(self, path: Path) -> _OrbitCollection:
+        """Parse one GNSS orbit file."""
+        if self._is_sp3_file(path):
+            return self._parse_sp3_file(path)
+        if self._is_xarray_orbit_file(path):
+            return self._parse_xarray_orbit_file(
+                path=path,
+                requested_object_id=None,
+                is_gnss=True,
+            )
+        raise OrbitLoaderError(f"Unsupported GNSS orbit file type: {path}")
+
+    def _parse_sp3_file(self, path: Path) -> _OrbitCollection:
+        """Parse an IGS SP3 precise orbit product.
+
+        SP3 position records store positions in kilometers. This parser converts
+        positions to meters. Velocities are derived later from position time
+        series unless native velocity records are present in future extensions.
+        """
+        series_times: dict[str, list[float]] = {}
+        series_positions_m: dict[str, list[tuple[float, float, float]]] = {}
+        current_time_s: float | None = None
+
+        with self._open_text(path) as stream:
+            for raw_line in stream:
+                line: str = raw_line.rstrip("\n")
+                if not line:
+                    continue
+
+                if line.startswith("*"):
+                    current_time_s = self._parse_sp3_epoch_seconds(line)
+                    continue
+
+                if line.startswith("P") and current_time_s is not None:
+                    satellite_id: str = self._normalize_sp3_satellite_id(line[1:4])
+                    try:
+                        x_km = float(line[4:18])
+                        y_km = float(line[18:32])
+                        z_km = float(line[32:46])
+                    except ValueError:
+                        parts: list[str] = line.split()
+                        if len(parts) < 4:
+                            continue
+                        satellite_id = self._normalize_sp3_satellite_id(parts[0][1:])
+                        try:
+                            x_km = float(parts[1])
+                            y_km = float(parts[2])
+                            z_km = float(parts[3])
+                        except ValueError:
+                            continue
+
+                    if not all(math.isfinite(value) for value in (x_km, y_km, z_km)):
+                        continue
+
+                    # SP3 missing values are often encoded as 999999.999999.
+                    if max(abs(x_km), abs(y_km), abs(z_km)) > 500_000.0:
+                        continue
+
+                    series_times.setdefault(satellite_id, []).append(current_time_s)
+                    series_positions_m.setdefault(satellite_id, []).append(
+                        (x_km * _M_PER_KM, y_km * _M_PER_KM, z_km * _M_PER_KM)
+                    )
+
+        series_by_id: dict[str, _OrbitSeries] = {}
+        for satellite_id, times in series_times.items():
+            positions_m: NDArray[np.float64] = np.asarray(
+                series_positions_m[satellite_id],
+                dtype=np.float64,
+            )
+            series: _OrbitSeries = _OrbitSeries(
+                object_id=satellite_id,
+                times_s=np.asarray(times, dtype=np.float64),
+                positions_m=positions_m,
+                velocities_mps=None,
+                source_paths=(path,),
+                metadata={"format": "SP3", "position_units_original": "km"},
+            )
+            series_by_id[satellite_id] = self._sanitize_series(series)
+
+        return _OrbitCollection(
+            series_by_id=series_by_id,
+            source_paths=(path,),
+            metadata={"format": "SP3"},
+        )
+
+    @staticmethod
+    def _open_text(path: Path) -> Any:
+        """Open a text orbit file, supporting gzip compression."""
+        suffixes: tuple[str, ...] = tuple(suffix.lower() for suffix in path.suffixes)
+        if suffixes and suffixes[-1] == ".gz":
+            return gzip.open(path, mode="rt", encoding="utf-8", errors="replace")
+        return path.open(mode="r", encoding="utf-8", errors="replace")
+
+    @staticmethod
+    def _parse_sp3_epoch_seconds(line: str) -> float:
+        """Parse an SP3 epoch line to Unix seconds."""
+        parts: list[str] = line[1:].split()
+        if len(parts) < 6:
+            raise OrbitLoaderError(f"Invalid SP3 epoch line: {line!r}")
+
+        year: int = int(parts[0])
+        month: int = int(parts[1])
+        day: int = int(parts[2])
+        hour: int = int(parts[3])
+        minute: int = int(parts[4])
+        second_float: float = float(parts[5])
+        second_int: int = int(math.floor(second_float))
+        microsecond: int = int(round((second_float - second_int) * 1_000_000.0))
+
+        if microsecond >= 1_000_000:
+            second_int += 1
+            microsecond -= 1_000_000
+
+        epoch: datetime = datetime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second_int,
+            microsecond,
+            tzinfo=timezone.utc,
+        )
+        return float(epoch.timestamp())
+
+    @staticmethod
+    def _normalize_sp3_satellite_id(raw_satellite_id: str) -> str:
+        """Normalize SP3 satellite identifier such as G01 or R12."""
+        value: str = str(raw_satellite_id).strip().upper()
+        if not value:
+            raise OrbitLoaderError("Empty SP3 satellite identifier.")
+        if len(value) == 2 and value[0].isalpha() and value[1].isdigit():
+            value = f"{value[0]}0{value[1]}"
+        return value
+
+    def _parse_xarray_orbit_file(
+        self,
+        path: Path,
+        requested_object_id: str | None,
+        is_gnss: bool,
+    ) -> _OrbitCollection:
+        """Parse a generic xarray-readable orbit file."""
+        try:
+            with xr.open_dataset(path, decode_times=True, mask_and_scale=True) as dataset:
+                loaded_dataset: xr.Dataset = dataset.load()
+        except Exception as exc:
+            raise OrbitLoaderError(f"Could not open xarray orbit file {path}.") from exc
+
+        time_name: str = self._find_dataset_name(loaded_dataset, _TIME_CANDIDATES)
+        times_s: NDArray[np.float64] = self._dataset_time_seconds(
+            loaded_dataset[time_name]
+        )
+
+        satellite_name: str | None = self._find_dataset_name_optional(
+            loaded_dataset,
+            _SATELLITE_ID_CANDIDATES,
+        )
+
+        if is_gnss and satellite_name is not None:
+            return self._parse_xarray_multi_satellite(
+                dataset=loaded_dataset,
+                path=path,
+                times_s=times_s,
+                satellite_name=satellite_name,
+            )
+
+        object_id: str = (
+            self._normalize_object_id(requested_object_id)
+            if requested_object_id is not None
+            else self._infer_single_object_id(loaded_dataset, path)
+        )
+        positions_m: NDArray[np.float64] = self._extract_positions_m(loaded_dataset)
+        velocities_mps: NDArray[np.float64] | None = self._extract_velocities_mps(
+            loaded_dataset
+        )
+
+        series: _OrbitSeries = _OrbitSeries(
+            object_id=object_id,
+            times_s=times_s,
+            positions_m=positions_m,
+            velocities_mps=velocities_mps,
+            source_paths=(path,),
+            metadata={"format": "xarray"},
+        )
+
+        return _OrbitCollection(
+            series_by_id={object_id: self._sanitize_series(series)},
+            source_paths=(path,),
+            metadata={"format": "xarray"},
+        )
+
+    def _parse_xarray_multi_satellite(
+        self,
+        dataset: xr.Dataset,
+        path: Path,
+        times_s: NDArray[np.float64],
+        satellite_name: str,
+    ) -> _OrbitCollection:
+        """Parse a generic xarray dataset containing multiple GNSS satellites."""
+        satellite_values: list[str] = self._dataset_satellite_ids(dataset[satellite_name])
+        if not satellite_values:
+            raise OrbitLoaderError(f"No satellite identifiers found in {path}.")
+
+        position_data: xr.DataArray = self._extract_position_dataarray(dataset)
+        velocity_data: xr.DataArray | None = self._extract_velocity_dataarray_optional(
+            dataset
+        )
+
+        satellite_dim: str = self._find_matching_dim(
+            data_array=position_data,
+            allowed_names={satellite_name, "satellite", "sat", "sv", "prn"},
+        )
+        time_dim: str = self._find_matching_dim(
+            data_array=position_data,
+            allowed_names=set(_TIME_CANDIDATES),
+        )
+
+        series_by_id: dict[str, _OrbitSeries] = {}
+        for satellite_index, raw_satellite_id in enumerate(satellite_values):
+            satellite_id: str = self._normalize_gnss_id(raw_satellite_id, "")
+            selected_position: xr.DataArray = position_data.isel(
+                {satellite_dim: satellite_index}
+            )
+            positions_m: NDArray[np.float64] = self._position_array_from_dataarray(
+                selected_position,
+                time_dim=time_dim,
+            )
+            positions_m = self._positions_to_meters(
+                positions_m,
+                units=self._units_from_dataarray(position_data),
+            )
+
+            velocities_mps: NDArray[np.float64] | None = None
+            if velocity_data is not None:
+                selected_velocity: xr.DataArray = velocity_data.isel(
+                    {satellite_dim: satellite_index}
+                )
+                velocities_mps = self._velocity_array_from_dataarray(
+                    selected_velocity,
+                    time_dim=time_dim,
+                )
+                velocities_mps = self._velocities_to_mps(
+                    velocities_mps,
+                    units=self._units_from_dataarray(velocity_data),
+                )
+
+            series = _OrbitSeries(
+                object_id=satellite_id,
+                times_s=times_s,
+                positions_m=positions_m,
+                velocities_mps=velocities_mps,
+                source_paths=(path,),
+                metadata={"format": "xarray_multi_satellite"},
+            )
+            series_by_id[satellite_id] = self._sanitize_series(series)
+
+        return _OrbitCollection(
+            series_by_id=series_by_id,
+            source_paths=(path,),
+            metadata={"format": "xarray_multi_satellite"},
+        )
+
+    @staticmethod
+    def _find_dataset_name(dataset: xr.Dataset, candidates: Sequence[str]) -> str:
+        """Find a variable/coordinate name in an xarray dataset."""
+        name: str | None = OrbitLoader._find_dataset_name_optional(dataset, candidates)
+        if name is None:
+            raise OrbitLoaderError(
+                f"Could not find any of {tuple(candidates)} in dataset variables "
+                f"{tuple(dataset.variables)}."
+            )
+        return name
+
+    @staticmethod
+    def _find_dataset_name_optional(
+        dataset: xr.Dataset,
+        candidates: Sequence[str],
+    ) -> str | None:
+        """Find a variable/coordinate name, returning None if absent."""
+        lookup: dict[str, str] = {
+            str(name).strip().lower(): str(name) for name in dataset.variables
+        }
+        for candidate in candidates:
+            key: str = candidate.lower()
+            if key in lookup:
+                return lookup[key]
+
+        for variable_name in dataset.variables:
+            lower_name: str = str(variable_name).lower()
+            if any(candidate.lower() in lower_name for candidate in candidates):
+                return str(variable_name)
+
+        return None
+
+    @staticmethod
+    def _dataset_time_seconds(time_data: xr.DataArray) -> NDArray[np.float64]:
+        """Convert xarray time coordinate to Unix seconds."""
+        values: NDArray[Any] = np.asarray(time_data.values)
+
+        if np.issubdtype(values.dtype, np.datetime64):
+            seconds: NDArray[np.float64] = (
+                values.astype("datetime64[ns]").astype(np.int64).astype(np.float64)
+                * 1.0e-9
+            )
+        elif np.issubdtype(values.dtype, np.number):
+            units: str = str(time_data.attrs.get("units", "")).strip()
+            if units:
+                try:
+                    datetimes = netCDF4.num2date(
+                        values,
+                        units=units,
+                        calendar=str(time_data.attrs.get("calendar", "standard")),
+                        only_use_cftime_datetimes=False,
+                        only_use_python_datetimes=True,
+                    )
+                    seconds = np.asarray(
+                        [
+                            OrbitLoader._datetime_to_seconds(
+                                OrbitLoader._ensure_datetime(value)
+                            )
+                            for value in np.ravel(datetimes)
+                        ],
+                        dtype=np.float64,
+                    ).reshape(values.shape)
+                except Exception:
+                    seconds = values.astype(np.float64, copy=False)
+            else:
+                seconds = values.astype(np.float64, copy=False)
+        else:
+            try:
+                datetime_values = values.astype("datetime64[ns]")
+                seconds = (
+                    datetime_values.astype(np.int64).astype(np.float64) * 1.0e-9
+                )
+            except Exception as exc:
+                raise OrbitLoaderError("Could not decode orbit time variable.") from exc
+
+        time_seconds: NDArray[np.float64] = np.ravel(seconds).astype(np.float64)
+        if time_seconds.ndim != 1 or time_seconds.size == 0:
+            raise OrbitLoaderError("Orbit time variable is empty or invalid.")
+        if not np.all(np.isfinite(time_seconds)):
+            raise OrbitLoaderError("Orbit time variable contains non-finite values.")
+
+        return time_seconds
+
+    def _extract_positions_m(self, dataset: xr.Dataset) -> NDArray[np.float64]:
+        """Extract single-object positions from xarray dataset."""
+        position_data: xr.DataArray = self._extract_position_dataarray(dataset)
+        time_dim: str = self._find_matching_dim(
+            data_array=position_data,
+            allowed_names=set(_TIME_CANDIDATES),
+        )
+        positions: NDArray[np.float64] = self._position_array_from_dataarray(
+            position_data,
+            time_dim=time_dim,
+        )
+        return self._positions_to_meters(
+            positions,
+            units=self._units_from_dataarray(position_data),
+        )
+
+    def _extract_velocities_mps(self, dataset: xr.Dataset) -> NDArray[np.float64] | None:
+        """Extract single-object velocities from xarray dataset if available."""
+        velocity_data: xr.DataArray | None = self._extract_velocity_dataarray_optional(
+            dataset
+        )
+        if velocity_data is None:
+            return None
+
+        time_dim: str = self._find_matching_dim(
+            data_array=velocity_data,
+            allowed_names=set(_TIME_CANDIDATES),
+        )
+        velocities: NDArray[np.float64] = self._velocity_array_from_dataarray(
+            velocity_data,
+            time_dim=time_dim,
+        )
+        return self._velocities_to_mps(
+            velocities,
+            units=self._units_from_dataarray(velocity_data),
+        )
+
+    def _extract_position_dataarray(self, dataset: xr.Dataset) -> xr.DataArray:
+        """Extract position data array, either vector or component variables."""
+        vector_name: str | None = self._find_dataset_name_optional(
+            dataset,
+            _POSITION_VECTOR_CANDIDATES,
+        )
+        if vector_name is not None:
+            data_array: xr.DataArray = dataset[vector_name]
+            if np.asarray(data_array.values).ndim >= 2:
+                return data_array
+
+        x_name: str = self._find_dataset_name(dataset, _X_CANDIDATES)
+        y_name: str = self._find_dataset_name(dataset, _Y_CANDIDATES)
+        z_name: str = self._find_dataset_name(dataset, _Z_CANDIDATES)
+
+        stacked: xr.DataArray = xr.concat(
+            [dataset[x_name], dataset[y_name], dataset[z_name]],
+            dim="component",
+        )
+        stacked = stacked.transpose(..., "component")
+        stacked.attrs["units"] = (
+            dataset[x_name].attrs.get("units")
+            or dataset[y_name].attrs.get("units")
+            or dataset[z_name].attrs.get("units")
+            or ""
+        )
+        return stacked
+
+    def _extract_velocity_dataarray_optional(self, dataset: xr.Dataset) -> xr.DataArray | None:
+        """Extract velocity data array if present."""
+        vector_name: str | None = self._find_dataset_name_optional(
+            dataset,
+            _VELOCITY_VECTOR_CANDIDATES,
+        )
+        if vector_name is not None:
+            data_array: xr.DataArray = dataset[vector_name]
+            if np.asarray(data_array.values).ndim >= 2:
+                return data_array
+
+        try:
+            vx_name: str = self._find_dataset_name(dataset, _VX_CANDIDATES)
+            vy_name: str = self._find_dataset_name(dataset, _VY_CANDIDATES)
+            vz_name: str = self._find_dataset_name(dataset, _VZ_CANDIDATES)
+        except OrbitLoaderError:
+            return None
+
+        stacked: xr.DataArray = xr.concat(
+            [dataset[vx_name], dataset[vy_name], dataset[vz_name]],
+            dim="component",
+        )
+        stacked = stacked.transpose(..., "component")
+        stacked.attrs["units"] = (
+            dataset[vx_name].attrs.get("units")
+            or dataset[vy_name].attrs.get("units")
+            or dataset[vz_name].attrs.get("units")
+            or ""
+        )
+        return stacked
+
+    @staticmethod
+    def _find_matching_dim(data_array: xr.DataArray, allowed_names: set[str]) -> str:
+        """Find dimension matching one of the allowed logical names."""
+        lower_allowed: set[str] = {name.lower() for name in allowed_names}
+        for dim in data_array.dims:
+            lower_dim: str = str(dim).lower()
+            if lower_dim in lower_allowed or any(name in lower_dim for name in lower_allowed):
+                return str(dim)
+
+        # Fallback: choose the longest non-component dimension as time-like.
+        non_component_dims: list[str] = [
+            str(dim)
+            for dim in data_array.dims
+            if "comp" not in str(dim).lower()
+            and "xyz" not in str(dim).lower()
+            and data_array.sizes[str(dim)] > 1
+        ]
+        if non_component_dims:
+            return max(non_component_dims, key=lambda dim: int(data_array.sizes[dim]))
+
+        raise OrbitLoaderError(
+            f"Could not identify matching dimension in {data_array.dims}."
+        )
+
+    @staticmethod
+    def _position_array_from_dataarray(
+        data_array: xr.DataArray,
+        time_dim: str,
+    ) -> NDArray[np.float64]:
+        """Convert position DataArray to shape (n_time, 3)."""
+        return OrbitLoader._vector_array_from_dataarray(data_array, time_dim)
+
+    @staticmethod
+    def _velocity_array_from_dataarray(
+        data_array: xr.DataArray,
+        time_dim: str,
+    ) -> NDArray[np.float64]:
+        """Convert velocity DataArray to shape (n_time, 3)."""
+        return OrbitLoader._vector_array_from_dataarray(data_array, time_dim)
+
+    @staticmethod
+    def _vector_array_from_dataarray(
+        data_array: xr.DataArray,
+        time_dim: str,
+    ) -> NDArray[np.float64]:
+        """Convert vector DataArray to shape (n_time, 3)."""
+        values: NDArray[np.float64] = np.asarray(data_array.values, dtype=np.float64)
+        dims: tuple[str, ...] = tuple(str(dim) for dim in data_array.dims)
+
+        if values.ndim < 2:
+            raise OrbitLoaderError("Vector orbit variable must have at least 2 dimensions.")
+
+        if time_dim not in dims:
+            raise OrbitLoaderError(f"Time dimension {time_dim!r} not in vector variable.")
+
+        time_axis: int = dims.index(time_dim)
+        component_axis_candidates: list[int] = [
+            axis for axis, size in enumerate(values.shape) if size == 3 and axis != time_axis
+        ]
+        if not component_axis_candidates:
+            raise OrbitLoaderError(
+                "Could not identify 3-component axis in vector orbit variable."
+            )
+
+        component_axis: int = component_axis_candidates[-1]
+        moved: NDArray[np.float64] = np.moveaxis(values, [time_axis, component_axis], [0, 1])
+
+        if moved.ndim > 2:
+            trailing_shape: tuple[int, ...] = moved.shape[2:]
+            if int(np.prod(trailing_shape)) != 1:
+                raise OrbitLoaderError(
+                    "Vector orbit variable has unsupported extra dimensions "
+                    f"{trailing_shape}."
+                )
+            moved = moved.reshape(moved.shape[0], moved.shape[1])
+
+        if moved.shape[1] != 3:
+            raise OrbitLoaderError(
+                f"Vector orbit variable has invalid component shape {moved.shape}."
+            )
+
+        return moved.astype(np.float64, copy=False)
+
+    @staticmethod
+    def _units_from_dataarray(data_array: xr.DataArray) -> str:
+        """Extract units string from xarray DataArray."""
+        return str(
+            data_array.attrs.get("units")
+            or data_array.attrs.get("unit")
+            or data_array.attrs.get("Units")
+            or ""
+        ).strip().lower()
+
+    @staticmethod
+    def _positions_to_meters(
+        positions: NDArray[np.float64],
+        units: str = "",
+    ) -> NDArray[np.float64]:
+        """Convert position array to meters."""
+        position_array: NDArray[np.float64] = np.asarray(positions, dtype=np.float64)
+        if position_array.ndim != 2 or position_array.shape[1] != 3:
+            raise OrbitLoaderError(
+                f"positions must have shape (n, 3), got {position_array.shape}."
+            )
+
+        lower_units: str = units.lower()
+        if "km" in lower_units or "kilometer" in lower_units:
+            return position_array * _M_PER_KM
+        if "m" in lower_units or "meter" in lower_units:
+            return position_array
+
+        median_norm: float = float(np.nanmedian(np.linalg.norm(position_array, axis=1)))
+        if not math.isfinite(median_norm):
+            raise OrbitLoaderError("Position array has non-finite norms.")
+
+        # ECEF position norms in kilometers are O(10^4), in meters O(10^7).
+        if median_norm < 1.0e6:
+            return position_array * _M_PER_KM
+        return position_array
+
+    @staticmethod
+    def _velocities_to_mps(
+        velocities: NDArray[np.float64],
+        units: str = "",
+    ) -> NDArray[np.float64]:
+        """Convert velocity array to meters per second."""
+        velocity_array: NDArray[np.float64] = np.asarray(velocities, dtype=np.float64)
+        if velocity_array.ndim != 2 or velocity_array.shape[1] != 3:
+            raise OrbitLoaderError(
+                f"velocities must have shape (n, 3), got {velocity_array.shape}."
+            )
+
+        lower_units: str = units.lower().replace(" ", "")
+        if "km/s" in lower_units or "kmpersec" in lower_units or "kilometer" in lower_units:
+            return velocity_array * _M_PER_KM
+        if "m/s" in lower_units or "mps" in lower_units or "meter" in lower_units:
+            return velocity_array
+
+        median_speed: float = float(np.nanmedian(np.linalg.norm(velocity_array, axis=1)))
+        if not math.isfinite(median_speed):
+            raise OrbitLoaderError("Velocity array has non-finite norms.")
+
+        # Orbital speeds are a few km/s or a few thousand m/s.
+        if median_speed < 100.0:
+            return velocity_array * _M_PER_KM
+        return velocity_array
+
+    @staticmethod
+    def _dataset_satellite_ids(data_array: xr.DataArray) -> list[str]:
+        """Extract satellite identifiers from xarray coordinate/variable."""
+        raw_values: NDArray[Any] = np.asarray(data_array.values).ravel()
+        identifiers: list[str] = []
+        for value in raw_values:
+            if isinstance(value, bytes):
+                identifiers.append(value.decode("utf-8", errors="replace").strip())
+            else:
+                identifiers.append(str(value).strip())
+        return [identifier for identifier in identifiers if identifier]
+
+    @staticmethod
+    def _infer_single_object_id(dataset: xr.Dataset, path: Path) -> str:
+        """Infer a single-object orbit ID from attributes or filename."""
+        for key in ("leo_id", "spacecraft", "satellite", "sat", "prn", "id"):
+            if key in dataset.attrs and str(dataset.attrs[key]).strip():
+                return OrbitLoader._normalize_object_id(str(dataset.attrs[key]))
+        return OrbitLoader._normalize_object_id(path.stem.split(".")[0])
+
+    def _sanitize_series(self, series: _OrbitSeries) -> _OrbitSeries:
+        """Sort, de-duplicate, validate, and fill velocity for an orbit series."""
+        times_s: NDArray[np.float64] = np.asarray(series.times_s, dtype=np.float64).ravel()
+        positions_m: NDArray[np.float64] = np.asarray(series.positions_m, dtype=np.float64)
+
+        if positions_m.ndim != 2 or positions_m.shape[1] != 3:
+            raise OrbitLoaderError(
+                f"Orbit positions for {series.object_id!r} must have shape "
+                f"(n, 3), got {positions_m.shape}."
+            )
+        if times_s.size != positions_m.shape[0]:
+            raise OrbitLoaderError(
+                f"Orbit time/position length mismatch for {series.object_id!r}: "
+                f"{times_s.size} vs {positions_m.shape[0]}."
+            )
+        if times_s.size < _MIN_INTERPOLATION_SAMPLES:
+            raise OrbitLoaderError(
+                f"Orbit series {series.object_id!r} has fewer than "
+                f"{_MIN_INTERPOLATION_SAMPLES} samples."
+            )
+
+        valid_mask: NDArray[np.bool_] = (
+            np.isfinite(times_s)
+            & np.all(np.isfinite(positions_m), axis=1)
+        )
+        if series.velocities_mps is not None:
+            velocities_raw: NDArray[np.float64] | None = np.asarray(
+                series.velocities_mps,
+                dtype=np.float64,
+            )
+            if velocities_raw.shape != positions_m.shape:
+                velocities_raw = None
+        else:
+            velocities_raw = None
+
+        times_s = times_s[valid_mask]
+        positions_m = positions_m[valid_mask]
+        if velocities_raw is not None:
+            velocities_raw = velocities_raw[valid_mask]
+            velocity_valid_mask: NDArray[np.bool_] = np.all(np.isfinite(velocities_raw), axis=1)
+            if not np.all(velocity_valid_mask):
+                velocities_raw = None
+
+        order: NDArray[np.int64] = np.argsort(times_s)
+        times_s = times_s[order]
+        positions_m = positions_m[order]
+        if velocities_raw is not None:
+            velocities_raw = velocities_raw[order]
+
+        unique_indices: list[int] = []
+        previous_time: float | None = None
+        for index, current_time in enumerate(times_s):
+            if previous_time is None or abs(float(current_time) - previous_time) > _DUPLICATE_TIME_TOLERANCE_S:
+                unique_indices.append(index)
+                previous_time = float(current_time)
+
+        times_s = times_s[unique_indices]
+        positions_m = positions_m[unique_indices]
+        if velocities_raw is not None:
+            velocities_raw = velocities_raw[unique_indices]
+
+        if times_s.size < _MIN_INTERPOLATION_SAMPLES:
+            raise OrbitLoaderError(
+                f"Orbit series {series.object_id!r} has insufficient unique samples."
+            )
+
+        if np.any(np.diff(times_s) <= 0.0):
+            raise OrbitLoaderError(
+                f"Orbit series {series.object_id!r} times are not strictly increasing."
+            )
+
+        radii_m: NDArray[np.float64] = np.linalg.norm(positions_m, axis=1)
+        if not np.all(np.isfinite(radii_m)) or np.any(radii_m <= 0.0):
+            raise OrbitLoaderError(
+                f"Orbit series {series.object_id!r} contains invalid position radii."
+            )
+
+        velocities_mps: NDArray[np.float64] = (
+            velocities_raw
+            if velocities_raw is not None
+            else self._derive_velocities_mps(times_s=times_s, positions_m=positions_m)
+        )
+
+        return _OrbitSeries(
+            object_id=self._normalize_object_id(series.object_id),
+            times_s=times_s.astype(np.float64, copy=False),
+            positions_m=positions_m.astype(np.float64, copy=False),
+            velocities_mps=velocities_mps.astype(np.float64, copy=False),
+            source_paths=series.source_paths,
+            metadata=dict(series.metadata),
+        )
+
+    @staticmethod
+    def _derive_velocities_mps(
+        times_s: NDArray[np.float64],
+        positions_m: NDArray[np.float64],
+    ) -> NDArray[np.float64]:
+        """Derive ECEF velocities from position time series."""
+        if times_s.size >= _CUBIC_INTERPOLATION_SAMPLES:
+            velocities: NDArray[np.float64] = np.empty_like(positions_m)
+            for component_index in range(3):
+                spline = CubicSpline(
+                    times_s,
+                    positions_m[:, component_index],
+                    bc_type="not-a-knot",
+                    extrapolate=False,
+                )
+                velocities[:, component_index] = spline.derivative()(times_s)
+            return velocities
+
+        return np.gradient(positions_m, times_s, axis=0, edge_order=1)
+
+    def _merge_collections(self, collections: Sequence[_OrbitCollection]) -> _OrbitCollection:
+        """Merge multiple orbit collections by object identifier."""
+        grouped_series: dict[str, list[_OrbitSeries]] = {}
+        source_paths: list[Path] = []
+
+        for collection in collections:
+            if not isinstance(collection, _OrbitCollection):
+                raise OrbitLoaderError(
+                    f"Expected _OrbitCollection, got {type(collection).__name__}."
+                )
+            source_paths.extend(collection.source_paths)
+            for object_id, series in collection.series_by_id.items():
+                normalized_id: str = self._normalize_object_id(object_id)
+                grouped_series.setdefault(normalized_id, []).append(series)
+
+        merged_series_by_id: dict[str, _OrbitSeries] = {}
+        for object_id, series_list in grouped_series.items():
+            merged_series_by_id[object_id] = self._merge_series(
+                object_id=object_id,
+                series_list=series_list,
+            )
+
+        return _OrbitCollection(
+            series_by_id=merged_series_by_id,
+            source_paths=tuple(sorted(set(source_paths), key=lambda item: str(item))),
+            metadata={"merged": True},
+        )
+
+    def _merge_series(
+        self,
+        object_id: str,
+        series_list: Sequence[_OrbitSeries],
+    ) -> _OrbitSeries:
+        """Merge orbit series for one object and sanitize result."""
+        times_parts: list[NDArray[np.float64]] = []
+        position_parts: list[NDArray[np.float64]] = []
+        velocity_parts: list[NDArray[np.float64]] = []
+        source_paths: list[Path] = []
+
+        all_have_velocity: bool = all(series.velocities_mps is not None for series in series_list)
+        for series in series_list:
+            sanitized: _OrbitSeries = self._sanitize_series(series)
+            times_parts.append(sanitized.times_s)
+            position_parts.append(sanitized.positions_m)
+            if all_have_velocity and sanitized.velocities_mps is not None:
+                velocity_parts.append(sanitized.velocities_mps)
+            source_paths.extend(sanitized.source_paths)
+
+        velocities_mps: NDArray[np.float64] | None = (
+            np.vstack(velocity_parts) if all_have_velocity and velocity_parts else None
+        )
+
+        return self._sanitize_series(
+            _OrbitSeries(
+                object_id=object_id,
+                times_s=np.concatenate(times_parts),
+                positions_m=np.vstack(position_parts),
+                velocities_mps=velocities_mps,
+                source_paths=tuple(sorted(set(source_paths), key=lambda item: str(item))),
+                metadata={"merged": True},
+            )
+        )
+
+    def _select_receiver_series(
+        self,
+        collection: _OrbitCollection,
+        leo_id: str,
+    ) -> _OrbitSeries:
+        """Select receiver orbit series from a collection."""
+        requested_aliases: set[str] = self._object_aliases(leo_id, constellation="")
+        for object_id, series in collection.series_by_id.items():
+            if requested_aliases & self._object_aliases(object_id, constellation=""):
+                return series
+
+        if len(collection.series_by_id) == 1:
+            return next(iter(collection.series_by_id.values()))
+
+        raise OrbitLoaderError(
+            f"Receiver orbit for leo_id={leo_id!r} not found. Available IDs: "
+            f"{sorted(collection.series_by_id)}."
+        )
+
+    def _select_gnss_series(
+        self,
+        collection: _OrbitCollection,
+        gnss_id: str,
+        constellation: str,
+    ) -> _OrbitSeries:
+        """Select requested GNSS satellite series from a collection."""
+        requested_aliases: set[str] = self._object_aliases(
+            gnss_id,
+            constellation=constellation,
+        )
+
+        for object_id, series in collection.series_by_id.items():
+            if requested_aliases & self._object_aliases(object_id, constellation=constellation):
+                return series
+
+        raise OrbitLoaderError(
+            f"GNSS satellite {gnss_id!r} "
+            f"(constellation={constellation!r}) not found in orbit product. "
+            f"Available satellite IDs include: {sorted(collection.series_by_id)[:30]}."
+        )
+
+    @staticmethod
+    def _object_aliases(identifier: str, constellation: str) -> set[str]:
+        """Build identifier aliases for spacecraft/GNSS matching."""
+        normalized: str = OrbitLoader._normalize_object_id(identifier)
+        aliases: set[str] = {normalized}
+
+        stripped: str = re.sub(r"[^A-Z0-9]", "", normalized)
+        aliases.add(stripped)
+
+        digit_match = re.search(r"(\d+)", stripped)
+        digits: str | None = digit_match.group(1) if digit_match else None
+
+        constellation_key: str = str(constellation).strip().upper()
+        if digits is not None:
+            number: int = int(digits)
+            aliases.update({str(number), f"{number:02d}", f"{number:03d}"})
+
+            if constellation_key in {"GPS", "G", "NAVSTAR"} or stripped.startswith("G"):
+                aliases.update({f"G{number:02d}", f"GPS{number:02d}", f"PRN{number:02d}"})
+            elif constellation_key in {"GLONASS", "GLO", "R"} or stripped.startswith("R"):
+                aliases.update({f"R{number:02d}", f"GLO{number:02d}", f"GLONASS{number:02d}"})
+            elif stripped.startswith("E"):
+                aliases.update({f"E{number:02d}", f"GAL{number:02d}"})
+            elif stripped.startswith("C"):
+                aliases.update({f"C{number:02d}", f"BDS{number:02d}"})
+            else:
+                aliases.update(
+                    {
+                        f"G{number:02d}",
+                        f"R{number:02d}",
+                        f"E{number:02d}",
+                        f"C{number:02d}",
+                    }
+                )
+
+        return {alias.upper() for alias in aliases if alias}
+
+    @staticmethod
+    def _normalize_gnss_id(raw_id: str, constellation: str) -> str:
+        """Normalize GNSS satellite ID for collection keys."""
+        aliases: set[str] = OrbitLoader._object_aliases(raw_id, constellation)
+        for alias in sorted(aliases):
+            if re.match(r"^[GREJC]\d{2}$", alias):
+                return alias
+        return OrbitLoader._normalize_object_id(raw_id)
+
+    def _interpolate_series_to_datetimes(
+        self,
+        series: _OrbitSeries,
+        sample_datetimes: Sequence[datetime],
+        object_label: str,
+    ) -> list[StateVector]:
+        """Interpolate one orbit series to absolute datetimes."""
+        if not sample_datetimes:
+            return []
+
+        sample_times_s: NDArray[np.float64] = np.asarray(
+            [self._datetime_to_seconds(value) for value in sample_datetimes],
+            dtype=np.float64,
+        )
+
+        self._validate_orbit_coverage(
+            series=series,
+            sample_times_s=sample_times_s,
+            object_label=object_label,
+        )
+
+        positions_m: NDArray[np.float64] = self._interpolate_array(
+            source_times_s=series.times_s,
+            source_values=series.positions_m,
+            sample_times_s=sample_times_s,
+            label=f"{object_label} position",
+        )
+
+        if series.velocities_mps is not None:
+            velocities_mps: NDArray[np.float64] = self._interpolate_array(
+                source_times_s=series.times_s,
+                source_values=series.velocities_mps,
+                sample_times_s=sample_times_s,
+                label=f"{object_label} velocity",
+            )
+        else:
+            velocities_mps = self._interpolate_velocity_from_position_spline(
+                source_times_s=series.times_s,
+                source_positions_m=series.positions_m,
+                sample_times_s=sample_times_s,
+                label=object_label,
+            )
+
+        if positions_m.shape != (len(sample_datetimes), 3):
+            raise OrbitLoaderError(
+                f"Interpolated {object_label} positions have invalid shape "
+                f"{positions_m.shape}."
+            )
+        if velocities_mps.shape != (len(sample_datetimes), 3):
+            raise OrbitLoaderError(
+                f"Interpolated {object_label} velocities have invalid shape "
+                f"{velocities_mps.shape}."
+            )
+        if not np.all(np.isfinite(positions_m)) or not np.all(np.isfinite(velocities_mps)):
+            raise OrbitLoaderError(
+                f"Interpolated {object_label} states contain non-finite values."
+            )
+
+        states: list[StateVector] = []
+        for index, sample_datetime in enumerate(sample_datetimes):
+            states.append(
+                StateVector(
+                    time=sample_datetime,
+                    position_m=Vector3(
+                        float(positions_m[index, 0]),
+                        float(positions_m[index, 1]),
+                        float(positions_m[index, 2]),
+                    ),
+                    velocity_mps=Vector3(
+                        float(velocities_mps[index, 0]),
+                        float(velocities_mps[index, 1]),
+                        float(velocities_mps[index, 2]),
+                    ),
+                )
+            )
+
+        return states
+
+    @staticmethod
+    def _validate_orbit_coverage(
+        series: _OrbitSeries,
+        sample_times_s: NDArray[np.float64],
+        object_label: str,
+    ) -> None:
+        """Reject interpolation requests outside orbit coverage."""
+        min_sample_s: float = float(np.min(sample_times_s))
+        max_sample_s: float = float(np.max(sample_times_s))
+        min_orbit_s: float = float(series.times_s[0])
+        max_orbit_s: float = float(series.times_s[-1])
+
+        if min_sample_s < min_orbit_s - _COVERAGE_TOLERANCE_S or max_sample_s > max_orbit_s + _COVERAGE_TOLERANCE_S:
+            raise OrbitLoaderError(
+                f"Orbit coverage for {object_label} does not include all sample "
+                f"times. Sample range UTC={OrbitLoader._seconds_to_datetime(min_sample_s)} "
+                f"to {OrbitLoader._seconds_to_datetime(max_sample_s)}, orbit "
+                f"coverage UTC={OrbitLoader._seconds_to_datetime(min_orbit_s)} "
+                f"to {OrbitLoader._seconds_to_datetime(max_orbit_s)}, "
+                f"sources={[str(path) for path in series.source_paths]}."
+            )
+
+    @staticmethod
+    def _interpolate_array(
+        source_times_s: NDArray[np.float64],
+        source_values: NDArray[np.float64],
+        sample_times_s: NDArray[np.float64],
+        label: str,
+    ) -> NDArray[np.float64]:
+        """Interpolate vector components independently."""
+        if source_times_s.size >= _CUBIC_INTERPOLATION_SAMPLES:
+            output: NDArray[np.float64] = np.empty((sample_times_s.size, 3), dtype=np.float64)
+            for component_index in range(3):
+                spline = CubicSpline(
+                    source_times_s,
+                    source_values[:, component_index],
+                    bc_type="not-a-knot",
+                    extrapolate=False,
+                )
+                output[:, component_index] = spline(sample_times_s)
+            return output
+
+        try:
+            interpolator = interp1d(
+                source_times_s,
+                source_values,
+                axis=0,
+                kind="linear",
+                bounds_error=True,
+                assume_sorted=True,
+            )
+            return np.asarray(interpolator(sample_times_s), dtype=np.float64)
+        except Exception as exc:
+            raise OrbitLoaderError(f"Linear interpolation failed for {label}.") from exc
+
+    @staticmethod
+    def _interpolate_velocity_from_position_spline(
+        source_times_s: NDArray[np.float64],
+        source_positions_m: NDArray[np.float64],
+        sample_times_s: NDArray[np.float64],
+        label: str,
+    ) -> NDArray[np.float64]:
+        """Interpolate velocity by differentiating position interpolation."""
+        if source_times_s.size >= _CUBIC_INTERPOLATION_SAMPLES:
+            output: NDArray[np.float64] = np.empty((sample_times_s.size, 3), dtype=np.float64)
+            for component_index in range(3):
+                spline = CubicSpline(
+                    source_times_s,
+                    source_positions_m[:, component_index],
+                    bc_type="not-a-knot",
+                    extrapolate=False,
+                )
+                output[:, component_index] = spline.derivative()(sample_times_s)
+            return output
+
+        derived_velocity: NDArray[np.float64] = np.gradient(
+            source_positions_m,
+            source_times_s,
+            axis=0,
+            edge_order=1,
+        )
+        return OrbitLoader._interpolate_array(
+            source_times_s=source_times_s,
+            source_values=derived_velocity,
+            sample_times_s=sample_times_s,
+            label=f"{label} derived velocity",
+        )
+
+    def _window_sample_datetimes(self, window: SignalWindow) -> list[datetime]:
+        """Convert SignalWindow sample times to absolute UTC datetimes."""
+        start_time: datetime = self._ensure_datetime(window.start_time)
+        time_values: NDArray[np.float64] = np.asarray(window.times, dtype=np.float64)
+
+        if time_values.ndim != 1:
+            raise OrbitLoaderError("window.times must be one-dimensional.")
+        if not np.all(np.isfinite(time_values)):
+            raise OrbitLoaderError("window.times contains non-finite sample times.")
+
+        sample_datetimes: list[datetime] = []
+        for sample_time in time_values:
+            time_value: float = float(sample_time)
+            if abs(time_value) > _EPOCH_SECONDS_HEURISTIC:
+                sample_datetime: datetime = self._seconds_to_datetime(time_value)
+            else:
+                sample_datetime = start_time + timedelta(seconds=time_value)
+
+            if sample_datetime.tzinfo is None:
+                sample_datetime = sample_datetime.replace(tzinfo=timezone.utc)
+            else:
+                sample_datetime = sample_datetime.astimezone(timezone.utc)
+
+            sample_datetimes.append(sample_datetime)
+
+        return sample_datetimes
+
+    @staticmethod
+    def _dates_for_samples(sample_datetimes: Sequence[datetime]) -> list[date]:
+        """Return sorted unique UTC dates for sample times."""
+        dates: set[date] = {
+            sample_datetime.astimezone(timezone.utc).date()
+            for sample_datetime in sample_datetimes
+        }
+        return sorted(dates)
+
+    def _optional_adjacent_receiver_collections(
+        self,
+        leo_id: str,
+        sample_dates: Sequence[date],
+    ) -> list[_OrbitCollection]:
+        """Load adjacent receiver days when files exist, without requiring them."""
+        optional_collections: list[_OrbitCollection] = []
+        optional_dates: set[date] = set()
+        for sample_date in sample_dates:
+            optional_dates.add(sample_date - timedelta(days=1))
+            optional_dates.add(sample_date + timedelta(days=1))
+
+        for optional_date in sorted(optional_dates):
+            if optional_date in set(sample_dates):
+                continue
+            if not self._find_receiver_orbit_files(
+                leo_id=self._normalize_object_id(leo_id),
+                request_date=optional_date,
+            ):
+                continue
+            try:
+                optional_collections.append(
+                    self.load_receiver_orbit(leo_id=leo_id, date=optional_date)
+                )
+            except OrbitLoaderError:
+                continue
+
+        return optional_collections
+
+    def _optional_adjacent_gnss_collections(
+        self,
+        sample_dates: Sequence[date],
+    ) -> list[_OrbitCollection]:
+        """Load adjacent GNSS days when files exist, without requiring them."""
+        optional_collections: list[_OrbitCollection] = []
+        optional_dates: set[date] = set()
+        for sample_date in sample_dates:
+            optional_dates.add(sample_date - timedelta(days=1))
+            optional_dates.add(sample_date + timedelta(days=1))
+
+        for optional_date in sorted(optional_dates):
+            if optional_date in set(sample_dates):
+                continue
+            if not self._find_gnss_orbit_files(request_date=optional_date):
+                continue
+            try:
+                optional_collections.append(self.load_gnss_orbit(date=optional_date))
+            except OrbitLoaderError:
+                continue
+
+        return optional_collections
+
+    @staticmethod
+    def _has_valid_existing_states(
+        states: Sequence[StateVector],
+        expected_length: int,
+    ) -> bool:
+        """Return True if existing states are complete and finite."""
+        if len(states) != expected_length:
+            return False
+
+        for state in states:
+            if not isinstance(state, StateVector):
+                return False
+            position_array: NDArray[np.float64] = state.position_m.to_array()
+            velocity_array: NDArray[np.float64] = state.velocity_mps.to_array()
+            if not np.all(np.isfinite(position_array)):
+                return False
+            if not np.all(np.isfinite(velocity_array)):
+                return False
+            if not isinstance(state.time, datetime):
+                return False
+
+        return True
+
+    @staticmethod
+    def _datetime_to_seconds(value: datetime) -> float:
+        """Convert datetime to Unix seconds, treating naive times as UTC."""
+        normalized_datetime: datetime = OrbitLoader._ensure_datetime(value)
+        return float(normalized_datetime.timestamp())
+
+    @staticmethod
+    def _seconds_to_datetime(seconds: float) -> datetime:
+        """Convert Unix seconds to timezone-aware UTC datetime."""
+        return datetime.fromtimestamp(float(seconds), tz=timezone.utc)
+
+    @staticmethod
+    def _ensure_datetime(value: Any) -> datetime:
+        """Convert supported datetime-like values to aware UTC datetime."""
+        if isinstance(value, datetime):
+            result: datetime = value
+        elif isinstance(value, np.datetime64):
+            nanoseconds: int = int(value.astype("datetime64[ns]").astype(np.int64))
+            result = datetime.fromtimestamp(nanoseconds * 1.0e-9, tz=timezone.utc)
+        else:
+            raise TypeError(f"Expected datetime-like value, got {type(value).__name__}.")
+
+        if result.tzinfo is None:
+            return result.replace(tzinfo=timezone.utc)
+        return result.astimezone(timezone.utc)
+
+
+__all__ = ["OrbitLoader", "OrbitLoaderError"]

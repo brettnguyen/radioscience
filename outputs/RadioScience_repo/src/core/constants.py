@@ -1,0 +1,637 @@
+"""Project-wide constants for COSMIC-2 back-propagation geolocation.
+
+This module intentionally has no dependencies on other project modules and only
+uses Python standard-library functionality. It provides:
+
+* Physical constants.
+* WGS84 reference ellipsoid constants.
+* GNSS carrier frequencies and wavelengths.
+* COSMIC-2 and paper-method default values.
+* Synthetic-experiment defaults and validation targets.
+* Lightweight scalar conversion/helper functions.
+
+Operational processing should use values loaded through ``AppConfig`` whenever
+available. Constants in this module are centralized defaults and reproducibility
+references derived from the paper and ``config.yaml``.
+"""
+
+from __future__ import annotations
+
+import math
+from types import MappingProxyType
+from typing import Final, Mapping
+
+
+# =============================================================================
+# Mathematical and unit-conversion constants
+# =============================================================================
+
+PI: Final[float] = math.pi
+TWO_PI: Final[float] = 2.0 * math.pi
+HALF_PI: Final[float] = 0.5 * math.pi
+
+DEG_TO_RAD: Final[float] = math.pi / 180.0
+RAD_TO_DEG: Final[float] = 180.0 / math.pi
+
+M_PER_KM: Final[float] = 1000.0
+KM_PER_M: Final[float] = 1.0 / M_PER_KM
+
+SECONDS_PER_MINUTE: Final[float] = 60.0
+MINUTES_PER_HOUR: Final[float] = 60.0
+SECONDS_PER_HOUR: Final[float] = SECONDS_PER_MINUTE * MINUTES_PER_HOUR
+HOURS_PER_DAY: Final[float] = 24.0
+
+# Longitude advances 15 degrees per solar-local-time hour.
+DEG_PER_LOCAL_TIME_HOUR: Final[float] = 15.0
+
+
+# =============================================================================
+# Physical constants
+# =============================================================================
+
+# Exact SI speed of light in vacuum. Used for GNSS wavelengths and wave numbers.
+SPEED_OF_LIGHT_MPS: Final[float] = 299_792_458.0
+
+
+# =============================================================================
+# WGS84 reference ellipsoid constants
+# =============================================================================
+
+# Primary geodetic transformations should be handled by pyproj/pymap3d in
+# geometry modules. These constants are provided for tests, fallback diagnostics,
+# and simple sanity checks.
+WGS84_A_M: Final[float] = 6_378_137.0
+WGS84_F: Final[float] = 1.0 / 298.257_223_563
+WGS84_B_M: Final[float] = WGS84_A_M * (1.0 - WGS84_F)
+WGS84_E2: Final[float] = WGS84_F * (2.0 - WGS84_F)
+WGS84_EP2: Final[float] = (WGS84_A_M**2 - WGS84_B_M**2) / WGS84_B_M**2
+WGS84_MEAN_RADIUS_M: Final[float] = 6_371_008.8
+WGS84_MEAN_RADIUS_KM: Final[float] = WGS84_MEAN_RADIUS_M * KM_PER_M
+
+
+# =============================================================================
+# GNSS carrier frequencies and wavelengths
+# =============================================================================
+
+GPS_L1_FREQUENCY_HZ: Final[float] = 1_575.42e6
+GPS_L2_FREQUENCY_HZ: Final[float] = 1_227.60e6
+GPS_L2C_FREQUENCY_HZ: Final[float] = GPS_L2_FREQUENCY_HZ
+GPS_L2P_FREQUENCY_HZ: Final[float] = GPS_L2_FREQUENCY_HZ
+
+GPS_L1_WAVELENGTH_M: Final[float] = SPEED_OF_LIGHT_MPS / GPS_L1_FREQUENCY_HZ
+GPS_L2_WAVELENGTH_M: Final[float] = SPEED_OF_LIGHT_MPS / GPS_L2_FREQUENCY_HZ
+GPS_L2C_WAVELENGTH_M: Final[float] = GPS_L2_WAVELENGTH_M
+GPS_L2P_WAVELENGTH_M: Final[float] = GPS_L2_WAVELENGTH_M
+
+# GLONASS uses FDMA carriers. Real-data processing should use metadata-provided
+# frequency or channel number when available.
+GLONASS_L1_BASE_FREQUENCY_HZ: Final[float] = 1_602.0e6
+GLONASS_L1_CHANNEL_SPACING_HZ: Final[float] = 0.5625e6
+
+GLONASS_L2_BASE_FREQUENCY_HZ: Final[float] = 1_246.0e6
+GLONASS_L2_CHANNEL_SPACING_HZ: Final[float] = 0.4375e6
+
+# Common fixed-frequency aliases. "L1" and "L2" intentionally default to GPS,
+# matching the synthetic default signal in config.yaml. GLONASS aliases are not
+# included here because channel-dependent wavelengths must be resolved explicitly.
+GNSS_FREQUENCIES_HZ: Final[Mapping[str, float]] = MappingProxyType(
+    {
+        "L1": GPS_L1_FREQUENCY_HZ,
+        "GPS_L1": GPS_L1_FREQUENCY_HZ,
+        "GPS_L1CA": GPS_L1_FREQUENCY_HZ,
+        "GPS_L1C": GPS_L1_FREQUENCY_HZ,
+        "L2": GPS_L2_FREQUENCY_HZ,
+        "GPS_L2": GPS_L2_FREQUENCY_HZ,
+        "L2C": GPS_L2C_FREQUENCY_HZ,
+        "GPS_L2C": GPS_L2C_FREQUENCY_HZ,
+        "L2P": GPS_L2P_FREQUENCY_HZ,
+        "GPS_L2P": GPS_L2P_FREQUENCY_HZ,
+    }
+)
+
+GNSS_WAVELENGTHS_M: Final[Mapping[str, float]] = MappingProxyType(
+    {
+        "L1": GPS_L1_WAVELENGTH_M,
+        "GPS_L1": GPS_L1_WAVELENGTH_M,
+        "GPS_L1CA": GPS_L1_WAVELENGTH_M,
+        "GPS_L1C": GPS_L1_WAVELENGTH_M,
+        "L2": GPS_L2_WAVELENGTH_M,
+        "GPS_L2": GPS_L2_WAVELENGTH_M,
+        "L2C": GPS_L2C_WAVELENGTH_M,
+        "GPS_L2C": GPS_L2C_WAVELENGTH_M,
+        "L2P": GPS_L2P_WAVELENGTH_M,
+        "GPS_L2P": GPS_L2P_WAVELENGTH_M,
+    }
+)
+
+
+# =============================================================================
+# COSMIC-2 sampling defaults from config.yaml and paper
+# =============================================================================
+
+DEFAULT_GPS_HR_SAMPLING_RATE_HZ: Final[float] = 50.0
+DEFAULT_GLONASS_HR_SAMPLING_RATE_HZ: Final[float] = 100.0
+
+DEFAULT_SIGNAL: Final[str] = "L1"
+DEFAULT_PRIMARY_SIGNAL: Final[str] = "L1"
+
+GPS_L2_ALLOWED_FOR_COMPARISON: Final[tuple[str, ...]] = ("L2C",)
+GPS_L2_EXCLUDED_FOR_COMPARISON: Final[tuple[str, ...]] = ("L2P",)
+
+
+# =============================================================================
+# Paper method defaults from config.yaml
+# =============================================================================
+
+DEFAULT_WINDOW_SECONDS: Final[int] = 10
+
+DEFAULT_PHASE_DETRENDING_METHOD: Final[str] = "polynomial"
+DEFAULT_PHASE_DETRENDING_POLY_ORDER: Final[int] = 1
+
+DEFAULT_SIGMA_PHI_THRESHOLD_RAD: Final[float] = 0.25
+DEFAULT_TANGENT_HEIGHT_MIN_KM: Final[float] = 150.0
+
+DEFAULT_BP_MIN_DISTANCE_KM: Final[float] = 100.0
+DEFAULT_BP_MAX_DISTANCE_KM: Final[float] = 6000.0
+DEFAULT_BP_STEP_KM: Final[float] = 100.0
+
+DEFAULT_MF_MIN_DISTANCE_KM: Final[float] = 100.0
+DEFAULT_MF_MAX_DISTANCE_KM: Final[float] = 6000.0
+DEFAULT_MF_STEP_KM: Final[float] = 100.0
+
+DEFAULT_PROPAGATION_METHOD: Final[str] = "fft_plane_wave"
+DEFAULT_ALTERNATIVE_PROPAGATION_METHOD: Final[str] = "kirchhoff_diffraction_integral"
+
+DEFAULT_STATIONARY_CORRECTION_ENABLED: Final[bool] = True
+DEFAULT_STATIONARY_CORRECTION_OPTION: Final[int] = 2
+
+DEFAULT_WAVEFRONT_CURVATURE_CORRECTION_ENABLED: Final[bool] = True
+
+# V(L) = <A^2> / <A>^2 - 1. The calculation belongs in propagator/QC modules.
+DEFAULT_SMOOTHING_ENABLED: Final[bool] = True
+DEFAULT_SMOOTHING_WINDOW_KM: Final[float] = 1000.0
+DEFAULT_SMOOTHING_POLY_ORDER: Final[int] = 2
+
+DEFAULT_REQUIRE_GLOBAL_LOCAL_MINIMUM: Final[bool] = True
+DEFAULT_REJECT_ENDPOINT_MINIMUM: Final[bool] = True
+DEFAULT_MIN_L1_SAMPLES: Final[int] = 2
+DEFAULT_MIN_L2_SAMPLES: Final[int] = 2
+DEFAULT_MINIMUM_SAMPLE_SPACING_KM: Final[float] = 100.0
+
+DEFAULT_Q_THRESHOLD: Final[float] = 1.2
+DEFAULT_COS_ALPHA_THRESHOLD: Final[float] = 0.1
+DEFAULT_REQUIRE_SINGLE_VALUED: Final[bool] = True
+DEFAULT_DISCARD_MULTIVALUED: Final[bool] = True
+
+# D(L_mf) = L0 - L_mf. Geolocation is a valid zero crossing of D.
+DEFAULT_ZERO_CROSSING_PERSISTENCE_SAMPLES: Final[int] = 2
+
+DEFAULT_MAP_BIN_DEG: Final[float] = 3.0
+DEFAULT_POSTSUNSET_START_HOUR: Final[float] = 18.0
+DEFAULT_POSTSUNSET_END_HOUR: Final[float] = 24.0
+DEFAULT_LOCAL_TIME_REFERENCE: Final[str] = "geolocation_longitude"
+
+DEFAULT_RANDOM_SEED: Final[int] = 42
+
+
+# =============================================================================
+# Synthetic experiment defaults from config.yaml and paper
+# =============================================================================
+
+DEFAULT_SYNTHETIC_SPECTRAL_INDEX_P: Final[float] = 1.5
+DEFAULT_SYNTHETIC_OUTER_SCALE_KM: Final[float] = 10.0
+DEFAULT_SYNTHETIC_OUTER_SCALE_M: Final[float] = (
+    DEFAULT_SYNTHETIC_OUTER_SCALE_KM * M_PER_KM
+)
+
+DEFAULT_OBSERVED_SIGMA_PHI_RAD: Final[float] = 1.65
+DEFAULT_OBSERVED_S4: Final[float] = 0.32
+DEFAULT_OBSERVED_SIGMA_PHI_OVER_S4_RAD: Final[float] = 5.25
+DEFAULT_OBSERVED_SCREEN_DISTANCE_KM: Final[float] = 1900.0
+DEFAULT_ESTIMATED_OUTER_SCALE_KM: Final[float] = 9.7
+
+DEFAULT_ORIENTATION_ERROR_DELTA_ALPHA_DEG: Final[float] = 0.6
+DEFAULT_ORIENTATION_ERROR_ALPHA_CASES_DEG: Final[tuple[float, ...]] = (
+    15.0,
+    45.0,
+    75.0,
+)
+DEFAULT_ORIENTATION_ERROR_DISTANCE_CASES_KM: Final[tuple[float, ...]] = (
+    1000.0,
+    3000.0,
+    5000.0,
+)
+
+DEFAULT_TWO_SCREEN_SEPARATION_KM: Final[float] = 1000.0
+DEFAULT_TWO_SCREEN_SIGMA_RATIO: Final[float] = 1.5
+
+DEFAULT_MISALIGNED_ALPHA_CASES_DEG: Final[tuple[tuple[float, float], ...]] = (
+    (30.0, 60.0),
+    (60.0, 30.0),
+)
+
+DEFAULT_NOISE_SCREEN_DISTANCE_KM: Final[float] = 2000.0
+DEFAULT_NOISE_SIGMA_PHI_CASES_RAD: Final[tuple[float, ...]] = (1.65, 0.25)
+DEFAULT_NOISE_SNR_1HZ_CASES_VV: Final[tuple[float, ...]] = (
+    200.0,
+    400.0,
+    600.0,
+)
+DEFAULT_AVERAGE_SNR_1HZ_VV: Final[float] = 400.0
+DEFAULT_TYPICAL_SNR_1HZ_RANGE_VV: Final[tuple[float, float]] = (200.0, 600.0)
+DEFAULT_NOISE_SAMPLING_RATE_HZ: Final[float] = 100.0
+DEFAULT_PROJECTED_SCAN_VELOCITY_KM_S: Final[float] = 4.0
+DEFAULT_NOISE_MODELED_INTERVAL_KM: Final[float] = 40.0
+DEFAULT_NOISE_WINDOWED_INTERVAL_KM: Final[float] = 35.0
+DEFAULT_NOISE_INTERNAL_GRID_STEP_M: Final[float] = 10.0
+
+
+# =============================================================================
+# Real-data experiment defaults and validation targets
+# =============================================================================
+
+DEFAULT_MONTHLY_MAP_YEARS: Final[tuple[int, ...]] = (2021, 2023)
+
+EXPECTED_L1_GEOLOCATIONS_2021: Final[int] = 332_000
+EXPECTED_L1_GEOLOCATIONS_2023: Final[int] = 1_108_000
+EXPECTED_L1_GEOLOCATIONS_BY_YEAR: Final[Mapping[int, int]] = MappingProxyType(
+    {
+        2021: EXPECTED_L1_GEOLOCATIONS_2021,
+        2023: EXPECTED_L1_GEOLOCATIONS_2023,
+    }
+)
+
+DEFAULT_L1_L2_START_DATE: Final[str] = "2021-02-19"
+DEFAULT_L1_L2_END_DATE: Final[str] = "2021-03-01"
+DEFAULT_L1_L2_HISTOGRAM_BIN_DEG: Final[float] = 0.5
+
+EXPECTED_L1_L2_L1_COUNT: Final[int] = 13_000
+EXPECTED_L1_L2_L2_COUNT: Final[int] = 11_000
+EXPECTED_L1_L2_COMMON_COUNT: Final[int] = 8_000
+
+
+# =============================================================================
+# Helper functions
+# =============================================================================
+
+
+def degrees_to_radians(degrees: float) -> float:
+    """Convert degrees to radians.
+
+    Args:
+        degrees: Angle in degrees.
+
+    Returns:
+        Angle in radians.
+    """
+    return float(degrees) * DEG_TO_RAD
+
+
+def radians_to_degrees(radians: float) -> float:
+    """Convert radians to degrees.
+
+    Args:
+        radians: Angle in radians.
+
+    Returns:
+        Angle in degrees.
+    """
+    return float(radians) * RAD_TO_DEG
+
+
+def kilometers_to_meters(kilometers: float) -> float:
+    """Convert kilometers to meters.
+
+    Args:
+        kilometers: Distance in kilometers.
+
+    Returns:
+        Distance in meters.
+    """
+    return float(kilometers) * M_PER_KM
+
+
+def meters_to_kilometers(meters: float) -> float:
+    """Convert meters to kilometers.
+
+    Args:
+        meters: Distance in meters.
+
+    Returns:
+        Distance in kilometers.
+    """
+    return float(meters) * KM_PER_M
+
+
+def frequency_to_wavelength_m(frequency_hz: float) -> float:
+    """Convert carrier frequency to wavelength.
+
+    Args:
+        frequency_hz: Positive carrier frequency in hertz.
+
+    Returns:
+        Wavelength in meters.
+
+    Raises:
+        ValueError: If ``frequency_hz`` is not positive.
+    """
+    frequency_hz = float(frequency_hz)
+    if frequency_hz <= 0.0:
+        raise ValueError(f"Frequency must be positive, got {frequency_hz}.")
+    return SPEED_OF_LIGHT_MPS / frequency_hz
+
+
+def wavelength_to_frequency_hz(wavelength_m: float) -> float:
+    """Convert wavelength to carrier frequency.
+
+    Args:
+        wavelength_m: Positive wavelength in meters.
+
+    Returns:
+        Frequency in hertz.
+
+    Raises:
+        ValueError: If ``wavelength_m`` is not positive.
+    """
+    wavelength_m = float(wavelength_m)
+    if wavelength_m <= 0.0:
+        raise ValueError(f"Wavelength must be positive, got {wavelength_m}.")
+    return SPEED_OF_LIGHT_MPS / wavelength_m
+
+
+def wave_number_rad_per_m(wavelength_m: float) -> float:
+    """Compute electromagnetic wave number ``k = 2*pi/lambda``.
+
+    Args:
+        wavelength_m: Positive wavelength in meters.
+
+    Returns:
+        Wave number in radians per meter.
+
+    Raises:
+        ValueError: If ``wavelength_m`` is not positive.
+    """
+    wavelength_m = float(wavelength_m)
+    if wavelength_m <= 0.0:
+        raise ValueError(f"Wavelength must be positive, got {wavelength_m}.")
+    return TWO_PI / wavelength_m
+
+
+def glonass_l1_frequency_hz(channel_number: int) -> float:
+    """Return GLONASS L1 carrier frequency for an FDMA channel.
+
+    Args:
+        channel_number: GLONASS frequency channel number.
+
+    Returns:
+        GLONASS L1 frequency in hertz.
+    """
+    return (
+        GLONASS_L1_BASE_FREQUENCY_HZ
+        + float(channel_number) * GLONASS_L1_CHANNEL_SPACING_HZ
+    )
+
+
+def glonass_l2_frequency_hz(channel_number: int) -> float:
+    """Return GLONASS L2 carrier frequency for an FDMA channel.
+
+    Args:
+        channel_number: GLONASS frequency channel number.
+
+    Returns:
+        GLONASS L2 frequency in hertz.
+    """
+    return (
+        GLONASS_L2_BASE_FREQUENCY_HZ
+        + float(channel_number) * GLONASS_L2_CHANNEL_SPACING_HZ
+    )
+
+
+def glonass_l1_wavelength_m(channel_number: int) -> float:
+    """Return GLONASS L1 wavelength for an FDMA channel.
+
+    Args:
+        channel_number: GLONASS frequency channel number.
+
+    Returns:
+        GLONASS L1 wavelength in meters.
+    """
+    return frequency_to_wavelength_m(glonass_l1_frequency_hz(channel_number))
+
+
+def glonass_l2_wavelength_m(channel_number: int) -> float:
+    """Return GLONASS L2 wavelength for an FDMA channel.
+
+    Args:
+        channel_number: GLONASS frequency channel number.
+
+    Returns:
+        GLONASS L2 wavelength in meters.
+    """
+    return frequency_to_wavelength_m(glonass_l2_frequency_hz(channel_number))
+
+
+def normalized_signal_name(signal_name: str) -> str:
+    """Normalize a GNSS signal name for dictionary lookups.
+
+    Args:
+        signal_name: Signal name such as ``"L1"``, ``"GPS L2C"``, or
+            ``"gps-l1"``.
+
+    Returns:
+        Uppercase signal key with whitespace and hyphens converted to
+        underscores.
+
+    Raises:
+        ValueError: If ``signal_name`` is empty.
+    """
+    normalized = str(signal_name).strip().upper().replace("-", "_").replace(" ", "_")
+    if not normalized:
+        raise ValueError("Signal name must be non-empty.")
+    return normalized
+
+
+def signal_frequency_hz(
+    signal_name: str,
+    constellation: str | None = None,
+    glonass_channel: int | None = None,
+) -> float:
+    """Resolve a signal carrier frequency.
+
+    For ambiguous names such as ``"L1"`` and ``"L2"``, GPS frequencies are used
+    by default, matching the synthetic-experiment convention in ``config.yaml``.
+    GLONASS frequencies require a channel number.
+
+    Args:
+        signal_name: GNSS signal name.
+        constellation: Optional constellation name, e.g. ``"GPS"`` or
+            ``"GLONASS"``.
+        glonass_channel: Optional GLONASS FDMA channel number.
+
+    Returns:
+        Carrier frequency in hertz.
+
+    Raises:
+        ValueError: If a GLONASS signal is requested without channel metadata or
+            if the signal is unsupported.
+    """
+    signal_key = normalized_signal_name(signal_name)
+    constellation_key = (
+        normalized_signal_name(constellation) if constellation is not None else ""
+    )
+
+    is_glonass = constellation_key in {"GLONASS", "GLO", "R"} or signal_key.startswith(
+        ("GLONASS", "GLO", "R_")
+    )
+    if is_glonass:
+        if glonass_channel is None:
+            raise ValueError(
+                "GLONASS carrier frequency requires a channel number; "
+                "do not use a fixed nominal GLONASS wavelength silently."
+            )
+        if "L1" in signal_key:
+            return glonass_l1_frequency_hz(glonass_channel)
+        if "L2" in signal_key:
+            return glonass_l2_frequency_hz(glonass_channel)
+        raise ValueError(f"Unsupported GLONASS signal name: {signal_name!r}.")
+
+    if signal_key in GNSS_FREQUENCIES_HZ:
+        return GNSS_FREQUENCIES_HZ[signal_key]
+
+    gps_key = f"GPS_{signal_key}"
+    if gps_key in GNSS_FREQUENCIES_HZ:
+        return GNSS_FREQUENCIES_HZ[gps_key]
+
+    raise ValueError(f"Unsupported GNSS signal name: {signal_name!r}.")
+
+
+def signal_wavelength_m(
+    signal_name: str,
+    constellation: str | None = None,
+    glonass_channel: int | None = None,
+) -> float:
+    """Resolve a signal carrier wavelength.
+
+    Args:
+        signal_name: GNSS signal name.
+        constellation: Optional constellation name.
+        glonass_channel: Optional GLONASS FDMA channel number.
+
+    Returns:
+        Carrier wavelength in meters.
+
+    Raises:
+        ValueError: If frequency resolution fails.
+    """
+    return frequency_to_wavelength_m(
+        signal_frequency_hz(
+            signal_name=signal_name,
+            constellation=constellation,
+            glonass_channel=glonass_channel,
+        )
+    )
+
+
+def orientation_error_delta_l_km(
+    distance_km: float,
+    alpha_deg: float,
+    delta_alpha_deg: float = DEFAULT_ORIENTATION_ERROR_DELTA_ALPHA_DEG,
+) -> float:
+    """Compute paper Equation (3) orientation-error distance shift.
+
+    The paper approximates the localization error from scan-angle/orientation
+    error as:
+
+        Delta L = 2 * L * tan(alpha) * Delta alpha
+
+    where ``Delta alpha`` is in radians.
+
+    Args:
+        distance_km: True distance from receiver to irregularities in km.
+        alpha_deg: Scan angle in degrees.
+        delta_alpha_deg: Orientation error in degrees. Defaults to 0.6 deg.
+
+    Returns:
+        Approximate geolocation error in kilometers.
+    """
+    return (
+        2.0
+        * float(distance_km)
+        * math.tan(degrees_to_radians(alpha_deg))
+        * degrees_to_radians(delta_alpha_deg)
+    )
+
+
+def effective_snr_for_sampling(snr_1hz_vv: float, sampling_rate_hz: float) -> float:
+    """Convert 1-Hz-band SNR to effective high-rate sample SNR.
+
+    The paper states that for observations sampled at ``f_s`` Hz, the SNR is
+    lower than the 1-Hz-band value by ``sqrt(f_s)``.
+
+    Args:
+        snr_1hz_vv: SNR scaled to a 1-Hz band in V/V.
+        sampling_rate_hz: Sampling rate in Hz.
+
+    Returns:
+        Effective SNR for high-rate samples.
+
+    Raises:
+        ValueError: If ``sampling_rate_hz`` is not positive.
+    """
+    sampling_rate_hz = float(sampling_rate_hz)
+    if sampling_rate_hz <= 0.0:
+        raise ValueError(
+            f"Sampling rate must be positive, got {sampling_rate_hz}."
+        )
+    return float(snr_1hz_vv) / math.sqrt(sampling_rate_hz)
+
+
+def thermal_phase_noise_sigma_rad(
+    snr_1hz_vv: float,
+    sampling_rate_hz: float = DEFAULT_NOISE_SAMPLING_RATE_HZ,
+) -> float:
+    """Estimate thermal phase noise standard deviation in radians.
+
+    For open-loop tracking as described in the paper, ``sigma_phi = 1/SNR``.
+    The SNR used here is the effective high-rate SNR after reducing the 1-Hz
+    SNR by ``sqrt(sampling_rate_hz)``.
+
+    Args:
+        snr_1hz_vv: SNR scaled to a 1-Hz band in V/V.
+        sampling_rate_hz: Sampling rate in Hz.
+
+    Returns:
+        Phase-noise standard deviation in radians.
+
+    Raises:
+        ValueError: If the effective SNR is not positive.
+    """
+    effective_snr = effective_snr_for_sampling(snr_1hz_vv, sampling_rate_hz)
+    if effective_snr <= 0.0:
+        raise ValueError(f"Effective SNR must be positive, got {effective_snr}.")
+    return 1.0 / effective_snr
+
+
+__all__: Final[tuple[str, ...]] = tuple(
+    name
+    for name in globals()
+    if name.isupper()
+) + (
+    "degrees_to_radians",
+    "radians_to_degrees",
+    "kilometers_to_meters",
+    "meters_to_kilometers",
+    "frequency_to_wavelength_m",
+    "wavelength_to_frequency_hz",
+    "wave_number_rad_per_m",
+    "glonass_l1_frequency_hz",
+    "glonass_l2_frequency_hz",
+    "glonass_l1_wavelength_m",
+    "glonass_l2_wavelength_m",
+    "normalized_signal_name",
+    "signal_frequency_hz",
+    "signal_wavelength_m",
+    "orientation_error_delta_l_km",
+    "effective_snr_for_sampling",
+    "thermal_phase_noise_sigma_rad",
+)

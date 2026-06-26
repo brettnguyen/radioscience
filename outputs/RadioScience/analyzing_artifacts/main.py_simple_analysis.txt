@@ -1,0 +1,742 @@
+## Logic Analysis: `main.py`
+
+### 1. Purpose and Scope
+
+`main.py` is the command-line entry point for the reproduction pipeline. It should orchestrate the experiment modes described in the paper and configuration file, but it should **not implement scientific logic directly**. All scientific processing must remain inside the designed service classes:
+
+- `SyntheticExperiments`
+- `RealDataExperiments`
+- `Geolocator`
+- `BackpropProcessor`
+- `QualityController`
+- `Plotter`
+- `ResultWriter`
+
+`main.py` should be responsible only for:
+
+1. Parsing command-line arguments.
+2. Loading `config.yaml` through `AppConfig.from_yaml(path)`.
+3. Instantiating pipeline components in the dependency order specified by the design.
+4. Dispatching to the requested experiment mode.
+5. Writing outputs and plots through `ResultWriter` and `Plotter`.
+
+It must not hard-code paper parameters such as the BP grid, QC thresholds, smoothing settings, map bin size, or L1/L2 dates. Those values must come from `config.yaml` through `AppConfig`.
+
+---
+
+## 2. Paper-Method Alignment Required in `main.py`
+
+The paper describes several experimental outputs:
+
+1. Synthetic BP validation experiments.
+2. Real COSMIC-2 L1 geolocation processing for 2021 and 2023.
+3. Monthly post-sunset maps using 3° × 3° bins.
+4. L1/L2 geolocation comparison for the period stated in the body text:
+   - `2021-02-19` to `2021-03-01`
+5. F10.7 solar-flux time series comparison.
+
+`main.py` should expose CLI modes corresponding to these reproduction targets.
+
+The CLI modes should dispatch as follows:
+
+| Mode | Purpose | Main service |
+|---|---|---|
+| `synthetic` | Run all synthetic validation experiments | `SyntheticExperiments.run_all()` |
+| `process-year` | Process COSMIC-2 windows for one year and one signal | `RealDataExperiments.process_year(year, signal)` |
+| `monthly-maps` | Process/generate monthly post-sunset bins/maps | `RealDataExperiments.process_year()` + `make_monthly_bins()` |
+| `l1-l2` | Run L1/L2 comparison period | `RealDataExperiments.process_l1_l2_period(start, end)` |
+| `f107` | Load/download F10.7 and plot time series | `F107Loader` + `Plotter.plot_f107()` |
+
+The configuration file explicitly states:
+
+- Synthetic experiments are enabled under `synthetic_experiments.enabled: true`.
+- Monthly L1 maps are enabled for years `2021` and `2023`.
+- L1/L2 comparison period is `2021-02-19` to `2021-03-01`.
+- F10.7 data are required for solar activity comparison.
+
+`main.py` should allow command-line overrides such as `--year`, `--signal`, `--start-date`, and `--end-date`, but defaults should come from `config.yaml`.
+
+---
+
+## 3. Required CLI Arguments
+
+### 3.1 Required/Optional Arguments
+
+`main.py` should parse at least the following:
+
+```text
+--config PATH
+--mode synthetic|process-year|monthly-maps|l1-l2|f107
+--year YEAR
+--signal SIGNAL
+--start-date YYYY-MM-DD
+--end-date YYYY-MM-DD
+```
+
+Recommended behavior:
+
+| Argument | Required? | Default |
+|---|---:|---|
+| `--config` | No | `config/default.yaml` or provided `config.yaml` |
+| `--mode` | Yes | None |
+| `--year` | Required for `process-year`; optional for `monthly-maps` | From config for monthly maps |
+| `--signal` | Optional | `signals.primary_signal`, which is `L1` in `config.yaml` |
+| `--start-date` | Optional for `l1-l2`, `f107` | From config |
+| `--end-date` | Optional for `l1-l2`, `f107` | From config |
+
+### 3.2 Mode Validation
+
+`main.py` should validate mode-specific arguments before running.
+
+#### `synthetic`
+
+No year or signal is required.
+
+The mode should rely on:
+
+```yaml
+synthetic_experiments.enabled: true
+```
+
+If synthetic experiments are disabled in config, `main.py` should either:
+
+- warn and exit, or
+- allow explicit CLI execution with a warning.
+
+#### `process-year`
+
+Requires:
+
+- `--year`
+- signal either from `--signal` or config `signals.primary_signal`
+
+The paper’s main real-data yearly processing targets are:
+
+```yaml
+real_data_experiments.monthly_l1_maps.years:
+  - 2021
+  - 2023
+```
+
+But `process-year` may allow other years if data exist.
+
+#### `monthly-maps`
+
+If `--year` is provided, process/generate maps for that single year.
+
+If `--year` is absent, process/generate maps for all years in:
+
+```yaml
+real_data_experiments.monthly_l1_maps.years:
+  - 2021
+  - 2023
+```
+
+Signal should default to:
+
+```yaml
+real_data_experiments.monthly_l1_maps.signal: "L1"
+```
+
+The map filtering must respect:
+
+```yaml
+processing.local_time_filter.start_hour: 18
+processing.local_time_filter.end_hour: 24
+processing.local_time_filter.reference: "geolocation_longitude"
+real_data_experiments.monthly_l1_maps.bin_size_deg.latitude: 3
+real_data_experiments.monthly_l1_maps.bin_size_deg.longitude: 3
+```
+
+The actual filtering and binning belong in `RealDataExperiments.make_monthly_bins()`.
+
+#### `l1-l2`
+
+Defaults should come from:
+
+```yaml
+signals.l1_l2_comparison.start_date: "2021-02-19"
+signals.l1_l2_comparison.end_date: "2021-03-01"
+signals.l1_l2_comparison.gps_l2_allowed:
+  - "L2C"
+signals.l1_l2_comparison.gps_l2_excluded:
+  - "L2P"
+```
+
+Expected counts from config are diagnostic targets only:
+
+```yaml
+real_data_experiments.l1_l2_comparison.expected_counts:
+  l1_geolocations: 13000
+  l2_geolocations: 11000
+  common_l1_l2_cases: 8000
+```
+
+`main.py` should not enforce these counts. It may print them as validation targets after processing.
+
+#### `f107`
+
+Should use:
+
+```yaml
+data.f107.source: "https://omniweb.gsfc.nasa.gov/form/dx1.html"
+paths.f107_data_path: "data/f107/f107.csv"
+```
+
+The paper compares daily F10.7 from 2020 through most of 2024. The current `config.yaml` identifies the source but does not provide explicit start/end dates for F10.7. Therefore `main.py` should require `--start-date` and `--end-date` for `f107`, unless `F107Loader.load_cached()` is used with an already cached file.
+
+Do not invent a default date range unless it is later added to config.
+
+---
+
+## 4. Dependency Instantiation Order
+
+`main.py` must follow the design dependency order and use only the public interfaces defined in the design.
+
+The correct construction flow is:
+
+1. Load config:
+   - `AppConfig.from_yaml(config_path)`
+
+2. Create data and geometry services:
+   - `CosmicLoader(config)`
+   - `OrbitLoader(config)`
+   - `CoordinateTransformer()`
+   - `LosGeometry(transformer)`
+   - `MagneticFieldModel(config.igrf_model)`
+   - `BpPlaneBuilder(los_geometry, magnetic_model)`
+
+3. Create signal and propagation services:
+   - `SignalPreprocessor(config)`
+   - `ScintillationCalculator()`
+   - `FftPropagator(wavelength_m)`
+   - `KirchhoffPropagator(wavelength_m)` optional/placeholder
+   - `StationaryCorrector(config)`
+   - `QualityController(config)`
+
+4. Create processing services:
+   - `BackpropProcessor(config, plane_builder, corrector, propagator, qc)`
+   - `Geolocator(config, preprocessor, scintillation, los_geometry, processor, qc)`
+
+5. Create experiment services:
+   - `PhaseScreenGenerator(config.random_seed)`
+   - `SyntheticExperiments(config, generator, propagator)`
+   - `RealDataExperiments(config, loader, geolocator)`
+
+6. Create output services:
+   - `Plotter()`
+   - `ResultWriter(config.output_dir)`
+
+This order is important because real-data geolocation requires a chain:
+
+```text
+SignalWindow
+  -> SignalPreprocessor
+  -> ScintillationCalculator
+  -> QualityController.passes_pre_bp()
+  -> BackpropProcessor.compute_d_curve()
+  -> BpPlaneBuilder + MagneticFieldModel
+  -> StationaryCorrector
+  -> FftPropagator
+  -> QualityController zero-crossing/final QC
+  -> LosGeometry.geolocation_from_distance()
+  -> GeolocationResult
+```
+
+`main.py` should not bypass this chain.
+
+---
+
+## 5. Wavelength Selection Logic
+
+The design requires `FftPropagator.__init__(wavelength_m: float)` and `Geolocator.process_window(window, wavelength_m)`.
+
+Therefore `main.py` must determine the wavelength from the selected signal before constructing the propagator or running processing.
+
+The configuration states:
+
+```yaml
+synthetic_experiments.wavelength.default_signal: "L1"
+signals.primary_signal: "L1"
+```
+
+The actual numerical wavelength values should come from `src/core/constants.py`, not from `main.py`.
+
+Expected logic:
+
+1. Determine requested signal:
+   - CLI `--signal`, otherwise config primary signal.
+2. Resolve signal to wavelength using constants.
+3. Instantiate `FftPropagator(wavelength_m)`.
+4. Pass `wavelength_m` into `Geolocator` calls where required.
+
+For L1/L2 comparison, `RealDataExperiments.process_l1_l2_period(start, end)` is the designed interface and does not accept wavelength arguments. Therefore the signal-to-wavelength handling for paired L1/L2 processing should be encapsulated inside `RealDataExperiments`, not in `main.py`, unless the implementation later extends the interface.
+
+`main.py` must not call methods that do not exist in the design.
+
+---
+
+## 6. Mode-Specific Logic
+
+### 6.1 `synthetic` Mode
+
+Purpose: reproduce method-validation experiments from Section 2 and related modeling in the paper.
+
+Call flow:
+
+```text
+SyntheticExperiments.run_all()
+ResultWriter.write_diagnostics(results, "synthetic.json" or equivalent)
+Plotter.plot_synthetic_outputs(results, output_dir)
+```
+
+Synthetic experiments should include, inside `SyntheticExperiments.run_all()`:
+
+- single phase screen
+- outer-scale estimation
+- orientation error
+- two aligned phase screens
+- two misaligned phase screens
+- thermal noise
+- multivalued geometry
+
+`main.py` should not run these individually unless extra CLI submodes are later added.
+
+Relevant config values used indirectly:
+
+```yaml
+synthetic_experiments.phase_screen.spectral_index_p: 1.5
+synthetic_experiments.phase_screen.outer_scale_km: 10
+synthetic_experiments.observed_average_values.sigma_phi_rad: 1.65
+synthetic_experiments.observed_average_values.distance_from_phase_screen_to_receiver_km: 1900
+synthetic_experiments.modeled_cases.thermal_noise.snr_1hz_cases_vv:
+  - 200
+  - 400
+  - 600
+reproducibility.random_seed: 42
+```
+
+Expected outputs:
+
+- diagnostics saved if `outputs.save_diagnostics: true`
+- synthetic plots saved if plotting is enabled through implementation
+
+---
+
+### 6.2 `process-year` Mode
+
+Purpose: process all available COSMIC-2 high-rate windows for a selected year and signal.
+
+Call flow:
+
+```text
+RealDataExperiments.process_year(year, signal)
+ResultWriter.write_dataframe(results_df, name)
+```
+
+Recommended output name:
+
+```text
+geolocations_{signal}_{year}.parquet
+```
+
+The method `process_year(year, signal)` should internally:
+
+1. Use `CosmicLoader.iter_windows(year, signal)`.
+2. Process each `SignalWindow` through `Geolocator.process_window()`.
+3. Return a `pandas.DataFrame`.
+
+`main.py` should not manually loop through windows because that logic belongs in `RealDataExperiments`.
+
+Relevant config values used indirectly:
+
+```yaml
+processing.window_seconds: 10
+processing.scintillation_indices.sigma_phi_threshold_rad: 0.25
+processing.tangent_point_filter.min_height_km: 150
+back_propagation.distance_grid.min_km: 100
+back_propagation.distance_grid.max_km: 6000
+back_propagation.distance_grid.step_km: 100
+back_propagation.quality_control.q_threshold: 1.2
+back_propagation.quality_control.cos_alpha_threshold: 0.1
+```
+
+Expected paper validation targets for L1:
+
+```yaml
+real_data_experiments.monthly_l1_maps.expected_total_geolocations:
+  2021: 332000
+  2023: 1108000
+```
+
+These should be logged or printed as comparison targets, not enforced.
+
+---
+
+### 6.3 `monthly-maps` Mode
+
+Purpose: reproduce Figure 21-style monthly post-sunset geolocation-density maps.
+
+There are two possible operational patterns:
+
+#### Pattern A: Process and bin in one run
+
+Call flow:
+
+```text
+for year in target_years:
+    results_df = RealDataExperiments.process_year(year, signal)
+    ResultWriter.write_dataframe(results_df, ...)
+    binned_df = RealDataExperiments.make_monthly_bins(results_df)
+    ResultWriter.write_dataframe(binned_df, ...)
+    Plotter.plot_monthly_maps(binned_df, output_dir)
+```
+
+#### Pattern B: Bin previously processed result files
+
+The current design does not define a `read_results()` method in `ResultWriter`, so `main.py` should not assume it exists. If this functionality is desired later, it should be added explicitly to the design. For now, `monthly-maps` should process through `RealDataExperiments.process_year()` unless implementation adds a supported loader.
+
+Relevant config:
+
+```yaml
+real_data_experiments.monthly_l1_maps.years:
+  - 2021
+  - 2023
+real_data_experiments.monthly_l1_maps.signal: "L1"
+processing.local_time_filter.start_hour: 18
+processing.local_time_filter.end_hour: 24
+real_data_experiments.monthly_l1_maps.bin_size_deg.latitude: 3
+real_data_experiments.monthly_l1_maps.bin_size_deg.longitude: 3
+outputs.save_monthly_maps: true
+```
+
+`main.py` should report the known seasonal and interannual validation targets:
+
+- 2023 should have substantially more geolocations than 2021.
+- Expected accepted counts:
+  - 2021: `332000`
+  - 2023: `1108000`
+
+Again, these are checks, not constraints.
+
+---
+
+### 6.4 `l1-l2` Mode
+
+Purpose: reproduce Figure 23-style L1/L2 comparison.
+
+Call flow:
+
+```text
+pairs_df = RealDataExperiments.process_l1_l2_period(start, end)
+ResultWriter.write_dataframe(pairs_df, "l1_l2_pairs.parquet")
+Plotter.plot_l1_l2_histogram(pairs_df, output_path)
+```
+
+The period should default to config:
+
+```yaml
+signals.l1_l2_comparison.start_date: "2021-02-19"
+signals.l1_l2_comparison.end_date: "2021-03-01"
+```
+
+Signal filtering must respect:
+
+```yaml
+signals.l1_l2_comparison.gps_l2_allowed:
+  - "L2C"
+signals.l1_l2_comparison.gps_l2_excluded:
+  - "L2P"
+```
+
+Expected diagnostic counts:
+
+```yaml
+real_data_experiments.l1_l2_comparison.expected_counts:
+  l1_geolocations: 13000
+  l2_geolocations: 11000
+  common_l1_l2_cases: 8000
+real_data_experiments.l1_l2_comparison.zonal_difference_histogram_bin_deg: 0.5
+```
+
+`main.py` should not compute pair matching itself. Pairing belongs in:
+
+```text
+RealDataExperiments.pair_l1_l2(l1_results, l2_results)
+```
+
+or internally inside:
+
+```text
+RealDataExperiments.process_l1_l2_period(start, end)
+```
+
+because that is the designed API.
+
+---
+
+### 6.5 `f107` Mode
+
+Purpose: reproduce Figure 22-style F10.7 solar-flux plot.
+
+Instantiation:
+
+```text
+F107Loader(source_url)
+```
+
+Source URL comes from config:
+
+```yaml
+data.f107.source: "https://omniweb.gsfc.nasa.gov/form/dx1.html"
+```
+
+The design gives these methods:
+
+```text
+F107Loader.download(start: date, end: date) DataFrame
+F107Loader.load_cached(path: Path) DataFrame
+```
+
+Recommended logic:
+
+1. If cached file exists at `paths.f107_data_path`, call:
+   - `F107Loader.load_cached(path)`
+2. Else require `--start-date` and `--end-date`, then call:
+   - `F107Loader.download(start, end)`
+
+Then:
+
+```text
+ResultWriter.write_dataframe(f107_df, "f107.parquet")
+Plotter.plot_f107(f107_df, output_path)
+```
+
+Because `config.yaml` does not explicitly define an F10.7 date range, `main.py` must not invent one.
+
+---
+
+## 7. Output Logic
+
+`main.py` should use `ResultWriter` and `Plotter` only through public methods defined in the design.
+
+### 7.1 Writer Methods Available
+
+From design:
+
+```text
+ResultWriter.write_results(results, name)
+ResultWriter.write_dataframe(df, name)
+ResultWriter.write_diagnostics(obj, name)
+```
+
+Use these only.
+
+### 7.2 Plotter Methods Available
+
+From design:
+
+```text
+Plotter.plot_v_curve(curve, output_path)
+Plotter.plot_d_curve(d_curve, output_path)
+Plotter.plot_monthly_maps(binned, output_dir)
+Plotter.plot_l1_l2_histogram(pairs, output_path)
+Plotter.plot_f107(f107, output_path)
+Plotter.plot_synthetic_outputs(results, output_dir)
+```
+
+Use these only.
+
+### 7.3 Config-Driven Output Decisions
+
+`config.yaml` contains:
+
+```yaml
+outputs.save_interval_results: true
+outputs.save_diagnostics: true
+outputs.save_v_curves_for_debug_cases: true
+outputs.save_d_curves_for_debug_cases: true
+outputs.save_monthly_maps: true
+outputs.save_l1_l2_histogram: true
+outputs.save_f107_plot: true
+```
+
+`main.py` may use these booleans to decide whether to write/plot, but detailed debug-curve selection should remain inside lower-level modules unless specific APIs are added.
+
+---
+
+## 8. Error Handling and Logging Logic
+
+`main.py` should provide clear failure messages for common user errors.
+
+### 8.1 Missing Config
+
+If `--config` does not exist:
+
+- fail early
+- print path
+- do not instantiate services
+
+### 8.2 Missing Required Arguments
+
+Examples:
+
+- `process-year` without `--year`
+- `f107` without cached file and without date range
+
+### 8.3 Dataset Availability
+
+`AppConfig` should allow missing external datasets during synthetic-only runs, per the task specification.
+
+Therefore:
+
+- `synthetic` mode should not fail if COSMIC-2 paths are absent.
+- real-data modes should fail clearly if required paths are missing or empty.
+
+The path validation itself should be handled by `AppConfig` or loaders, but `main.py` can catch exceptions and report mode-specific context.
+
+### 8.4 Unclear Paper Details
+
+`main.py` should not resolve ambiguous scientific details. Those are configured or encapsulated elsewhere.
+
+Important ambiguity notes from config:
+
+```yaml
+unclear_from_paper:
+  - "Exact phase detrending method before sigma_phi calculation."
+  - "Exact COSMIC-2 HR data field names and preprocessing state."
+  - "Whether final large-scale processing used FFT plane-wave BP or Kirchhoff integral BP."
+  - "Exact SNR/amplitude normalization before back propagation."
+  - "Exact local-time reference point for post-sunset filtering."
+  - "Sign convention of final geolocation vector should be verified."
+  - "L1/L2 comparison period differs between abstract and body text."
+```
+
+`main.py` should surface these in README/logs if desired, but not hard-code decisions beyond what `config.yaml` specifies.
+
+---
+
+## 9. Scientific Logic That Must Not Be in `main.py`
+
+To preserve reproducibility and modularity, `main.py` must not implement:
+
+1. Phase detrending.
+2. S4 or sigma-phi computation.
+3. Tangent-point calculation.
+4. IGRF magnetic-field evaluation.
+5. BP plane construction.
+6. Stationary transmitter correction.
+7. FFT propagation.
+8. `V(L)` calculation.
+9. Smoothing of `V(L)`.
+10. `Q` computation.
+11. `D(L_mf)` zero-crossing detection.
+12. Multi-valued rejection.
+13. Geodetic conversion.
+14. Monthly map binning.
+15. L1/L2 pair matching.
+
+Those are already assigned to modules in the design.
+
+`main.py` should only coordinate.
+
+---
+
+## 10. Recommended High-Level Control Flow
+
+The intended top-level flow is:
+
+```text
+parse CLI args
+load config with AppConfig.from_yaml()
+resolve mode
+resolve signal/year/date defaults from CLI or config
+resolve wavelength for mode if needed
+instantiate services in dependency order
+dispatch mode
+write outputs
+make plots
+print validation summary
+exit
+```
+
+For real-data modes, `main.py` should print or log key reproduction targets from config, for example:
+
+```text
+Expected L1 geolocation totals:
+2021: 332000
+2023: 1108000
+
+Expected L1/L2 comparison:
+L1: 13000
+L2: 11000
+Common: 8000
+```
+
+This helps compare results to the paper without embedding the targets as acceptance criteria.
+
+---
+
+## 11. Mode Dispatch Summary
+
+### `synthetic`
+
+```text
+results = SyntheticExperiments.run_all()
+ResultWriter.write_diagnostics(results, ...)
+Plotter.plot_synthetic_outputs(results, ...)
+```
+
+### `process-year`
+
+```text
+df = RealDataExperiments.process_year(year, signal)
+ResultWriter.write_dataframe(df, ...)
+```
+
+### `monthly-maps`
+
+```text
+for each target year:
+    results = RealDataExperiments.process_year(year, signal)
+    ResultWriter.write_dataframe(results, ...)
+    binned = RealDataExperiments.make_monthly_bins(results)
+    ResultWriter.write_dataframe(binned, ...)
+    Plotter.plot_monthly_maps(binned, output_dir)
+```
+
+### `l1-l2`
+
+```text
+pairs = RealDataExperiments.process_l1_l2_period(start, end)
+ResultWriter.write_dataframe(pairs, ...)
+Plotter.plot_l1_l2_histogram(pairs, ...)
+```
+
+### `f107`
+
+```text
+f107 = F107Loader.load_cached(path)
+# or F107Loader.download(start, end)
+ResultWriter.write_dataframe(f107, ...)
+Plotter.plot_f107(f107, ...)
+```
+
+---
+
+## 12. Final Implementation Constraints
+
+When implementing `main.py`, follow these constraints strictly:
+
+1. Use `AppConfig.from_yaml(path)` for configuration loading.
+2. Do not hard-code paper thresholds; obtain them through `AppConfig`.
+3. Instantiate dependencies in the design-specified order.
+4. Use only public methods listed in the design.
+5. Keep scientific computations out of `main.py`.
+6. Default L1/L2 comparison dates to the body-text period from `config.yaml`.
+7. Default monthly-map years and signal to the configured values:
+   - years: `2021`, `2023`
+   - signal: `L1`
+8. Allow synthetic mode to run without external COSMIC-2 data.
+9. Use `ResultWriter` for persistence and `Plotter` for figures.
+10. Treat expected counts as validation targets, not hard pass/fail criteria.

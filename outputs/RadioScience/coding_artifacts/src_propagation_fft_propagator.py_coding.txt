@@ -1,0 +1,676 @@
+## Code: src/propagation/fft_propagator.py
+```python
+## src/propagation/fft_propagator.py
+"""FFT plane-wave propagation for COSMIC-2 BP geolocation.
+
+This module implements the vacuum wave-equation propagation operator used in
+the paper's synthetic modeling and in real-data back propagation after the
+observed signal has been corrected and interpolated onto a uniform BP-plane
+coordinate grid.
+
+The implemented 2D solution is the plane-wave expansion
+
+    u(x, z) = sum_m c_m exp(i k_zm z + i sqrt(k^2 - k_zm^2) Delta x)
+
+and the implemented 3D solution is
+
+    u(x, y, z) = sum_mn c_mn exp(
+        i k_yn y + i k_zm z
+        + i sqrt(k^2 - k_yn^2 - k_zm^2) Delta x
+    )
+
+where ``k = 2*pi/lambda``. This is the representation described in the
+paper as neglecting back-scattered waves and being equivalent to solving the
+parabolic wave equation.
+
+Important conventions:
+    * ``field_z`` is a 1D complex field sampled on a uniform ``z_m`` grid.
+    * ``field_yz`` is a 2D complex field with shape ``(len(y_m), len(z_m))``.
+    * Spatial grids and propagation distances are in meters.
+    * Positive ``distance_m`` denotes forward propagation.
+    * ``backpropagate_2d(field, z, L)`` is implemented as
+      ``propagate_2d(field, z, -L)`` for positive receiver-to-screen distance.
+    * Evanescent/non-propagating spatial modes are zeroed for numerical
+      stability. This avoids exponential blow-up during negative-distance back
+      propagation and is appropriate for the GNSS scintillation scales modeled
+      in the paper.
+
+This module deliberately does not implement phase-screen generation,
+stationary-transmitter correction, wavefront-curvature correction, V-curve
+smoothing, local-minimum detection, magnetic-field geometry, or geolocation.
+Those responsibilities belong to other modules in the project design.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any
+
+import numpy as np
+from numpy.typing import NDArray
+
+from src.core import constants
+
+
+_MIN_GRID_SAMPLES: int = 2
+_UNIFORM_GRID_RTOL: float = 1.0e-7
+_UNIFORM_GRID_ATOL_M: float = 1.0e-9
+_PROPAGATING_MODE_RTOL: float = 1.0e-12
+_AMPLITUDE_VARIANCE_ROUNDOFF_TOL: float = 1.0e-14
+
+
+class FftPropagator:
+    """FFT-based plane-wave propagator.
+
+    Args:
+        wavelength_m: Carrier wavelength in meters. For COSMIC-2 GNSS signals
+            this should be supplied by the caller from signal metadata or from
+            ``src.core.constants.signal_wavelength_m(...)``. Synthetic
+            experiments default to GPS L1 in configuration, but this class is
+            wavelength-agnostic.
+
+    Public methods follow the project design exactly:
+        * ``propagate_2d(field_z, z_m, distance_m)``
+        * ``backpropagate_2d(field_z, z_m, distance_m)``
+        * ``propagate_3d(field_yz, y_m, z_m, distance_m)``
+        * ``amplitude_variance(field)``
+    """
+
+    def __init__(self, wavelength_m: float) -> None:
+        """Initialize propagation constants.
+
+        Args:
+            wavelength_m: Positive electromagnetic wavelength in meters.
+
+        Raises:
+            ValueError: If ``wavelength_m`` is not finite and positive.
+        """
+        self.wavelength_m: float = self._validate_positive_scalar(
+            wavelength_m,
+            "wavelength_m",
+        )
+        self.wave_number_rad_per_m: float = constants.wave_number_rad_per_m(
+            self.wavelength_m
+        )
+        self._wave_number_squared: float = (
+            self.wave_number_rad_per_m * self.wave_number_rad_per_m
+        )
+
+    def propagate_2d(
+        self,
+        field_z: NDArray[Any],
+        z_m: NDArray[Any],
+        distance_m: float,
+    ) -> NDArray[np.complex128]:
+        """Propagate a 1D complex field over a distance in the x direction.
+
+        The method computes
+
+            ifft(fft(field_z) * exp(i * k_x * distance_m))
+
+        with
+
+            k_x = sqrt(k^2 - k_z^2)
+
+        for propagating modes and zero transfer for evanescent modes.
+
+        Args:
+            field_z: One-dimensional complex wave field ``u(z)``.
+            z_m: One-dimensional uniformly spaced z-coordinate grid in meters.
+            distance_m: Propagation distance in meters. Positive values perform
+                forward propagation; negative values perform mathematical
+                backward propagation.
+
+        Returns:
+            Propagated complex field with the same shape as ``field_z``.
+
+        Raises:
+            ValueError: If inputs are empty, non-finite, nonuniform, dimensionally
+                invalid, or have incompatible lengths.
+        """
+        field_array: NDArray[np.complex128] = self._validate_complex_field_1d(
+            field_z,
+            "field_z",
+        )
+        z_array_m: NDArray[np.float64] = self._validate_uniform_grid_1d(
+            z_m,
+            "z_m",
+            expected_length=field_array.size,
+        )
+        propagation_distance_m: float = self._validate_finite_scalar(
+            distance_m,
+            "distance_m",
+        )
+
+        if propagation_distance_m == 0.0:
+            return field_array.copy()
+
+        dz_m: float = self._grid_spacing_m(z_array_m, "z_m")
+        kz_rad_per_m: NDArray[np.float64] = (
+            constants.TWO_PI * np.fft.fftfreq(field_array.size, d=dz_m)
+        )
+
+        transfer_function: NDArray[np.complex128] = self._transfer_function_2d(
+            kz_rad_per_m=kz_rad_per_m,
+            distance_m=propagation_distance_m,
+        )
+
+        spectrum: NDArray[np.complex128] = np.fft.fft(field_array)
+        propagated_spectrum: NDArray[np.complex128] = spectrum * transfer_function
+        propagated_field: NDArray[np.complex128] = np.fft.ifft(
+            propagated_spectrum
+        ).astype(np.complex128, copy=False)
+
+        return propagated_field
+
+    def backpropagate_2d(
+        self,
+        field_z: NDArray[Any],
+        z_m: NDArray[Any],
+        distance_m: float,
+    ) -> NDArray[np.complex128]:
+        """Back propagate a 1D complex field by a positive screen distance.
+
+        In the paper's BP usage, the caller supplies a positive candidate
+        distance from receiver toward the phase screen. The wave equation is
+        then propagated in the opposite direction, so this method calls
+        ``propagate_2d`` with ``-distance_m``.
+
+        Args:
+            field_z: One-dimensional complex receiver/corrected field.
+            z_m: One-dimensional uniformly spaced z-coordinate grid in meters.
+            distance_m: Candidate distance from receiver to screen in meters.
+                Normal usage is positive, but any finite value is accepted; the
+                sign is reversed internally.
+
+        Returns:
+            Back-propagated complex field with the same shape as ``field_z``.
+
+        Raises:
+            ValueError: If propagation inputs are invalid.
+        """
+        propagation_distance_m: float = self._validate_finite_scalar(
+            distance_m,
+            "distance_m",
+        )
+        return self.propagate_2d(
+            field_z=field_z,
+            z_m=z_m,
+            distance_m=-propagation_distance_m,
+        )
+
+    def propagate_3d(
+        self,
+        field_yz: NDArray[Any],
+        y_m: NDArray[Any],
+        z_m: NDArray[Any],
+        distance_m: float,
+    ) -> NDArray[np.complex128]:
+        """Propagate a 2D transverse complex field over a distance in x.
+
+        The field-axis convention is fixed as:
+
+            field_yz.shape == (len(y_m), len(z_m))
+
+        with axis 0 corresponding to y and axis 1 corresponding to z. The
+        method computes
+
+            ifft2(fft2(field_yz) * exp(i * k_x * distance_m))
+
+        with
+
+            k_x = sqrt(k^2 - k_y^2 - k_z^2)
+
+        for propagating modes and zero transfer for evanescent modes.
+
+        Args:
+            field_yz: Two-dimensional complex wave field ``u(y, z)``.
+            y_m: One-dimensional uniformly spaced y-coordinate grid in meters.
+            z_m: One-dimensional uniformly spaced z-coordinate grid in meters.
+            distance_m: Propagation distance in meters. Positive values perform
+                forward propagation; negative values perform mathematical
+                backward propagation.
+
+        Returns:
+            Propagated complex field with the same shape as ``field_yz``.
+
+        Raises:
+            ValueError: If inputs are empty, non-finite, nonuniform, dimensionally
+                invalid, or have incompatible shapes.
+        """
+        field_array: NDArray[np.complex128] = self._validate_complex_field_2d(
+            field_yz,
+            "field_yz",
+        )
+
+        y_array_m: NDArray[np.float64] = self._validate_uniform_grid_1d(
+            y_m,
+            "y_m",
+            expected_length=field_array.shape[0],
+        )
+        z_array_m: NDArray[np.float64] = self._validate_uniform_grid_1d(
+            z_m,
+            "z_m",
+            expected_length=field_array.shape[1],
+        )
+        propagation_distance_m: float = self._validate_finite_scalar(
+            distance_m,
+            "distance_m",
+        )
+
+        if propagation_distance_m == 0.0:
+            return field_array.copy()
+
+        dy_m: float = self._grid_spacing_m(y_array_m, "y_m")
+        dz_m: float = self._grid_spacing_m(z_array_m, "z_m")
+
+        ky_rad_per_m: NDArray[np.float64] = (
+            constants.TWO_PI * np.fft.fftfreq(field_array.shape[0], d=dy_m)
+        )
+        kz_rad_per_m: NDArray[np.float64] = (
+            constants.TWO_PI * np.fft.fftfreq(field_array.shape[1], d=dz_m)
+        )
+
+        transfer_function: NDArray[np.complex128] = self._transfer_function_3d(
+            ky_rad_per_m=ky_rad_per_m,
+            kz_rad_per_m=kz_rad_per_m,
+            distance_m=propagation_distance_m,
+        )
+
+        spectrum: NDArray[np.complex128] = np.fft.fft2(field_array, axes=(0, 1))
+        propagated_spectrum: NDArray[np.complex128] = spectrum * transfer_function
+        propagated_field: NDArray[np.complex128] = np.fft.ifft2(
+            propagated_spectrum,
+            axes=(0, 1),
+        ).astype(np.complex128, copy=False)
+
+        return propagated_field
+
+    def amplitude_variance(self, field: NDArray[Any]) -> float:
+        """Compute the paper's normalized amplitude variance ``V``.
+
+        The paper defines the back-propagation diagnostic as
+
+            V = <A^2> / <A>^2 - 1
+
+        where ``A = abs(u)``. This is not the conventional intensity variance;
+        the denominator uses the square of mean amplitude.
+
+        For invalid inputs, empty arrays, non-finite field values, or zero mean
+        amplitude, the metric is undefined and this method returns ``NaN`` so
+        downstream quality control can reject the corresponding V-curve.
+
+        Args:
+            field: Complex wave field. May be 1D, 2D, or any finite-dimensional
+                array.
+
+        Returns:
+            Scalar normalized amplitude variance, or ``NaN`` when undefined.
+        """
+        try:
+            field_array: NDArray[np.complex128] = np.asarray(
+                field,
+                dtype=np.complex128,
+            )
+        except (TypeError, ValueError):
+            return math.nan
+
+        if field_array.size == 0:
+            return math.nan
+        if not np.all(np.isfinite(field_array.real)) or not np.all(
+            np.isfinite(field_array.imag)
+        ):
+            return math.nan
+
+        amplitude: NDArray[np.float64] = np.abs(field_array).astype(
+            np.float64,
+            copy=False,
+        )
+        if amplitude.size == 0 or not np.all(np.isfinite(amplitude)):
+            return math.nan
+
+        mean_amplitude: float = float(np.mean(amplitude))
+        if not math.isfinite(mean_amplitude) or mean_amplitude <= 0.0:
+            return math.nan
+
+        mean_amplitude_squared: float = float(np.mean(amplitude * amplitude))
+        if not math.isfinite(mean_amplitude_squared):
+            return math.nan
+
+        variance_value: float = (
+            mean_amplitude_squared / (mean_amplitude * mean_amplitude) - 1.0
+        )
+
+        if not math.isfinite(variance_value):
+            return math.nan
+
+        if variance_value < 0.0 and abs(variance_value) <= _AMPLITUDE_VARIANCE_ROUNDOFF_TOL:
+            variance_value = 0.0
+
+        return float(variance_value)
+
+    def _transfer_function_2d(
+        self,
+        kz_rad_per_m: NDArray[np.float64],
+        distance_m: float,
+    ) -> NDArray[np.complex128]:
+        """Build the 2D plane-wave propagation transfer function.
+
+        Args:
+            kz_rad_per_m: Angular transverse wavenumbers along z.
+            distance_m: Propagation distance in meters.
+
+        Returns:
+            Complex transfer function with evanescent modes set to zero.
+        """
+        transverse_wavenumber_squared: NDArray[np.float64] = (
+            np.asarray(kz_rad_per_m, dtype=np.float64) ** 2
+        )
+        return self._transfer_function_from_transverse_squared(
+            transverse_wavenumber_squared=transverse_wavenumber_squared,
+            distance_m=distance_m,
+        )
+
+    def _transfer_function_3d(
+        self,
+        ky_rad_per_m: NDArray[np.float64],
+        kz_rad_per_m: NDArray[np.float64],
+        distance_m: float,
+    ) -> NDArray[np.complex128]:
+        """Build the 3D plane-wave propagation transfer function.
+
+        Args:
+            ky_rad_per_m: Angular transverse wavenumbers along y.
+            kz_rad_per_m: Angular transverse wavenumbers along z.
+            distance_m: Propagation distance in meters.
+
+        Returns:
+            Complex transfer function with shape ``(len(ky), len(kz))`` and
+            evanescent modes set to zero.
+        """
+        ky_grid_rad_per_m: NDArray[np.float64] = np.asarray(
+            ky_rad_per_m,
+            dtype=np.float64,
+        )[:, np.newaxis]
+        kz_grid_rad_per_m: NDArray[np.float64] = np.asarray(
+            kz_rad_per_m,
+            dtype=np.float64,
+        )[np.newaxis, :]
+
+        transverse_wavenumber_squared: NDArray[np.float64] = (
+            ky_grid_rad_per_m * ky_grid_rad_per_m
+            + kz_grid_rad_per_m * kz_grid_rad_per_m
+        )
+
+        return self._transfer_function_from_transverse_squared(
+            transverse_wavenumber_squared=transverse_wavenumber_squared,
+            distance_m=distance_m,
+        )
+
+    def _transfer_function_from_transverse_squared(
+        self,
+        transverse_wavenumber_squared: NDArray[np.float64],
+        distance_m: float,
+    ) -> NDArray[np.complex128]:
+        """Build transfer function from transverse wavenumber squared.
+
+        Evanescent modes are zeroed. Modes that exceed the propagating boundary
+        by tiny floating-point roundoff are clipped to grazing incidence rather
+        than rejected.
+
+        Args:
+            transverse_wavenumber_squared: ``k_z^2`` in 2D or
+                ``k_y^2 + k_z^2`` in 3D.
+            distance_m: Propagation distance in meters.
+
+        Returns:
+            Complex transfer function.
+        """
+        transverse_squared: NDArray[np.float64] = np.asarray(
+            transverse_wavenumber_squared,
+            dtype=np.float64,
+        )
+        if not np.all(np.isfinite(transverse_squared)):
+            raise ValueError("Transverse wavenumber grid contains non-finite values.")
+
+        tolerance: float = _PROPAGATING_MODE_RTOL * self._wave_number_squared
+        propagating_mask: NDArray[np.bool_] = (
+            transverse_squared <= self._wave_number_squared + tolerance
+        )
+
+        longitudinal_argument: NDArray[np.float64] = (
+            self._wave_number_squared - transverse_squared
+        )
+        longitudinal_argument = np.where(
+            propagating_mask,
+            np.maximum(longitudinal_argument, 0.0),
+            0.0,
+        )
+
+        kx_rad_per_m: NDArray[np.float64] = np.sqrt(longitudinal_argument)
+
+        transfer_function: NDArray[np.complex128] = np.zeros(
+            transverse_squared.shape,
+            dtype=np.complex128,
+        )
+        transfer_function[propagating_mask] = np.exp(
+            1j * kx_rad_per_m[propagating_mask] * float(distance_m)
+        ).astype(np.complex128, copy=False)
+
+        return transfer_function
+
+    @staticmethod
+    def _validate_complex_field_1d(
+        field: NDArray[Any],
+        name: str,
+    ) -> NDArray[np.complex128]:
+        """Validate a one-dimensional finite complex field.
+
+        Args:
+            field: Array-like field.
+            name: Name used in error messages.
+
+        Returns:
+            Complex128 field array.
+
+        Raises:
+            ValueError: If validation fails.
+        """
+        try:
+            field_array: NDArray[np.complex128] = np.asarray(
+                field,
+                dtype=np.complex128,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be convertible to a complex array.") from exc
+
+        if field_array.ndim != 1:
+            raise ValueError(f"{name} must be one-dimensional, got {field_array.ndim}D.")
+        if field_array.size < _MIN_GRID_SAMPLES:
+            raise ValueError(
+                f"{name} must contain at least {_MIN_GRID_SAMPLES} samples, "
+                f"got {field_array.size}."
+            )
+        if not np.all(np.isfinite(field_array.real)) or not np.all(
+            np.isfinite(field_array.imag)
+        ):
+            raise ValueError(f"{name} contains NaN or Inf values.")
+
+        return field_array.astype(np.complex128, copy=False)
+
+    @staticmethod
+    def _validate_complex_field_2d(
+        field: NDArray[Any],
+        name: str,
+    ) -> NDArray[np.complex128]:
+        """Validate a two-dimensional finite complex field.
+
+        Args:
+            field: Array-like field.
+            name: Name used in error messages.
+
+        Returns:
+            Complex128 field array.
+
+        Raises:
+            ValueError: If validation fails.
+        """
+        try:
+            field_array: NDArray[np.complex128] = np.asarray(
+                field,
+                dtype=np.complex128,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be convertible to a complex array.") from exc
+
+        if field_array.ndim != 2:
+            raise ValueError(f"{name} must be two-dimensional, got {field_array.ndim}D.")
+        if field_array.shape[0] < _MIN_GRID_SAMPLES:
+            raise ValueError(
+                f"{name} axis 0 must contain at least {_MIN_GRID_SAMPLES} samples, "
+                f"got {field_array.shape[0]}."
+            )
+        if field_array.shape[1] < _MIN_GRID_SAMPLES:
+            raise ValueError(
+                f"{name} axis 1 must contain at least {_MIN_GRID_SAMPLES} samples, "
+                f"got {field_array.shape[1]}."
+            )
+        if not np.all(np.isfinite(field_array.real)) or not np.all(
+            np.isfinite(field_array.imag)
+        ):
+            raise ValueError(f"{name} contains NaN or Inf values.")
+
+        return field_array.astype(np.complex128, copy=False)
+
+    @classmethod
+    def _validate_uniform_grid_1d(
+        cls,
+        grid_m: NDArray[Any],
+        name: str,
+        expected_length: int,
+    ) -> NDArray[np.float64]:
+        """Validate a finite, one-dimensional, uniformly spaced spatial grid.
+
+        Args:
+            grid_m: Array-like coordinate grid in meters.
+            name: Name used in error messages.
+            expected_length: Required length matching the associated field axis.
+
+        Returns:
+            Float64 coordinate grid.
+
+        Raises:
+            ValueError: If the grid is invalid or nonuniform.
+        """
+        try:
+            grid_array: NDArray[np.float64] = np.asarray(grid_m, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be convertible to a float array.") from exc
+
+        if grid_array.ndim != 1:
+            raise ValueError(f"{name} must be one-dimensional, got {grid_array.ndim}D.")
+        if grid_array.size != int(expected_length):
+            raise ValueError(
+                f"{name} length must match the corresponding field axis, got "
+                f"{grid_array.size} and expected {int(expected_length)}."
+            )
+        if grid_array.size < _MIN_GRID_SAMPLES:
+            raise ValueError(
+                f"{name} must contain at least {_MIN_GRID_SAMPLES} samples, "
+                f"got {grid_array.size}."
+            )
+        if not np.all(np.isfinite(grid_array)):
+            raise ValueError(f"{name} contains NaN or Inf values.")
+
+        differences_m: NDArray[np.float64] = np.diff(grid_array)
+        if not np.all(np.isfinite(differences_m)):
+            raise ValueError(f"{name} spacing contains non-finite values.")
+
+        median_spacing_m: float = float(np.median(differences_m))
+        if not math.isfinite(median_spacing_m) or median_spacing_m == 0.0:
+            raise ValueError(f"{name} must have finite nonzero spacing.")
+
+        if np.any(differences_m == 0.0):
+            raise ValueError(f"{name} contains duplicate adjacent samples.")
+
+        if not np.allclose(
+            differences_m,
+            median_spacing_m,
+            rtol=_UNIFORM_GRID_RTOL,
+            atol=_UNIFORM_GRID_ATOL_M,
+        ):
+            raise ValueError(
+                f"{name} must be uniformly spaced for FFT propagation."
+            )
+
+        return grid_array.astype(np.float64, copy=False)
+
+    @staticmethod
+    def _grid_spacing_m(grid_m: NDArray[np.float64], name: str) -> float:
+        """Return the signed spacing of a validated uniform grid.
+
+        Args:
+            grid_m: Validated one-dimensional grid.
+            name: Name used in error messages.
+
+        Returns:
+            Signed grid spacing in meters.
+
+        Raises:
+            ValueError: If spacing is invalid.
+        """
+        if grid_m.size < _MIN_GRID_SAMPLES:
+            raise ValueError(f"{name} must contain at least two samples.")
+
+        spacing_m: float = float(np.median(np.diff(grid_m)))
+        if not math.isfinite(spacing_m) or spacing_m == 0.0:
+            raise ValueError(f"{name} has invalid spacing {spacing_m!r}.")
+
+        return spacing_m
+
+    @staticmethod
+    def _validate_finite_scalar(value: float, name: str) -> float:
+        """Validate a finite scalar value.
+
+        Args:
+            value: Scalar value.
+            name: Name used in error messages.
+
+        Returns:
+            Float scalar.
+
+        Raises:
+            ValueError: If value is non-finite or cannot be converted.
+        """
+        try:
+            scalar_value: float = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a finite scalar.") from exc
+
+        if not math.isfinite(scalar_value):
+            raise ValueError(f"{name} must be finite, got {value!r}.")
+
+        return scalar_value
+
+    @classmethod
+    def _validate_positive_scalar(cls, value: float, name: str) -> float:
+        """Validate a finite strictly positive scalar.
+
+        Args:
+            value: Scalar value.
+            name: Name used in error messages.
+
+        Returns:
+            Float scalar.
+
+        Raises:
+            ValueError: If value is not finite and positive.
+        """
+        scalar_value: float = cls._validate_finite_scalar(value, name)
+        if scalar_value <= 0.0:
+            raise ValueError(f"{name} must be > 0, got {scalar_value}.")
+        return scalar_value
+
+
+__all__ = ["FftPropagator"]
+```

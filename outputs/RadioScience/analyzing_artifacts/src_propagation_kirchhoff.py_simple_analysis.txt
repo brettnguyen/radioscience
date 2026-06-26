@@ -1,0 +1,564 @@
+## Logic Analysis: `src/propagation/kirchhoff.py`
+
+### 1. Purpose of This Module
+
+`src/propagation/kirchhoff.py` implements the `KirchhoffPropagator` interface defined in the project design:
+
+```text
+class KirchhoffPropagator {
+    +__init__(wavelength_m: float)
+    +backpropagate_arbitrary_trajectory(
+        signal: ndarray,
+        source_points_m: ndarray,
+        target_points_m: ndarray
+      ) ndarray
+}
+```
+
+Its role is **secondary and diagnostic**, not the main operational propagation path.
+
+According to `config.yaml`:
+
+```yaml
+back_propagation:
+  propagation_method_default: "fft_plane_wave"
+  alternative_method_available: "kirchhoff_diffraction_integral"
+```
+
+Therefore:
+
+- The main reproduction pipeline should use `FftPropagator` with stationary-transmitter correction **Option 2**.
+- `KirchhoffPropagator` should provide an optional validation path, especially for comparing behavior with stationary-transmitter correction **Option 1**, which the paper states is more suitable for diffraction-integral propagation.
+
+From `config.yaml`:
+
+```yaml
+stationary_transmitter_correction:
+  default_option: 2
+  options:
+    option_1:
+      x2_prime: "x2"
+      recommended_for: "Kirchhoff diffraction integral"
+    option_2:
+      x2_prime: "x20"
+      recommended_for: "FFT plane-wave propagation after interpolation to uniform z grid"
+```
+
+This file should **not block** the main FFT-based reproduction.
+
+---
+
+### 2. Paper Methodology Relevant to This File
+
+The paper states that for real observational geometry, the radio wave field is measured along a LEO receiver trajectory that is not a straight line perpendicular to propagation. To handle arbitrary trajectories, the authors introduce a diffraction-integral formulation.
+
+The parsed paper omits the explicit equation, but the text says:
+
+- The complex amplitude `u(r')` is defined on an arbitrary receiver trajectory.
+- The desired complex amplitude `u(r)` is obtained by a diffraction integral.
+- The integral includes an angular factor involving `cos(phi)`, where `phi` is the angle between:
+  - the normal to the receiver trajectory, and
+  - the direction from the receiver trajectory point to the target point.
+- The advantage is support for arbitrary source and target trajectories.
+- The disadvantage is increased numerical noise when the target is close to the receiver trajectory, because the Fresnel zone becomes comparable to sample spacing.
+
+The implementation should therefore be based on a scalar 2D Kirchhoff / Huygens-Fresnel diffraction approximation in vacuum.
+
+---
+
+### 3. Scope and Limitations
+
+Because the exact equation is missing from the parsed paper, this module should be implemented conservatively.
+
+The intended implementation level is:
+
+1. Provide a documented scalar diffraction-integral approximation.
+2. Support arbitrary 2D or 3D point arrays.
+3. Use it only for selected diagnostic cases.
+4. Avoid introducing new public APIs beyond the design.
+5. Clearly document that the operational reproduction uses FFT propagation unless explicitly switched upstream.
+
+This module should not implement:
+
+- COSMIC-2 data loading.
+- Stationary-transmitter correction.
+- IGRF magnetic-field geometry.
+- QC thresholds such as `Q > 1.2` or `cos(alpha) > 0.1`.
+- Distance-loop logic from `100–6000 km`.
+
+Those are handled elsewhere according to the design.
+
+---
+
+### 4. Inputs and Outputs
+
+#### 4.1 Constructor
+
+```python
+KirchhoffPropagator(wavelength_m: float)
+```
+
+Logic requirements:
+
+- `wavelength_m` must be positive.
+- Internally compute:
+
+\[
+k = \frac{2\pi}{\lambda}
+\]
+
+where:
+
+- `lambda = wavelength_m`
+- `k` is the carrier wavenumber in rad/m.
+
+The wavelength should be supplied by the caller using constants from `src/core/constants.py`, for example GPS L1 or L2 wavelength.
+
+---
+
+#### 4.2 `backpropagate_arbitrary_trajectory`
+
+```python
+backpropagate_arbitrary_trajectory(
+    signal: ndarray,
+    source_points_m: ndarray,
+    target_points_m: ndarray
+) -> ndarray
+```
+
+Expected input meaning:
+
+- `signal`: complex radio signal samples on the source trajectory, shape `(N,)`.
+- `source_points_m`: source trajectory coordinates in meters, shape `(N, 2)` or `(N, 3)`.
+- `target_points_m`: target points where the field should be reconstructed, shape `(M, 2)` or `(M, 3)`.
+
+Expected output:
+
+- Complex reconstructed/back-propagated field at each target point, shape `(M,)`.
+
+The source and target coordinates are expected to already be expressed in the local BP coordinate system by upstream modules, typically after `StationaryCorrector` and `BpPlaneBuilder`.
+
+---
+
+### 5. Numerical Formulation
+
+The implementation should approximate the 2D scalar diffraction integral.
+
+For each target point \(\mathbf{r}_i\), compute:
+
+\[
+u(\mathbf{r}_i)
+\approx
+\sum_{j=1}^{N}
+u(\mathbf{r}'_j)
+K(\mathbf{r}_i, \mathbf{r}'_j)
+\Delta s_j
+\]
+
+where:
+
+- \(\mathbf{r}'_j\) is a source trajectory point,
+- \(\mathbf{r}_i\) is a target point,
+- \(\Delta s_j\) is the source arc-length integration weight,
+- \(K\) is the diffraction kernel.
+
+A practical 2D high-frequency Kirchhoff/Rayleigh-Sommerfeld-style kernel may be:
+
+\[
+K_{ij}
+=
+C
+\,
+\frac{\cos\phi_{ij}}{\sqrt{\rho_{ij}}}
+\exp(-ik\rho_{ij})
+\]
+
+for back propagation, where:
+
+\[
+\rho_{ij}
+=
+|\mathbf{r}_i - \mathbf{r}'_j|
+\]
+
+and \(C\) is a constant prefactor such as:
+
+\[
+C = \sqrt{\frac{k}{2\pi i}}
+\]
+
+or an equivalent constant phase/amplitude normalization.
+
+Because the downstream BP diagnostic mainly uses normalized amplitude variance,
+
+\[
+V = \frac{\langle A^2\rangle}{\langle A\rangle^2} - 1
+\]
+
+a global constant factor in the field does not affect \(V\). However, the distance-dependent spreading term \(1/\sqrt{\rho}\) and obliquity factor can affect the reconstructed field and should be retained where feasible.
+
+---
+
+### 6. Propagation Sign Convention
+
+This method is named `backpropagate_arbitrary_trajectory`, so the default phase factor should reconstruct the field backward from the receiver trajectory toward the transmitter/phase-screen side.
+
+For a field convention:
+
+\[
+u = A \exp(i\phi)
+\]
+
+and forward propagation accumulating phase as:
+
+\[
+\exp(ikL)
+\]
+
+back propagation should remove propagation phase using:
+
+\[
+\exp(-ik\rho)
+\]
+
+Therefore, the initial implementation should use:
+
+\[
+\exp(-ik\rho)
+\]
+
+The sign must be validated against `FftPropagator.backpropagate_2d` using a simple straight-trajectory plane-wave test. If the reconstructed phase is reversed relative to FFT BP, this sign is the first item to inspect.
+
+This sign convention should be documented in the file because the paper’s parsed Kirchhoff equation is incomplete.
+
+---
+
+### 7. Arc-Length Integration Weights
+
+The source trajectory is sampled discretely. The integral should use approximate arc-length weights:
+
+\[
+\Delta s_j
+\]
+
+For ordered source samples:
+
+- First point:
+
+\[
+\Delta s_0 = \frac{1}{2}|\mathbf{r}'_1 - \mathbf{r}'_0|
+\]
+
+- Interior points:
+
+\[
+\Delta s_j =
+\frac{1}{2}
+\left(
+|\mathbf{r}'_j - \mathbf{r}'_{j-1}|
++
+|\mathbf{r}'_{j+1} - \mathbf{r}'_j|
+\right)
+\]
+
+- Last point:
+
+\[
+\Delta s_{N-1} =
+\frac{1}{2}|\mathbf{r}'_{N-1} - \mathbf{r}'_{N-2}|
+\]
+
+If the source trajectory contains fewer than two points, the method should reject the input.
+
+---
+
+### 8. Obliquity Factor \(\cos\phi\)
+
+The paper includes an angle \(\phi\) between:
+
+- the normal to the source trajectory, and
+- the direction from source to target.
+
+However, the designed public interface does **not** provide source normals. Therefore the implementation has two reasonable options.
+
+#### Preferred diagnostic implementation
+
+For 2D source points:
+
+1. Estimate the source tangent vector from neighboring source samples.
+2. Rotate the tangent by \(90^\circ\) to estimate a local normal.
+3. Choose the normal orientation pointing generally toward the target side.
+4. Compute:
+
+\[
+\cos\phi_{ij}
+=
+\frac{
+\mathbf{n}_j \cdot (\mathbf{r}_i - \mathbf{r}'_j)
+}{
+|\mathbf{r}_i - \mathbf{r}'_j|
+}
+\]
+
+5. Clip or use absolute values cautiously to avoid negative obliquity when the normal orientation is ambiguous.
+
+#### Acceptable initial placeholder
+
+Set:
+
+\[
+\cos\phi_{ij} = 1
+\]
+
+This simplifies the integral and is acceptable for an initial validation path, provided the limitation is documented.
+
+Given the paper’s emphasis on \(\cos\phi\), the implementation should preferably estimate it for 2D trajectories, but should not add a new public argument to the method.
+
+---
+
+### 9. Handling 2D Versus 3D Inputs
+
+The paper’s real-geometry Kirchhoff discussion is for a reduced 2D BP problem.
+
+Therefore:
+
+- Shape `(N, 2)` and `(M, 2)` should be considered the primary supported mode.
+- Shape `(N, 3)` and `(M, 3)` can be supported using Euclidean distances.
+- For 3D curve inputs, a unique integration surface normal is not defined from a 1D curve alone, so the obliquity factor should either:
+  - default to 1, or
+  - be approximated only if a stable local plane can be inferred.
+
+The module should document that physically faithful Kirchhoff BP is intended for the 2D projected BP plane.
+
+---
+
+### 10. Singularities and Near-Field Numerical Noise
+
+The paper explicitly warns that the diffraction integral becomes noisy when the target is close to the receiver/source trajectory.
+
+The implementation must guard against:
+
+\[
+\rho_{ij} \to 0
+\]
+
+Recommended behavior:
+
+- Define a small lower bound, e.g. based on source spacing.
+- Replace distances smaller than that lower bound with the lower bound.
+- Alternatively reject target points that are too close to the source trajectory.
+
+This is especially relevant because the configuration uses:
+
+```yaml
+back_propagation:
+  distance_grid:
+    min_km: 100
+```
+
+The main BP range starts at 100 km, so operational diagnostic use should avoid extremely small source-target distances. Still, the method should be numerically safe.
+
+---
+
+### 11. Computational Complexity
+
+The direct integral has complexity:
+
+\[
+O(MN)
+\]
+
+where:
+
+- `N` = number of source samples,
+- `M` = number of target points.
+
+For COSMIC-2 10-second windows:
+
+- GPS: about 500 samples from `50 Hz`.
+- GLONASS: about 1000 samples from `100 Hz`.
+
+From `config.yaml`:
+
+```yaml
+data:
+  cosmic2:
+    sampling_rates_hz:
+      gps: 50
+      glonass: 100
+processing:
+  window_seconds: 10
+```
+
+For diagnostic use, this is acceptable.
+
+However, applying this method inside every `L_mf` and `L` loop would be expensive. The full BP grid is:
+
+```yaml
+back_propagation:
+  distance_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+That implies roughly \(60 \times 60 = 3600\) propagation evaluations per 10-second window.
+
+Therefore:
+
+- `KirchhoffPropagator` should not be the default full-processing method.
+- It should be used only for selected cases, tests, and validation plots.
+- If implemented directly, it should process targets in chunks if memory becomes large.
+
+---
+
+### 12. Relationship to Other Modules
+
+#### Depends on
+
+- `numpy`
+- `src/core/constants.py`
+- optionally `src/core/types.py` for type consistency, though the public interface uses raw arrays.
+
+#### Used by
+
+- Optional diagnostics in `BackpropProcessor`.
+- Unit tests comparing arbitrary-trajectory BP to FFT BP.
+- Possible future validation of stationary-transmitter correction Option 1.
+
+#### Does not depend on
+
+- `AppConfig`
+- `QualityController`
+- `StationaryCorrector`
+- `BpPlaneBuilder`
+- COSMIC-2 loaders
+- plotting modules
+
+This keeps the module isolated and prevents circular dependencies.
+
+---
+
+### 13. Expected Internal Steps
+
+For `backpropagate_arbitrary_trajectory`:
+
+1. Validate `wavelength_m` already stored from constructor.
+2. Convert `signal`, `source_points_m`, and `target_points_m` to NumPy arrays.
+3. Validate:
+   - `signal` is one-dimensional.
+   - `source_points_m` has same first dimension as `signal`.
+   - `source_points_m` and `target_points_m` have matching coordinate dimension.
+   - coordinate dimension is 2 or 3.
+4. Compute source arc-length weights.
+5. For each target point:
+   - compute vector from source points to target,
+   - compute distances \(\rho\),
+   - apply lower bound to avoid singularity,
+   - compute optional obliquity factor,
+   - compute back-propagation kernel,
+   - sum weighted source contributions.
+6. Return complex target field.
+
+---
+
+### 14. Validation Tests to Support Reproduction
+
+This module should be validated with small deterministic tests before use on real diagnostics.
+
+#### Test 1: Shape and finite output
+
+Input:
+
+- complex sinusoidal signal,
+- straight source line,
+- target line offset by a fixed distance.
+
+Expected:
+
+- output has shape `(M,)`,
+- no NaN or Inf values.
+
+#### Test 2: Plane-wave consistency
+
+Use a simple straight-line geometry where FFT BP and Kirchhoff BP should produce similar phase behavior.
+
+Expected:
+
+- reconstructed phase trend agrees after removing a constant phase offset,
+- amplitude variance behavior is qualitatively similar.
+
+#### Test 3: Single phase-screen diagnostic
+
+Use synthetic data generated by `PhaseScreenGenerator` and propagated by `FftPropagator`.
+
+Then back-propagate with `KirchhoffPropagator`.
+
+Expected:
+
+- the minimum of \(V(L)\) should occur near the known phase-screen distance,
+- exact agreement with FFT is not required.
+
+#### Test 4: Near-field safety
+
+Use a target point close to the source trajectory.
+
+Expected:
+
+- method remains finite,
+- no division-by-zero error.
+
+---
+
+### 15. Reproduction Fidelity Notes
+
+This module is less central than `fft_propagator.py` for reproducing the paper’s main results.
+
+The paper’s large-scale COSMIC-2 processing results, including:
+
+- 2021 L1 monthly maps,
+- 2023 L1 monthly maps,
+- L1/L2 comparison,
+- QC statistics,
+- multi-valued geolocation rejection,
+
+should be reproduced through the FFT-based path configured as:
+
+```yaml
+back_propagation:
+  propagation_method_default: "fft_plane_wave"
+```
+
+`KirchhoffPropagator` exists to reflect the paper’s Section 3 discussion and to provide a future comparison path for arbitrary receiver trajectories.
+
+Because the parsed paper omits the exact Kirchhoff equation, this file should include clear documentation that the implemented integral is an approximation. The code should be written so that the kernel can be refined later without changing the public interface.
+
+---
+
+### 16. Key Implementation Constraints
+
+The implementation must follow the existing design exactly.
+
+Do not add public methods beyond:
+
+```python
+__init__(wavelength_m: float)
+backpropagate_arbitrary_trajectory(signal, source_points_m, target_points_m)
+```
+
+Private helper functions are acceptable if needed, but downstream modules should only call the public method defined in the design.
+
+The module should not hard-code project configuration values such as:
+
+- `100 km` minimum BP distance,
+- `6000 km` maximum BP distance,
+- `100 km` BP step,
+- `Q > 1.2`,
+- `cos(alpha) > 0.1`.
+
+Those values are defined in `config.yaml` and handled by upstream modules.

@@ -1,0 +1,689 @@
+## Logic Analysis: `src/geometry/coordinates.py`
+
+### 1. Purpose in the reproduction pipeline
+
+`src/geometry/coordinates.py` implements the `CoordinateTransformer` class defined in the design. This module provides low-level coordinate utilities used by:
+
+- `LosGeometry` for:
+  - converting final ECEF geolocation vectors into latitude, longitude, and altitude,
+  - computing candidate points along the GNSS–LEO LOS,
+  - tangent-point geometry support.
+- `MagneticFieldModel` for:
+  - converting ECEF candidate positions into geodetic coordinates before evaluating the configured magnetic field model, which is `IGRF-13` in `config.yaml`.
+- `RealDataExperiments` and plotting utilities for:
+  - local-time filtering of post-sunset geolocations,
+  - monthly map binning.
+
+The paper’s final geolocation product is expressed as latitude, longitude, and height over a reference ellipsoid after computing:
+
+\[
+\mathbf{R}_{geo} = \mathbf{R}_{rx} + L \mathbf{n}_{rt}
+\]
+
+Therefore, this module must perform robust ECEF ↔ geodetic conversion without introducing scientific assumptions beyond coordinate representation.
+
+---
+
+### 2. Configuration alignment
+
+This module should not hard-code experiment thresholds or BP parameters. Those are handled elsewhere through `AppConfig`.
+
+Relevant settings from `config.yaml` that this module supports indirectly:
+
+```yaml
+data:
+  magnetic_field:
+    model: "IGRF-13"
+    use_field_direction_only: true
+
+processing:
+  local_time_filter:
+    enabled_for_monthly_maps: true
+    start_hour: 18
+    end_hour: 24
+    reference: "geolocation_longitude"
+
+real_data_experiments:
+  monthly_l1_maps:
+    local_time_hours:
+      - 18
+      - 24
+    bin_size_deg:
+      latitude: 3
+      longitude: 3
+```
+
+Implications:
+
+1. `local_time()` must compute local solar time from UTC and longitude so that downstream code can apply the configured `18–24 hr` post-sunset filter.
+2. The local-time longitude reference is configured as `"geolocation_longitude"`, so this module must produce stable wrapped geolocation longitudes.
+3. Magnetic-field evaluation uses `IGRF-13`, and IGRF wrappers typically require geodetic latitude, longitude, and altitude, so `ecef_to_geodetic()` must be reliable and unit-consistent.
+
+---
+
+### 3. Required public interface
+
+The implementation must follow the design and expose only the public methods specified for `CoordinateTransformer`:
+
+```text
+class CoordinateTransformer {
+    +ecef_to_geodetic(position_m: Vector3) tuple
+    +geodetic_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) Vector3
+    +local_time(time: datetime, lon_deg: float) float
+    +enu_basis(lat_deg: float, lon_deg: float) tuple
+}
+```
+
+Additional longitude wrapping should be implemented as a private helper, for example `_wrap_lon_deg()`, not as a new public method, because the design does not specify a public longitude-wrapping API.
+
+---
+
+### 4. Coordinate conventions
+
+#### 4.1 Position frame
+
+All `Vector3` positions passed into this module are ECEF positions in meters, consistent with the shared project convention:
+
+- ECEF positions: meters.
+- BP/geolocation distances: kilometers.
+- Phase: radians.
+- Wavelength: meters.
+
+This module should not handle inertial-frame conversion. If COSMIC-2 or GNSS orbit products are in another frame, that conversion belongs in `OrbitLoader`, not here.
+
+#### 4.2 Geodetic reference
+
+The paper states that final geolocation altitude is height over a reference ellipsoid but does not specify the ellipsoid explicitly. The practical implementation should use a standard geodetic library, preferably `pyproj` or `pymap3d`, as required by the task.
+
+Recommended implementation convention:
+
+- Use `pyproj` CRS:
+  - EPSG:4978 for geocentric ECEF.
+  - EPSG:4979 for geographic 3D latitude/longitude/ellipsoidal height.
+
+This should be documented clearly because `config.yaml` does not currently expose an ellipsoid-selection field.
+
+#### 4.3 Longitude convention
+
+Use east-positive longitude in degrees.
+
+For returned geodetic longitudes, wrap to a stable interval, preferably:
+
+\[
+[-180^\circ, 180^\circ)
+\]
+
+This supports:
+
+- global map binning,
+- local-time calculation,
+- L1/L2 zonal-difference histograms.
+
+Internal private wrapping should avoid returning `+180` and `-180` inconsistently for nearly identical positions.
+
+---
+
+### 5. Method-level logic
+
+---
+
+## 5.1 `ecef_to_geodetic(position_m: Vector3) -> tuple`
+
+### Purpose
+
+Convert an ECEF position vector into geodetic coordinates.
+
+Used by:
+
+- `LosGeometry.geolocation_from_distance()`
+- `MagneticFieldModel.field_vector()`
+- plotting and diagnostics
+
+### Input
+
+```python
+position_m: Vector3
+```
+
+Expected fields:
+
+- `position_m.x` in meters
+- `position_m.y` in meters
+- `position_m.z` in meters
+
+### Output
+
+Return tuple:
+
+```python
+(lat_deg, lon_deg, alt_km)
+```
+
+Although `geodetic_to_ecef()` accepts altitude in meters, the sequence diagram shows `ecef_to_geodetic()` returning altitude for geolocation use as `alt_km`, and `GeolocationResult.altitude_km` is defined in kilometers.
+
+Implementation should document this asymmetry clearly.
+
+### Processing steps
+
+1. Convert `Vector3` to scalar ECEF coordinates:
+
+   ```text
+   x_m, y_m, z_m
+   ```
+
+2. Use `pyproj.Transformer` or `pymap3d.ecef2geodetic`.
+
+3. Obtain:
+
+   ```text
+   lat_deg
+   lon_deg
+   alt_m
+   ```
+
+4. Wrap longitude to a stable east-positive range:
+
+   \[
+   lon \in [-180^\circ, 180^\circ)
+   \]
+
+5. Convert altitude:
+
+   \[
+   alt_{km} = alt_m / 1000
+   \]
+
+6. Return:
+
+   ```python
+   return lat_deg, lon_deg, alt_km
+   ```
+
+### Edge cases
+
+- Reject or handle non-finite ECEF coordinates.
+- The ECEF origin is physically invalid for geodetic conversion; if encountered, raise a clear error.
+- Near-polar positions should remain valid through `pyproj`/`pymap3d`.
+
+---
+
+## 5.2 `geodetic_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) -> Vector3`
+
+### Purpose
+
+Convert geodetic coordinates into ECEF.
+
+Used by:
+
+- tests,
+- candidate position validation,
+- possible magnetic-field helper logic,
+- plotting support.
+
+### Input
+
+```python
+lat_deg: float
+lon_deg: float
+alt_m: float
+```
+
+Important: this method’s interface explicitly uses `alt_m`, not kilometers.
+
+### Output
+
+```python
+Vector3(x_m, y_m, z_m)
+```
+
+### Processing steps
+
+1. Validate latitude:
+
+   \[
+   -90^\circ \le lat \le 90^\circ
+   \]
+
+2. Wrap or normalize longitude internally before conversion.
+
+3. Use `pyproj` or `pymap3d.geodetic2ecef`.
+
+4. Return `Vector3` with ECEF coordinates in meters.
+
+### Edge cases
+
+- Longitudes outside `[-180, 180)` should be accepted and wrapped internally.
+- Negative altitude should be allowed, because tangent or reference calculations may occasionally produce below-ellipsoid values.
+- Non-finite input values should raise clear errors.
+
+---
+
+## 5.3 `local_time(time: datetime, lon_deg: float) -> float`
+
+### Purpose
+
+Compute local solar time in hours.
+
+The paper filters monthly maps to post-sunset local time:
+
+\[
+18 \le LT < 24
+\]
+
+In `config.yaml`, this is configured as:
+
+```yaml
+processing:
+  local_time_filter:
+    start_hour: 18
+    end_hour: 24
+    reference: "geolocation_longitude"
+```
+
+This method only computes the local time value. Filtering is performed downstream.
+
+### Input
+
+```python
+time: datetime
+lon_deg: float
+```
+
+Assumptions:
+
+- `time` represents UTC.
+- If `datetime` is naive, treat it as UTC, because COSMIC-2 observation times are UTC in the reproduction workflow.
+- Longitude is east-positive degrees.
+
+### Formula
+
+Compute UTC decimal hour:
+
+\[
+UTC_{hr}
+=
+hour
++
+\frac{minute}{60}
++
+\frac{second}{3600}
++
+\frac{microsecond}{3.6 \times 10^9}
+\]
+
+Then:
+
+\[
+LT = UTC_{hr} + \frac{lon_{deg}}{15}
+\]
+
+Wrap to:
+
+\[
+0 \le LT < 24
+\]
+
+using modulo arithmetic.
+
+### Output
+
+```python
+local_time_hr: float
+```
+
+### Examples
+
+- UTC 12:00, longitude `0°`:
+
+  \[
+  LT = 12
+  \]
+
+- UTC 12:00, longitude `15°E`:
+
+  \[
+  LT = 13
+  \]
+
+- UTC 12:00, longitude `90°W`:
+
+  \[
+  LT = 6
+  \]
+
+- UTC 23:00, longitude `30°E`:
+
+  \[
+  LT = 1
+  \]
+
+after wrap.
+
+### Edge cases
+
+- Longitude should be wrapped internally before calculation.
+- Return must always be in `[0, 24)`.
+- Do not apply equation-of-time correction; the paper uses ordinary longitude-based local time.
+
+---
+
+## 5.4 `enu_basis(lat_deg: float, lon_deg: float) -> tuple`
+
+### Purpose
+
+Return local East-North-Up basis vectors in ECEF coordinates.
+
+This is useful for geometry diagnostics and possible tangent/LOS support.
+
+### Input
+
+```python
+lat_deg: float
+lon_deg: float
+```
+
+### Output
+
+Return tuple:
+
+```python
+(east: Vector3, north: Vector3, up: Vector3)
+```
+
+Each vector should be a unit vector in ECEF coordinates.
+
+### Formula
+
+Let:
+
+\[
+\phi = lat
+\]
+
+\[
+\lambda = lon
+\]
+
+in radians.
+
+East:
+
+\[
+\mathbf{e}
+=
+[-\sin\lambda,\ \cos\lambda,\ 0]
+\]
+
+North:
+
+\[
+\mathbf{n}
+=
+[-\sin\phi\cos\lambda,\ -\sin\phi\sin\lambda,\ \cos\phi]
+\]
+
+Up:
+
+\[
+\mathbf{u}
+=
+[\cos\phi\cos\lambda,\ \cos\phi\sin\lambda,\ \sin\phi]
+\]
+
+### Required properties
+
+The returned vectors should satisfy, within numerical tolerance:
+
+\[
+||\mathbf{e}|| = ||\mathbf{n}|| = ||\mathbf{u}|| = 1
+\]
+
+\[
+\mathbf{e} \cdot \mathbf{n} = 0
+\]
+
+\[
+\mathbf{e} \cdot \mathbf{u} = 0
+\]
+
+\[
+\mathbf{n} \cdot \mathbf{u} = 0
+\]
+
+\[
+\mathbf{e} \times \mathbf{n} = \mathbf{u}
+\]
+
+### Edge cases
+
+- Valid at poles, but east direction depends on longitude, as expected.
+- Longitude should be wrapped internally.
+
+---
+
+### 6. Private helper logic
+
+Because the design does not include a public longitude-wrapping method, implement wrapping as a private helper, for example:
+
+```python
+_wrap_lon_deg(lon_deg: float) -> float
+```
+
+Recommended behavior:
+
+\[
+wrapped = ((lon + 180) \bmod 360) - 180
+\]
+
+Special care:
+
+- Avoid returning `180.0` when the canonical interval is `[-180, 180)`.
+- Preserve finite floating-point behavior.
+- Raise or handle non-finite inputs.
+
+This helper may be used internally by:
+
+- `ecef_to_geodetic`
+- `geodetic_to_ecef`
+- `local_time`
+- `enu_basis`
+
+---
+
+### 7. Dependency analysis
+
+This module should depend only on:
+
+- standard library:
+  - `datetime`
+  - `math`
+- external geodetic package:
+  - preferably `pyproj`
+  - alternatively `pymap3d`
+- project type definitions:
+  - `Vector3` from `src/core/types.py`
+
+It should not depend on:
+
+- `AppConfig`
+- `LosGeometry`
+- `MagneticFieldModel`
+- `BackpropProcessor`
+- `QualityController`
+- plotting modules
+- data loaders
+
+This avoids circular dependencies.
+
+---
+
+### 8. Interaction with other modules
+
+#### 8.1 With `LosGeometry`
+
+`LosGeometry.geolocation_from_distance()` computes an ECEF position:
+
+\[
+\mathbf{R}_{geo}
+\]
+
+Then calls:
+
+```python
+CoordinateTransformer.ecef_to_geodetic(position_m)
+```
+
+The resulting latitude, longitude, and altitude are stored in `GeolocationResult`.
+
+The final `GeolocationResult.altitude_km` should be populated using the `alt_km` returned here.
+
+#### 8.2 With `MagneticFieldModel`
+
+`MagneticFieldModel.field_vector()` needs geodetic coordinates for IGRF-13 evaluation.
+
+Since `config.yaml` states:
+
+```yaml
+data:
+  magnetic_field:
+    model: "IGRF-13"
+    use_field_direction_only: true
+```
+
+the exact magnetic-field magnitude is not used for BP-plane definition, but the direction must be evaluated at the correct geodetic location. Therefore, conversion accuracy matters.
+
+#### 8.3 With monthly maps
+
+`RealDataExperiments.make_monthly_bins()` uses accepted geolocation latitude/longitude and filters by local time.
+
+This module provides the local-time calculation, but the downstream filtering must use configured values:
+
+```yaml
+start_hour: 18
+end_hour: 24
+```
+
+and map bin size:
+
+```yaml
+3 degrees × 3 degrees
+```
+
+This module should not apply the filter itself.
+
+---
+
+### 9. Numerical precision considerations
+
+Coordinate conversion errors should be negligible compared with BP distance spacing:
+
+```yaml
+back_propagation:
+  distance_grid:
+    step_km: 100
+```
+
+Expected geodetic transformation errors from `pyproj` are far below the geolocation uncertainty scale discussed in the paper.
+
+However, this module must avoid avoidable errors because:
+
+- magnetic-field orientation changes along the LOS,
+- BP-plane orientation depends on candidate position,
+- scan angle \(\alpha\) influences QC through:
+
+```yaml
+cos_alpha_threshold: 0.1
+```
+
+Even though this threshold is not applied here, poor coordinate conversion could affect downstream scan-angle computation.
+
+---
+
+### 10. Validation tests to support implementation
+
+Recommended tests for this module:
+
+#### 10.1 Round-trip geodetic/ECEF conversion
+
+For representative points:
+
+- Equator, Greenwich:
+  - `lat=0`, `lon=0`, `alt=0`
+- Equator, 90°E:
+  - `lat=0`, `lon=90`, `alt=0`
+- Mid-latitude:
+  - `lat=45`, `lon=-105`, `alt=550000 m`
+- Near pole:
+  - `lat=89.9`, `lon=45`, `alt=0`
+
+Test:
+
+```text
+geodetic -> ecef -> geodetic
+```
+
+Latitude and longitude should agree within tight tolerance. Altitude should agree to within numerical geodesy tolerance.
+
+#### 10.2 Local time
+
+Test known cases:
+
+| UTC | Longitude | Expected LT |
+|---|---:|---:|
+| 12:00 | 0° | 12 |
+| 12:00 | 15°E | 13 |
+| 12:00 | 90°W | 6 |
+| 23:00 | 30°E | 1 |
+
+#### 10.3 Longitude wrapping
+
+Validate:
+
+| Input | Wrapped |
+|---:|---:|
+| 0 | 0 |
+| 180 | -180 |
+| -180 | -180 |
+| 181 | -179 |
+| -181 | 179 |
+| 540 | -180 |
+
+#### 10.4 ENU orthonormality
+
+For several lat/lon pairs, verify:
+
+- unit norms,
+- pairwise dot products near zero,
+- `east × north ≈ up`.
+
+---
+
+### 11. Implementation cautions
+
+1. Do not implement custom ellipsoid formulas unless necessary. Use `pyproj` or `pymap3d`.
+2. Do not hard-code paper thresholds such as:
+   - `sigma_phi > 0.25 rad`
+   - tangent height `150 km`
+   - BP grid `100–6000 km`
+   - `Q > 1.2`
+   These belong to other modules through `AppConfig`.
+3. Keep this module stateless if possible.
+4. Ensure all longitude handling uses east-positive degrees.
+5. Clearly document the altitude-unit convention:
+   - `geodetic_to_ecef()` accepts `alt_m`.
+   - `ecef_to_geodetic()` should return `alt_km` to match downstream `GeolocationResult.altitude_km` and the program call flow.
+6. Treat naive datetimes as UTC for local-time calculation.
+7. Do not add public methods beyond the design-specified interface.
+
+---
+
+### 12. Summary
+
+`src/geometry/coordinates.py` is a foundational utility module. It does not implement the BP method directly, but it supports several scientifically critical steps:
+
+- converting final ECEF geolocation vectors to geodetic coordinates,
+- supplying geodetic positions for IGRF-13 magnetic-field evaluation,
+- computing local solar time for the configured post-sunset monthly-map filter,
+- providing local ENU basis vectors for geometry calculations.
+
+Correctness here is essential because downstream BP-plane construction, scan-angle computation, magnetic-field orientation, local-time filtering, and final map products all depend on stable and consistent coordinate transformations.

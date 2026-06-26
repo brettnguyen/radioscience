@@ -1,0 +1,612 @@
+## Logic Analysis: `src/geometry/magnetic_field.py`
+
+### 1. Purpose in the Reproduction Pipeline
+
+`src/geometry/magnetic_field.py` implements the magnetic-field abstraction required by the COSMIC-2 back-propagation geolocation method.
+
+According to the paper and `config.yaml`, the magnetic field is used to define the assumed orientation of anisotropic plasma irregularities in the equatorial F region. The paper assumes the irregularities are elongated along geomagnetic field lines and uses the **IGRF-13** model to obtain the magnetic-field direction.
+
+This module must therefore provide a stable project-level interface:
+
+```python
+class MagneticFieldModel:
+    +__init__(model_name: str)
+    +field_vector(time: datetime, position_m: Vector3) Vector3
+    +field_unit(time: datetime, position_m: Vector3) Vector3
+```
+
+It is used by `BpPlaneBuilder.build(window, l_mf_km)` for every candidate magnetic-field distance \(L_{\mathrm{mf}}\), where the candidate point lies along the GNSS–LEO line of sight.
+
+The output magnetic vector must be compatible with the rest of the geometry code, meaning it should be returned as an **ECEF-frame `Vector3`**, because LOS vectors, candidate positions, and BP-plane axes are represented in ECEF coordinates.
+
+---
+
+### 2. Paper Methodology Requirements
+
+The paper’s requirements relevant to this module are:
+
+1. Plasma irregularities in the equatorial F region are assumed to be field-aligned.
+2. The magnetic-field vector defines the orientation of irregularities.
+3. Only the **direction** of the magnetic field is used, not the magnitude.
+4. The model used in the paper is **IGRF-13**.
+5. The magnetic field is evaluated at candidate points along the LOS:
+   \[
+   \mathbf{R}_{cand}
+   =
+   \mathbf{R}_{rx}
+   +
+   L_{\mathrm{mf}}\mathbf{n}_{rt}
+   \]
+6. Different \(L_{\mathrm{mf}}\) values produce different magnetic-field directions, which produce different BP planes and therefore different \(L_0\) values.
+7. The final geolocation is found from:
+   \[
+   D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}} = 0
+   \]
+
+Therefore, this module directly affects the central geolocation criterion.
+
+---
+
+### 3. Configuration Alignment
+
+This module must reference the following configuration settings from `config.yaml` indirectly through the constructor argument supplied by `main.py`:
+
+```yaml
+data:
+  magnetic_field:
+    model: "IGRF-13"
+    use_field_direction_only: true
+```
+
+The design interface only allows:
+
+```python
+MagneticFieldModel(model_name: str)
+```
+
+So `main.py` should instantiate it as:
+
+```python
+MagneticFieldModel(config.igrf_model)
+```
+
+or equivalent, where `config.igrf_model` is loaded from the YAML model value.
+
+This module should not invent or hard-code an alternative magnetic-field model. If the supplied `model_name` is not `"IGRF-13"`, the module should either:
+
+1. raise a clear error, or
+2. log/record that only IGRF-13 reproduction is supported.
+
+For strict reproduction of the paper, `"IGRF-13"` is the expected model.
+
+---
+
+### 4. Dependency Boundaries
+
+Allowed dependencies for this file:
+
+- `datetime`
+- `numpy`
+- `ppigrf`
+- `src/core/types.py`
+  - `Vector3`
+- `src/geometry/coordinates.py`
+  - `CoordinateTransformer`
+
+This module should **not** depend on:
+
+- `BpPlaneBuilder`
+- `LosGeometry`
+- `SignalWindow`
+- `BackpropProcessor`
+- `Geolocator`
+- plotting modules
+- data-loading modules
+
+The goal is to isolate external IGRF API details so all downstream modules call only:
+
+```python
+field_vector(time, position_m)
+field_unit(time, position_m)
+```
+
+---
+
+### 5. Input and Output Contracts
+
+#### 5.1 `__init__(model_name: str)`
+
+Inputs:
+
+- `model_name`: expected to be `"IGRF-13"` from `config.yaml`.
+
+Responsibilities:
+
+1. Store the model name.
+2. Validate that the requested model is supported.
+3. Initialize any helper objects needed for coordinate conversion.
+4. Avoid expensive precomputation unless needed.
+
+Because the design interface does not include a `CoordinateTransformer` argument, the module may instantiate one internally:
+
+```python
+self.transformer = CoordinateTransformer()
+```
+
+This preserves the required public interface.
+
+---
+
+#### 5.2 `field_vector(time: datetime, position_m: Vector3) -> Vector3`
+
+Inputs:
+
+- `time`: midpoint time of the 10-s signal window or candidate evaluation time.
+- `position_m`: candidate position in ECEF meters.
+
+Output:
+
+- magnetic-field vector as `Vector3` in the **ECEF frame**.
+
+Responsibilities:
+
+1. Convert the ECEF candidate position to geodetic coordinates:
+   - latitude in degrees,
+   - longitude in degrees,
+   - altitude in meters or kilometers as required by the IGRF backend.
+2. Call the IGRF provider using the correct coordinate convention.
+3. Convert the returned magnetic-field components from the IGRF local frame into ECEF.
+4. Return the ECEF magnetic-field vector.
+
+The magnetic-field magnitude may be in nanotesla, but downstream processing uses only direction. The unit is therefore less important than preserving component ratios and frame orientation.
+
+---
+
+#### 5.3 `field_unit(time: datetime, position_m: Vector3) -> Vector3`
+
+Inputs:
+
+- same as `field_vector`.
+
+Output:
+
+- normalized ECEF magnetic-field direction as `Vector3`.
+
+Responsibilities:
+
+1. Call `field_vector`.
+2. Compute the norm.
+3. Return `field_vector.unit()`.
+4. Handle invalid or near-zero magnetic-field vectors robustly.
+
+The paper uses only the direction of the field, so this method is the one primarily used by `BpPlaneBuilder`.
+
+---
+
+### 6. Coordinate-System Logic
+
+This is the most important implementation detail.
+
+The rest of the geolocation pipeline uses ECEF vectors. However, IGRF packages usually return magnetic-field components in a local geodetic basis, commonly one of:
+
+- north/east/down,
+- east/north/up,
+- north/east/up,
+- or similar.
+
+The implementation must convert those local components to an ECEF vector before returning.
+
+#### 6.1 ECEF to Geodetic Conversion
+
+Given:
+
+```python
+position_m: Vector3
+```
+
+Convert to:
+
+```python
+lat_deg, lon_deg, alt_km
+```
+
+Using `CoordinateTransformer.ecef_to_geodetic(position_m)`.
+
+The expected altitude unit for `ppigrf` must be verified. Most IGRF interfaces use altitude in kilometers. Internally this module should normalize units carefully:
+
+```text
+ECEF input: meters
+geodetic altitude from CoordinateTransformer: likely meters or kilometers depending project convention
+IGRF altitude input: use the package-required unit
+```
+
+The `CoordinateTransformer.ecef_to_geodetic` interface in the design returns a tuple but does not explicitly specify altitude units. Elsewhere, `LosGeometry.geolocation_from_distance` is expected to return altitude in kilometers. Therefore, this module must be consistent with the actual implementation of `CoordinateTransformer`.
+
+Recommended internal rule:
+
+- If `CoordinateTransformer.ecef_to_geodetic` returns altitude in meters, convert to kilometers for IGRF.
+- If it returns altitude in kilometers, pass directly.
+- This should be documented in the implementation and tested.
+
+---
+
+#### 6.2 Local Magnetic Components to ECEF
+
+Assume the IGRF backend returns local components such as:
+
+```text
+B_east, B_north, B_up
+```
+
+or:
+
+```text
+B_north, B_east, B_down
+```
+
+The module must map those correctly.
+
+A robust implementation strategy is:
+
+1. Use `CoordinateTransformer.enu_basis(lat_deg, lon_deg)` to obtain ECEF unit vectors:
+   - east,
+   - north,
+   - up.
+
+2. Convert local field to ECEF:
+
+If backend returns east, north, up:
+
+\[
+\mathbf{B}_{ecef}
+=
+B_E \hat{\mathbf{e}}
++
+B_N \hat{\mathbf{n}}
++
+B_U \hat{\mathbf{u}}
+\]
+
+If backend returns north, east, down:
+
+\[
+\mathbf{B}_{ecef}
+=
+B_N \hat{\mathbf{n}}
++
+B_E \hat{\mathbf{e}}
+-
+B_D \hat{\mathbf{u}}
+\]
+
+Because external package APIs can differ, the conversion must be isolated inside this module.
+
+Downstream code must never need to know the external package’s component ordering.
+
+---
+
+### 7. Expected `ppigrf` Integration
+
+The task specifies:
+
+```text
+Magnetic-field evaluation uses ppigrf, or a replaceable equivalent IGRF-13 package.
+```
+
+Therefore this module should wrap `ppigrf` in a private helper, for example conceptually:
+
+```python
+_eval_ppigrf(time, lat_deg, lon_deg, alt_km)
+```
+
+The public API should remain:
+
+```python
+field_vector(time, position_m)
+field_unit(time, position_m)
+```
+
+Implementation must verify the exact `ppigrf` function signature. Common IGRF package APIs accept:
+
+```text
+longitude, latitude, altitude, date
+```
+
+and return local magnetic components.
+
+The module should account for:
+
+- scalar inputs,
+- numpy-array outputs even for scalar inputs,
+- pandas/xarray return types if the package returns structured objects,
+- datetime/date conversion expected by `ppigrf`.
+
+For reproduction, the date should correspond to the actual observation time, normally `SignalWindow.mid_time`.
+
+---
+
+### 8. Time Handling
+
+The paper processes data from:
+
+```yaml
+data:
+  cosmic2:
+    years:
+      - 2021
+      - 2023
+```
+
+The magnetic-field model must evaluate field direction at the actual observation date/time.
+
+Input:
+
+```python
+time: datetime
+```
+
+Expected handling:
+
+1. Use the provided datetime directly if `ppigrf` accepts Python `datetime`.
+2. If not, convert to the date or decimal year format expected by the backend.
+3. Preserve the year dependence because 2021 and 2023 are both processed.
+
+No synthetic or fixed epoch should be used for real-data processing.
+
+---
+
+### 9. Role in BP Plane Construction
+
+`BpPlaneBuilder.build(window, l_mf_km)` depends on this module.
+
+The downstream logic is:
+
+1. `LosGeometry.candidate_position(window, l_mf_km)` computes candidate ECEF position.
+2. `MagneticFieldModel.field_unit(window.mid_time, candidate_position_m)` returns:
+   \[
+   \hat{\mathbf{H}}
+   \]
+3. `BpPlaneBuilder` projects \(\hat{\mathbf{H}}\) onto the phase-screen plane perpendicular to LOS.
+4. The projected magnetic-field direction defines the irregularity orientation.
+5. The BP plane is defined perpendicular to that projected direction.
+6. Scan angle \(\alpha\) is computed.
+7. The QC criterion later requires:
+   \[
+   \cos\alpha > 0.1
+   \]
+
+Because this module supplies \(\hat{\mathbf{H}}\), any coordinate-frame error here will corrupt:
+
+- BP plane orientation,
+- scan angle \(\alpha\),
+- \(D(L_{\mathrm{mf}})\),
+- multi-valued geolocation detection,
+- final accepted/rejected results.
+
+---
+
+### 10. Numerical Robustness Requirements
+
+The implementation should handle the following cases safely.
+
+#### 10.1 Invalid Position
+
+If `position_m` contains NaN or infinite values:
+
+- raise a clear exception, or
+- return an invalid vector only if downstream code explicitly handles it.
+
+Preferred: raise `ValueError`.
+
+#### 10.2 Invalid Time
+
+If `time` is `None` or not a `datetime`:
+
+- raise `TypeError` or `ValueError`.
+
+#### 10.3 Near-Zero Magnetic Field
+
+The terrestrial magnetic field should not be zero, but numerical or API failures could produce near-zero vectors.
+
+For `field_unit`:
+
+- compute norm,
+- if norm is zero or nonfinite, raise `ValueError`.
+
+Do not silently return an arbitrary direction.
+
+#### 10.4 Unsupported Model
+
+If the model requested is not `"IGRF-13"`:
+
+- for strict paper reproduction, raise `ValueError`.
+
+This prevents accidentally using a different IGRF generation.
+
+---
+
+### 11. Unit Conventions
+
+Public API units:
+
+| Quantity | Unit |
+|---|---|
+| `position_m` | ECEF meters |
+| `time` | Python `datetime` |
+| returned `Vector3` from `field_vector` | magnetic field in ECEF, likely nT |
+| returned `Vector3` from `field_unit` | dimensionless unit vector |
+
+Internal conversions:
+
+| Quantity | Unit |
+|---|---|
+| geodetic latitude | degrees |
+| geodetic longitude | degrees |
+| altitude for IGRF | package-dependent, likely kilometers |
+
+This module must not return local north/east/down components to the rest of the code.
+
+---
+
+### 12. Relationship to `config.yaml`
+
+The file should respect these configuration entries:
+
+```yaml
+data:
+  magnetic_field:
+    model: "IGRF-13"
+    use_field_direction_only: true
+```
+
+And indirectly supports:
+
+```yaml
+back_propagation:
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+The candidate-grid values are not used in this module directly. They are used by `BackpropProcessor` and `BpPlaneBuilder`, which call this module repeatedly.
+
+This module should therefore remain stateless with respect to distance grids.
+
+---
+
+### 13. Testing and Validation Strategy
+
+Unit tests for this module should verify:
+
+#### 13.1 API Stability
+
+- `MagneticFieldModel("IGRF-13")` initializes successfully.
+- unsupported model name raises an error.
+
+#### 13.2 Coordinate Conversion
+
+Use a known ECEF position generated from a geodetic point through `CoordinateTransformer.geodetic_to_ecef`, then call `field_vector`.
+
+Expected:
+
+- output is a finite `Vector3`,
+- norm is positive,
+- unit vector norm is approximately 1.
+
+#### 13.3 Frame Consistency
+
+At several test locations:
+
+- equator,
+- mid-latitude,
+- high latitude,
+- representative COSMIC-2 F-region altitude,
+
+verify that `field_unit` returns finite ECEF vectors.
+
+No exact field values should be hard-coded unless they are generated from a trusted reference.
+
+#### 13.4 Date Dependence
+
+Evaluate the same location for dates in 2021 and 2023.
+
+Expected:
+
+- both calls succeed,
+- field directions are similar but not necessarily identical.
+
+#### 13.5 Downstream Compatibility
+
+Create a mock `BpPlaneBuilder` candidate call:
+
+```python
+magnetic_unit = model.field_unit(mid_time, candidate_position_m)
+```
+
+Then verify that `magnetic_unit.to_array()` can be projected against an ECEF LOS vector without shape or type issues.
+
+---
+
+### 14. Performance Considerations
+
+This module is called many times:
+
+- for every 10-s `SignalWindow`,
+- for each \(L_{\mathrm{mf}}\) from 100 to 6000 km,
+- at 100 km spacing.
+
+That is approximately 60 magnetic-field evaluations per processed interval.
+
+For large-scale 2021 and 2023 processing, this can become expensive.
+
+Recommended implementation considerations:
+
+1. Keep the wrapper lightweight.
+2. Avoid repeated object construction inside `field_vector`.
+3. Optionally add a small internal cache keyed by:
+   - rounded time,
+   - rounded latitude,
+   - rounded longitude,
+   - rounded altitude,
+   - model name.
+
+However, caching should be introduced carefully because candidate locations vary continuously. Initial implementation can be uncached for correctness.
+
+---
+
+### 15. Failure Modes That Would Break Reproduction
+
+The most serious possible mistakes are:
+
+1. Returning magnetic vectors in local ENU/NED instead of ECEF.
+2. Swapping latitude and longitude in the IGRF call.
+3. Passing altitude in meters when the IGRF package expects kilometers.
+4. Using down instead of up without sign correction.
+5. Accidentally using a model other than IGRF-13.
+6. Evaluating the field at the receiver, tangent point, or midpoint instead of candidate \(L_{\mathrm{mf}}\) position.
+7. Ignoring observation date and using a fixed epoch.
+8. Returning field magnitude only instead of vector direction.
+
+Any of these would produce incorrect BP-plane orientations and therefore incorrect geolocations.
+
+---
+
+### 16. Implementation Sequence for This File
+
+Recommended coding order:
+
+1. Import required dependencies.
+2. Define `MagneticFieldModel`.
+3. Implement `__init__(model_name)`.
+4. Internally initialize `CoordinateTransformer`.
+5. Implement private geodetic conversion helper.
+6. Implement private `ppigrf` evaluation helper.
+7. Implement local-to-ECEF vector conversion.
+8. Implement `field_vector`.
+9. Implement `field_unit`.
+10. Add clear docstrings documenting:
+    - input frame,
+    - output frame,
+    - units,
+    - IGRF-13 paper requirement.
+
+---
+
+### 17. Expected Final Behavior
+
+For a call such as:
+
+```python
+model = MagneticFieldModel("IGRF-13")
+b = model.field_unit(time, candidate_position_m)
+```
+
+the result should be:
+
+- a `Vector3`,
+- in ECEF coordinates,
+- dimensionless unit length,
+- representing the IGRF-13 magnetic-field direction at the candidate LOS point and observation time.
+
+This is the exact quantity needed by `BpPlaneBuilder` to reproduce the paper’s magnetic-field-based BP-plane definition.

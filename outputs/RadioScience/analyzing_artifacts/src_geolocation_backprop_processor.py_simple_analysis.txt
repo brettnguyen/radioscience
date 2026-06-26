@@ -1,0 +1,1420 @@
+## Logic Analysis: `src/geolocation/backprop_processor.py`
+
+### 1. Purpose of This Module
+
+`src/geolocation/backprop_processor.py` implements the core real-data back-propagation engine described in Sections 3–4 of the paper.
+
+Its responsibility is to connect four major parts of the reproduction pipeline:
+
+1. **IGRF-defined geometry**
+   - For each magnetic-field candidate distance \(L_{\mathrm{mf}}\), build a 2D BP plane using `BpPlaneBuilder`.
+
+2. **Stationary-transmitter and wavefront-corrected signal preparation**
+   - For each candidate BP distance \(L\), call `StationaryCorrector.correct(...)`.
+
+3. **Numerical back propagation**
+   - Use `FftPropagator.backpropagate_2d(...)` to back-propagate the corrected complex signal.
+
+4. **Geolocation decision curve**
+   - Compute \(V(L)\), find its minimum \(L_0\), form:
+     \[
+     D(L_{\mathrm{mf}})=L_0-L_{\mathrm{mf}}
+     \]
+   - Find zero crossings of \(D\), which become candidate geolocation distances.
+
+This module should not perform pre-BP scintillation filtering, final geodetic conversion, monthly binning, plotting, or file I/O. Those are handled by `Geolocator`, `RealDataExperiments`, `Plotter`, and `ResultWriter`.
+
+---
+
+## 2. Paper Methodology to Preserve
+
+The implementation must follow the paper’s real-data geolocation algorithm:
+
+### 2.1 Outer Magnetic-Field Loop
+
+For each 10-s `SignalWindow`, the paper applies BP for multiple candidate orientations of the BP plane.
+
+The candidate magnetic-field distance is:
+
+\[
+L_{\mathrm{mf}} = 100, 200, \ldots, 6000 \ \mathrm{km}
+\]
+
+using the configuration:
+
+```yaml
+back_propagation:
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+In the design, these correspond to:
+
+- `config.bp_min_distance_km`
+- `config.bp_max_distance_km`
+- `config.mf_step_km`
+
+For each \(L_{\mathrm{mf}}\):
+
+1. `BpPlaneBuilder.build(window, l_mf_km)` constructs a `BpPlaneGeometry`.
+2. The magnetic-field vector is evaluated at the candidate point along the LOS.
+3. The BP plane orientation is determined from the projected magnetic-field direction.
+4. The scan-angle diagnostic \(\cos\alpha\) is stored in the resulting `BpPlaneGeometry`.
+
+---
+
+### 2.2 Inner Back-Propagation Distance Loop
+
+For each BP plane defined by \(L_{\mathrm{mf}}\), the paper performs BP over:
+
+\[
+L = 100, 200, \ldots, 6000 \ \mathrm{km}
+\]
+
+using the configuration:
+
+```yaml
+back_propagation:
+  distance_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+In the design, these correspond to:
+
+- `config.bp_min_distance_km`
+- `config.bp_max_distance_km`
+- `config.bp_step_km`
+
+For each candidate screen distance \(L\):
+
+1. Correct the observed signal geometry using `StationaryCorrector.correct(...)`.
+2. Back-propagate the corrected complex signal.
+3. Compute the normalized amplitude variance:
+   \[
+   V(L) = \frac{\langle A^2\rangle}{\langle A\rangle^2} - 1
+   \]
+   using `FftPropagator.amplitude_variance(...)`.
+
+The true irregularity location for that BP-plane orientation is inferred from the minimum of \(V(L)\).
+
+---
+
+### 2.3 \(V(L)\) Smoothing and Minimum Detection
+
+The raw \(V(L)\) curve is smoothed as described in the paper:
+
+```yaml
+back_propagation:
+  v_curve:
+    smoothing:
+      enabled: true
+      method: "second_order_sliding_polynomial_regression"
+      window_km: 1000
+      polynomial_order: 2
+```
+
+In the design, smoothing is handled by:
+
+```python
+QualityController.smooth_v_curve(distances_km, v_raw)
+```
+
+Then the module must find the global local minimum:
+
+\[
+L_0 = \arg\min_{\text{local}} V(L)
+\]
+
+using:
+
+```python
+QualityController.find_global_local_minimum(distances_km, v_smooth)
+```
+
+The minimum must not be at the endpoints and must satisfy the paper’s local-minimum requirements through QC logic.
+
+---
+
+### 2.4 \(Q\) Metric
+
+For each valid \(V(L)\) curve, compute:
+
+\[
+Q = \frac{\min(V_1,V_2)}{V_0}
+\]
+
+where:
+
+- \(V_0 = V(L_0)\)
+- \(V_1 = V(L_0-L_1)\)
+- \(V_2 = V(L_0+L_2)\)
+
+`L1` and `L2` are the distances from \(L_0\) to the points where monotonic increase ends on each side.
+
+Use:
+
+```python
+QualityController.compute_q(distances_km, v_smooth, l0_km)
+```
+
+The final paper QC threshold is:
+
+```yaml
+back_propagation:
+  quality_control:
+    q_threshold: 1.2
+```
+
+However, `BackpropProcessor` itself should compute and store `q`; final acceptance/rejection is handled later by `Geolocator` and `QualityController.passes_final(...)`.
+
+---
+
+### 2.5 \(D(L_{\mathrm{mf}})\) Curve
+
+For each outer-loop \(L_{\mathrm{mf}}\), after the inner-loop \(V(L)\) minimum has been found:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+The final geolocation is where:
+
+\[
+D(L_{\mathrm{mf}})=0
+\]
+
+This module must create a `DCurve` containing:
+
+- `l_mf_km`
+- `d_km`
+- `l0_km`
+- `q`
+- `cos_alpha`
+- `zero_crossings_km`
+- `is_multivalued`
+
+The zero crossings are found through:
+
+```python
+QualityController.find_zero_crossings(d_curve)
+```
+
+The paper requires that all multi-valued geolocations be discarded later:
+
+```yaml
+back_propagation:
+  quality_control:
+    require_single_valued_geolocation: true
+    discard_multivalued_geolocations: true
+```
+
+This module should mark whether the result is multi-valued, but final rejection is handled by `Geolocator`.
+
+---
+
+## 3. Required Public Interface
+
+The implementation must follow the design exactly.
+
+`BackpropProcessor` has the following public interface:
+
+```python
+class BackpropProcessor:
+    +__init__(
+        config: AppConfig,
+        plane_builder: BpPlaneBuilder,
+        corrector: StationaryCorrector,
+        propagator: FftPropagator,
+        qc: QualityController
+    )
+
+    +process_for_lmf(
+        window: SignalWindow,
+        l_mf_km: float,
+        wavelength_m: float
+    ) BpCurve
+
+    +compute_v_curve(
+        window: SignalWindow,
+        plane: BpPlaneGeometry,
+        wavelength_m: float
+    ) BpCurve
+
+    +compute_d_curve(
+        window: SignalWindow,
+        wavelength_m: float
+    ) DCurve
+```
+
+No additional public methods should be introduced.
+
+Private helper functions may be used internally if useful, but they should not change the design contract.
+
+---
+
+## 4. Constructor Logic
+
+### Method
+
+```python
+__init__(
+    config: AppConfig,
+    plane_builder: BpPlaneBuilder,
+    corrector: StationaryCorrector,
+    propagator: FftPropagator,
+    qc: QualityController
+)
+```
+
+### Responsibilities
+
+Store the injected dependencies:
+
+- `self.config`
+- `self.plane_builder`
+- `self.corrector`
+- `self.propagator`
+- `self.qc`
+
+No scientific computation should happen in the constructor.
+
+### Configuration Values Used Later
+
+The module relies on these configuration-derived values:
+
+| Paper/config value | Source in `config.yaml` | Design field |
+|---|---|---|
+| BP min distance | `back_propagation.distance_grid.min_km: 100` | `config.bp_min_distance_km` |
+| BP max distance | `back_propagation.distance_grid.max_km: 6000` | `config.bp_max_distance_km` |
+| BP step | `back_propagation.distance_grid.step_km: 100` | `config.bp_step_km` |
+| MF step | `back_propagation.magnetic_field_candidate_grid.step_km: 100` | `config.mf_step_km` |
+| Smoothing window | `back_propagation.v_curve.smoothing.window_km: 1000` | handled by `QualityController` |
+| Smoothing order | `back_propagation.v_curve.smoothing.polynomial_order: 2` | handled by `QualityController` |
+
+The stationary-transmitter correction should use Option 2 for the FFT implementation because `config.yaml` states:
+
+```yaml
+back_propagation:
+  stationary_transmitter_correction:
+    default_option: 2
+```
+
+and the program call flow explicitly calls:
+
+```python
+correct(..., option=2)
+```
+
+Therefore, `BackpropProcessor` should call:
+
+```python
+StationaryCorrector.correct(window, plane, screen_distance_km, option=2)
+```
+
+unless the implemented `AppConfig` later exposes the configured option directly.
+
+---
+
+## 5. Distance Grid Construction
+
+The distance grid should include both endpoints:
+
+\[
+100, 200, \ldots, 6000 \ \mathrm{km}
+\]
+
+Implementation logic:
+
+```text
+distances_km = np.arange(
+    config.bp_min_distance_km,
+    config.bp_max_distance_km + config.bp_step_km / 2,
+    config.bp_step_km
+)
+```
+
+The small half-step avoids accidentally dropping the endpoint due to floating-point arithmetic.
+
+The same approach should be used for the magnetic-field candidate grid, except with `config.mf_step_km`:
+
+```text
+l_mf_grid_km = np.arange(
+    config.bp_min_distance_km,
+    config.bp_max_distance_km + config.mf_step_km / 2,
+    config.mf_step_km
+)
+```
+
+The paper uses the same numerical range for both loops.
+
+---
+
+## 6. Method Logic: `process_for_lmf(...)`
+
+### Signature
+
+```python
+process_for_lmf(
+    window: SignalWindow,
+    l_mf_km: float,
+    wavelength_m: float
+) -> BpCurve
+```
+
+### Purpose
+
+Process one magnetic-field candidate distance \(L_{\mathrm{mf}}\).
+
+This method should:
+
+1. Build a BP plane for `l_mf_km`.
+2. Delegate the \(V(L)\) computation to `compute_v_curve(...)`.
+3. Return a `BpCurve`.
+
+### Required Steps
+
+#### Step 1: Build BP Plane
+
+Call:
+
+```python
+plane = self.plane_builder.build(window, l_mf_km)
+```
+
+This returns `BpPlaneGeometry`, including:
+
+- `l_mf_km`
+- `los_unit`
+- `x_axis`
+- `y_axis`
+- `z_axis`
+- `magnetic_unit`
+- `cos_alpha`
+- `alpha_rad`
+- `beta_rad`
+- `candidate_position_m`
+
+#### Step 2: Compute \(V(L)\)
+
+Call:
+
+```python
+curve = self.compute_v_curve(window, plane, wavelength_m)
+```
+
+#### Step 3: Return `BpCurve`
+
+The returned curve must have:
+
+```python
+curve.l_mf_km == l_mf_km
+```
+
+or, more precisely, it should use:
+
+```python
+plane.l_mf_km
+```
+
+to avoid drift between input and actual plane metadata.
+
+---
+
+## 7. Method Logic: `compute_v_curve(...)`
+
+### Signature
+
+```python
+compute_v_curve(
+    window: SignalWindow,
+    plane: BpPlaneGeometry,
+    wavelength_m: float
+) -> BpCurve
+```
+
+### Purpose
+
+For one fixed BP-plane orientation, compute the complete \(V(L)\) curve over all candidate screen distances.
+
+This corresponds to the paper’s inner loop.
+
+---
+
+### 7.1 Inputs
+
+- `window`
+  - A prepared 10-s `SignalWindow`.
+  - Its phase should already be detrended/preprocessed by `Geolocator` before calling this module.
+
+- `plane`
+  - The `BpPlaneGeometry` for one \(L_{\mathrm{mf}}\).
+
+- `wavelength_m`
+  - GNSS carrier wavelength in meters.
+  - For L1 real-data monthly maps, this should correspond to the L1 wavelength.
+  - The module should not infer signal type internally.
+
+---
+
+### 7.2 Build BP Distance Grid
+
+Use:
+
+\[
+L = 100, 200, \ldots, 6000 \ \mathrm{km}
+\]
+
+from configuration.
+
+---
+
+### 7.3 Initialize Raw \(V(L)\) Array
+
+Create `v_raw` with the same length as the distance grid.
+
+Each element corresponds to one candidate screen distance.
+
+The array should be initialized to `np.nan` so failed BP distances can be represented safely.
+
+---
+
+### 7.4 Inner Loop Over Candidate Screen Distances
+
+For each `screen_distance_km` in `distances_km`:
+
+#### Step 1: Correct Observed Signal
+
+Call:
+
+```python
+corrected = self.corrector.correct(
+    window,
+    plane,
+    screen_distance_km,
+    option=2
+)
+```
+
+This follows the configuration:
+
+```yaml
+back_propagation:
+  stationary_transmitter_correction:
+    default_option: 2
+```
+
+and the design call flow.
+
+The `CorrectedSignal` contains:
+
+- `screen_distance_km`
+- `z_m`
+- `complex_signal`
+- `amplitude`
+- `phase_rad`
+- `curvature_radius_m`
+
+The corrector is responsible for:
+
+1. Tx/Rx stationary correction.
+2. Phase path correction.
+3. Wavefront curvature correction:
+   \[
+   \Delta S = \frac{z^2\tan^2\alpha}{2R}
+   \]
+4. Interpolation onto uniform `z_m` for FFT propagation.
+
+`BackpropProcessor` should not duplicate this logic.
+
+---
+
+#### Step 2: Back-Propagate Corrected Signal
+
+Call:
+
+```python
+bp_field = self.propagator.backpropagate_2d(
+    corrected.complex_signal,
+    corrected.z_m,
+    screen_distance_km * 1000.0
+)
+```
+
+Distance must be converted from kilometers to meters.
+
+The paper’s BP is coordinate-representation back propagation from receiver toward transmitter. The design places the sign convention inside `FftPropagator.backpropagate_2d(...)`; therefore this module should pass a positive physical distance in meters and let the propagator implement the reverse propagation operator.
+
+---
+
+#### Step 3: Compute Normalized Amplitude Variance
+
+Call:
+
+```python
+v_value = self.propagator.amplitude_variance(bp_field)
+```
+
+This computes:
+
+\[
+V(L)=\frac{\langle A^2\rangle}{\langle A\rangle^2}-1
+\]
+
+where:
+
+\[
+A=|u_{\mathrm{BP}}|
+\]
+
+Store the result in `v_raw`.
+
+---
+
+### 7.5 Error Handling During Inner Loop
+
+The paper does not discuss numerical failures, but real processing can encounter:
+
+- invalid interpolation because corrected `z_m` is not monotonic,
+- insufficient samples after correction,
+- NaNs in phase or amplitude,
+- all-zero or near-zero amplitude,
+- invalid FFT spacing,
+- propagation failure due to malformed input.
+
+Implementation should be robust:
+
+- Catch predictable numerical exceptions inside the inner loop.
+- Store `np.nan` for that `screen_distance_km`.
+- Continue processing other distances.
+
+However, error handling should not silently accept a bad curve. If too many values are invalid, the later minimum detection should mark the curve as invalid.
+
+---
+
+### 7.6 Smooth \(V(L)\)
+
+After the inner loop, call:
+
+```python
+v_smooth = self.qc.smooth_v_curve(distances_km, v_raw)
+```
+
+This uses the paper/config smoothing:
+
+- second-order sliding polynomial regression,
+- 1000 km window,
+- polynomial order 2.
+
+The smoothing details belong to `QualityController`, not this module.
+
+---
+
+### 7.7 Find Global Local Minimum
+
+Call:
+
+```python
+l0_km, v0, has_valid_minimum = self.qc.find_global_local_minimum(
+    distances_km,
+    v_smooth
+)
+```
+
+The design says this method returns a tuple. The exact tuple shape must match the implementation of `QualityController`.
+
+Conceptually, this step must enforce:
+
+```yaml
+back_propagation:
+  minimum_detection:
+    require_global_local_minimum: true
+    reject_endpoint_minimum: true
+```
+
+If no valid minimum exists, the resulting `BpCurve` should set:
+
+- `l0_km = np.nan`
+- `v0 = np.nan`
+- `l1_km = np.nan`
+- `l2_km = np.nan`
+- `v1 = np.nan`
+- `v2 = np.nan`
+- `q = np.nan`
+- `has_valid_minimum = False`
+
+---
+
+### 7.8 Compute \(Q\)
+
+If `has_valid_minimum` is true, call:
+
+```python
+l1_km, l2_km, v1, v2, q = self.qc.compute_q(
+    distances_km,
+    v_smooth,
+    l0_km
+)
+```
+
+The QC logic must follow the paper:
+
+- `L1` is the distance from \(L_0\) to the left point where monotonic increase ends.
+- `L2` is the distance from \(L_0\) to the right point where monotonic increase ends.
+- \(Q=\min(V_1,V_2)/V_0\).
+
+The paper requires:
+
+```yaml
+back_propagation:
+  minimum_detection:
+    min_l1_samples: 2
+    min_l2_samples: 2
+    sample_spacing_km: 100
+```
+
+This implies:
+
+\[
+L_1 \ge 200 \ \mathrm{km}, \quad L_2 \ge 200 \ \mathrm{km}
+\]
+
+The enforcement of this condition belongs in `QualityController.compute_q(...)` or `QualityController.find_global_local_minimum(...)`, depending on its implementation.
+
+---
+
+### 7.9 Return `BpCurve`
+
+Construct and return:
+
+```python
+BpCurve(
+    l_mf_km=plane.l_mf_km,
+    distances_km=distances_km,
+    v_raw=v_raw,
+    v_smooth=v_smooth,
+    l0_km=l0_km,
+    v0=v0,
+    l1_km=l1_km,
+    l2_km=l2_km,
+    v1=v1,
+    v2=v2,
+    q=q,
+    has_valid_minimum=has_valid_minimum
+)
+```
+
+---
+
+## 8. Method Logic: `compute_d_curve(...)`
+
+### Signature
+
+```python
+compute_d_curve(
+    window: SignalWindow,
+    wavelength_m: float
+) -> DCurve
+```
+
+### Purpose
+
+Compute the full paper geolocation decision curve:
+
+\[
+D(L_{\mathrm{mf}})=L_0-L_{\mathrm{mf}}
+\]
+
+for all magnetic-field candidate distances.
+
+This corresponds to the nested-loop algorithm described around Figure 18 of the paper.
+
+---
+
+### 8.1 Build Magnetic-Field Candidate Grid
+
+Use:
+
+\[
+L_{\mathrm{mf}} = 100, 200, \ldots, 6000 \ \mathrm{km}
+\]
+
+from configuration:
+
+```yaml
+back_propagation:
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+---
+
+### 8.2 Initialize Arrays
+
+Create arrays with one element per `l_mf_km`:
+
+- `l0_values`
+- `d_values`
+- `q_values`
+- `cos_alpha_values`
+
+Initialize with `np.nan`.
+
+---
+
+### 8.3 Outer Loop Over `l_mf_km`
+
+For each magnetic-field distance:
+
+#### Step 1: Compute `BpCurve`
+
+Call:
+
+```python
+curve = self.process_for_lmf(window, l_mf_km, wavelength_m)
+```
+
+This internally builds the BP plane and computes the \(V(L)\) curve.
+
+#### Step 2: Store Diagnostics
+
+Store:
+
+```python
+l0_values[i] = curve.l0_km
+q_values[i] = curve.q
+```
+
+The `cos_alpha` diagnostic is required in the final `DCurve`.
+
+Because `process_for_lmf(...)` returns only a `BpCurve`, not a `BpPlaneGeometry`, there are two acceptable design-consistent options:
+
+1. Have `process_for_lmf(...)` internally call `plane_builder.build(...)` and then `compute_v_curve(...)`, but `compute_d_curve(...)` separately builds the plane only for extracting `cos_alpha`.
+
+2. Have `compute_d_curve(...)` build the plane first, record `plane.cos_alpha`, then call:
+   ```python
+   curve = self.compute_v_curve(window, plane, wavelength_m)
+   ```
+
+The second option is more efficient and avoids rebuilding the plane. It uses only existing public methods and should be preferred.
+
+So the practical outer-loop structure should be:
+
+```text
+for each l_mf_km:
+    plane = plane_builder.build(window, l_mf_km)
+    cos_alpha_values[i] = plane.cos_alpha
+    curve = compute_v_curve(window, plane, wavelength_m)
+    l0_values[i] = curve.l0_km
+    q_values[i] = curve.q
+    d_values[i] = curve.l0_km - l_mf_km if curve.has_valid_minimum else NaN
+```
+
+This avoids duplicate IGRF calls.
+
+---
+
+### 8.4 Compute \(D\)
+
+For each valid curve:
+
+\[
+D_i = L_{0,i} - L_{\mathrm{mf},i}
+\]
+
+If the minimum is invalid:
+
+```python
+d_values[i] = np.nan
+```
+
+This ensures invalid \(L_{\mathrm{mf}}\) candidates do not create false zero crossings.
+
+---
+
+### 8.5 Construct Preliminary `DCurve`
+
+Construct a preliminary `DCurve`:
+
+```python
+d_curve = DCurve(
+    l_mf_km=l_mf_grid_km,
+    d_km=d_values,
+    l0_km=l0_values,
+    q=q_values,
+    cos_alpha=cos_alpha_values,
+    zero_crossings_km=[],
+    is_multivalued=False
+)
+```
+
+---
+
+### 8.6 Find Zero Crossings
+
+Call:
+
+```python
+zero_crossings = self.qc.find_zero_crossings(d_curve)
+```
+
+This must implement the paper’s rule:
+
+- Find where \(D(L_{\mathrm{mf}})=0\).
+- Accept exact-zero samples or sign changes.
+- Require positive/negative persistence on both sides for at least two 100-km samples.
+- Continue searching the whole 100–6000 km range.
+- If more than one solution is found, mark as multi-valued.
+
+Then update:
+
+```python
+d_curve.zero_crossings_km = zero_crossings
+d_curve.is_multivalued = len(zero_crossings) > 1
+```
+
+If the `DCurve` dataclass is frozen or immutable, construct a second `DCurve` with the updated fields instead of mutating.
+
+---
+
+### 8.7 Return `DCurve`
+
+Return the completed `DCurve`.
+
+---
+
+## 9. Treatment of Multi-Valued Geolocations
+
+The paper states:
+
+- Multi-valued geolocations occur in about 8% of COSMIC-2 cases.
+- They arise from scan-angle geometry, not necessarily from multiple physical irregularity regions.
+- They cannot be reliably disambiguated from the observations.
+- They are discarded.
+
+This module should only mark:
+
+```python
+is_multivalued = len(zero_crossings_km) > 1
+```
+
+Final rejection belongs in `Geolocator` / `QualityController.passes_final(...)`, following:
+
+```yaml
+back_propagation:
+  quality_control:
+    require_single_valued_geolocation: true
+    discard_multivalued_geolocations: true
+```
+
+---
+
+## 10. Interaction With Final QC
+
+`BackpropProcessor` computes intermediate quantities but does not perform all final QC.
+
+### This Module Computes
+
+- \(V(L)\)
+- smoothed \(V(L)\)
+- \(L_0\)
+- \(Q\)
+- \(D(L_{\mathrm{mf}})\)
+- zero crossings
+- multi-valued flag
+- `cos_alpha` array
+
+### Final Acceptance Happens Later
+
+`Geolocator.process_window(...)` should use:
+
+```python
+QualityController.passes_final(result)
+```
+
+to enforce:
+
+```yaml
+back_propagation:
+  quality_control:
+    q_threshold: 1.2
+    cos_alpha_threshold: 0.1
+    require_single_valued_geolocation: true
+```
+
+The reason for this separation is that `BackpropProcessor` does not construct the final `GeolocationResult`; it only returns a `DCurve`.
+
+---
+
+## 11. Unit Conventions
+
+This module must be strict about units.
+
+| Quantity | Unit |
+|---|---|
+| `l_mf_km` | km |
+| `screen_distance_km` | km |
+| `distances_km` | km |
+| `wavelength_m` | m |
+| `CorrectedSignal.z_m` | m |
+| FFT propagation distance | m |
+| `BpCurve.l0_km` | km |
+| `BpCurve.l1_km`, `l2_km` | km |
+| `DCurve.d_km` | km |
+| `BpPlaneGeometry.cos_alpha` | dimensionless |
+| `BpPlaneGeometry.alpha_rad` | rad |
+
+The key conversion in this module is:
+
+```python
+distance_m = screen_distance_km * 1000.0
+```
+
+before calling:
+
+```python
+FftPropagator.backpropagate_2d(...)
+```
+
+---
+
+## 12. Numerical Robustness Requirements
+
+### 12.1 NaN Handling
+
+Real COSMIC-2 data can contain gaps or invalid samples. This module should allow failed individual distances to become `np.nan`, but the whole curve should only be accepted if `QualityController` finds a valid minimum.
+
+### 12.2 Invalid `V(L)` Curves
+
+A curve should be invalid if:
+
+- all `v_raw` values are NaN,
+- smoothing fails,
+- no local minimum exists,
+- the minimum is at the endpoint,
+- \(L_1\) or \(L_2\) is less than two 100-km samples.
+
+The specific validity decision should be centralized in `QualityController`.
+
+### 12.3 Very Small Mean Amplitude
+
+The normalized variance:
+
+\[
+V = \frac{\langle A^2\rangle}{\langle A\rangle^2}-1
+\]
+
+is unstable if \(\langle A\rangle\) is near zero.
+
+`FftPropagator.amplitude_variance(...)` should guard against this. `BackpropProcessor` should treat failures as invalid `V` values.
+
+---
+
+## 13. Performance Considerations
+
+The real-data algorithm is computationally expensive.
+
+For each 10-s window:
+
+- Outer loop: 60 values of \(L_{\mathrm{mf}}\)
+- Inner loop: 60 values of \(L\)
+- Total: 3600 corrected-signal + FFT back-propagation calls per window
+
+This follows the paper but can be costly for full-year COSMIC-2 processing.
+
+Implementation should therefore:
+
+1. Avoid rebuilding the BP plane inside both `compute_d_curve(...)` and `process_for_lmf(...)`.
+2. Prefer using `compute_v_curve(window, plane, wavelength_m)` directly inside `compute_d_curve(...)`.
+3. Avoid unnecessary copies of large arrays.
+4. Let `StationaryCorrector` handle interpolation efficiently.
+5. Let `FftPropagator` handle FFT operations efficiently.
+
+No parallelism is required by the design, but the implementation should be structured so that higher-level modules could parallelize over independent `SignalWindow` objects later.
+
+---
+
+## 14. Expected Outputs From This Module
+
+### 14.1 `BpCurve`
+
+For one \(L_{\mathrm{mf}}\), output should contain:
+
+```python
+BpCurve(
+    l_mf_km=<candidate magnetic-field distance>,
+    distances_km=<100..6000 km grid>,
+    v_raw=<raw V(L)>,
+    v_smooth=<smoothed V(L)>,
+    l0_km=<minimum distance>,
+    v0=<minimum V>,
+    l1_km=<left monotonic span>,
+    l2_km=<right monotonic span>,
+    v1=<left endpoint V>,
+    v2=<right endpoint V>,
+    q=<minimum depth metric>,
+    has_valid_minimum=<bool>
+)
+```
+
+### 14.2 `DCurve`
+
+For one 10-s window, output should contain:
+
+```python
+DCurve(
+    l_mf_km=<100..6000 km grid>,
+    d_km=<L0 - L_mf>,
+    l0_km=<L0 values>,
+    q=<Q values>,
+    cos_alpha=<cos(alpha) values>,
+    zero_crossings_km=<candidate geolocation distances>,
+    is_multivalued=<bool>
+)
+```
+
+---
+
+## 15. Validation Against Paper Figures
+
+This module supports reproducing several paper diagnostics.
+
+### Figure 16-Style Output
+
+For one selected `BpCurve`:
+
+- plot `v_raw` or `v_smooth` versus `distances_km`
+- verify a clear minimum \(L_0\)
+
+### Figure 17-Style Output
+
+Compare:
+
+- raw \(V(L)\)
+- smoothed \(V(L)\)
+- \(L_1, L_2, V_1, V_2, Q\)
+
+### Figure 18-Style Output
+
+For a full `DCurve`:
+
+- plot \(D(L_{\mathrm{mf}})\)
+- identify where \(D=0\)
+
+### Figure 19-Style Output
+
+Use:
+
+- `DCurve.d_km`
+- `DCurve.cos_alpha`
+- selected `BpCurve` objects if diagnostics are saved
+
+to reproduce examples of:
+
+- single-valued geolocations,
+- multi-valued geolocations,
+- scan-angle behavior.
+
+---
+
+## 16. Important Implementation Choices
+
+### 16.1 Use FFT/Plane-Wave BP by Default
+
+The configuration states:
+
+```yaml
+back_propagation:
+  propagation_method_default: "fft_plane_wave"
+```
+
+Therefore, this module should use:
+
+```python
+FftPropagator.backpropagate_2d(...)
+```
+
+not `KirchhoffPropagator`.
+
+The Kirchhoff path is intentionally outside this module for now or left as future validation.
+
+---
+
+### 16.2 Use Stationary Correction Option 2
+
+The configuration states:
+
+```yaml
+back_propagation:
+  stationary_transmitter_correction:
+    default_option: 2
+```
+
+and the design says Option 2 is suitable for FFT/plane-wave propagation.
+
+Therefore, the default call should be:
+
+```python
+self.corrector.correct(window, plane, screen_distance_km, option=2)
+```
+
+---
+
+### 16.3 Do Not Apply Pre-BP QC Here
+
+The paper requires pre-BP checks:
+
+```yaml
+processing:
+  scintillation_indices:
+    sigma_phi_threshold_rad: 0.25
+
+processing:
+  tangent_point_filter:
+    min_height_km: 150
+```
+
+Those are handled before this module by:
+
+```python
+QualityController.passes_pre_bp(...)
+```
+
+inside `Geolocator`.
+
+`BackpropProcessor` should assume the input window has already passed pre-BP QC.
+
+---
+
+### 16.4 Do Not Compute Final Latitude/Longitude Here
+
+Final geolocation conversion uses:
+
+\[
+\mathbf{R}_{geo} = \mathbf{R}_{rx} + L\mathbf{n}_{rt}
+\]
+
+but that belongs to:
+
+```python
+LosGeometry.geolocation_from_distance(...)
+```
+
+called by `Geolocator.make_result(...)`.
+
+`BackpropProcessor` only returns the crossing distance candidates.
+
+---
+
+## 17. Edge Cases
+
+### 17.1 No Valid \(V(L)\) Minimum for Some \(L_{\mathrm{mf}}\)
+
+Set corresponding values to NaN:
+
+- `l0_km`
+- `d_km`
+- `q`
+
+Do not create a zero crossing from invalid samples.
+
+---
+
+### 17.2 No Zero Crossing in \(D(L_{\mathrm{mf}})\)
+
+Return:
+
+```python
+zero_crossings_km = []
+is_multivalued = False
+```
+
+Final result should be rejected by `Geolocator`.
+
+---
+
+### 17.3 Exact Zero at Multiple Adjacent Samples
+
+The paper notes that crossing may occur at one sample or several samples.
+
+`QualityController.find_zero_crossings(...)` should decide whether adjacent zero samples represent one crossing or multiple crossings.
+
+`BackpropProcessor` should not duplicate that logic.
+
+---
+
+### 17.4 Multiple Zero Crossings
+
+Return all crossings:
+
+```python
+zero_crossings_km = [L_a, L_b, ...]
+is_multivalued = True
+```
+
+The paper discards these later.
+
+---
+
+### 17.5 Low \(\cos\alpha\)
+
+The final QC threshold is:
+
+```yaml
+back_propagation:
+  quality_control:
+    cos_alpha_threshold: 0.1
+```
+
+`BackpropProcessor` should still compute curves for all \(L_{\mathrm{mf}}\), including low-\(\cos\alpha\) cases, because the final accepted crossing’s \(\cos\alpha\) is evaluated later.
+
+However, if performance becomes an issue, low-\(\cos\alpha\) early skipping could be considered only if it does not change paper fidelity. The first faithful implementation should not skip them inside this module.
+
+---
+
+## 18. Summary Pseudocode
+
+### `compute_v_curve(...)`
+
+```text
+function compute_v_curve(window, plane, wavelength_m):
+
+    distances_km = config BP grid 100..6000 step 100
+    v_raw = array filled with NaN
+
+    for each screen_distance_km in distances_km:
+
+        try:
+            corrected = corrector.correct(
+                window,
+                plane,
+                screen_distance_km,
+                option=2
+            )
+
+            bp_field = propagator.backpropagate_2d(
+                corrected.complex_signal,
+                corrected.z_m,
+                screen_distance_km * 1000
+            )
+
+            v_raw[i] = propagator.amplitude_variance(bp_field)
+
+        except numerical/data error:
+            v_raw[i] = NaN
+
+    v_smooth = qc.smooth_v_curve(distances_km, v_raw)
+
+    l0_km, v0, has_valid_minimum =
+        qc.find_global_local_minimum(distances_km, v_smooth)
+
+    if has_valid_minimum:
+        l1_km, l2_km, v1, v2, q =
+            qc.compute_q(distances_km, v_smooth, l0_km)
+    else:
+        l0_km, v0, l1_km, l2_km, v1, v2, q = NaN values
+
+    return BpCurve(...)
+```
+
+---
+
+### `compute_d_curve(...)`
+
+```text
+function compute_d_curve(window, wavelength_m):
+
+    l_mf_grid_km = config MF grid 100..6000 step 100
+
+    initialize l0_values, d_values, q_values, cos_alpha_values as NaN arrays
+
+    for each l_mf_km in l_mf_grid_km:
+
+        try:
+            plane = plane_builder.build(window, l_mf_km)
+            cos_alpha_values[i] = plane.cos_alpha
+
+            curve = compute_v_curve(window, plane, wavelength_m)
+
+            l0_values[i] = curve.l0_km
+            q_values[i] = curve.q
+
+            if curve.has_valid_minimum:
+                d_values[i] = curve.l0_km - l_mf_km
+
+        except numerical/data error:
+            continue with NaNs
+
+    preliminary_d_curve = DCurve(
+        l_mf_km=l_mf_grid_km,
+        d_km=d_values,
+        l0_km=l0_values,
+        q=q_values,
+        cos_alpha=cos_alpha_values,
+        zero_crossings_km=[],
+        is_multivalued=False
+    )
+
+    zero_crossings = qc.find_zero_crossings(preliminary_d_curve)
+
+    final_d_curve = DCurve(
+        same arrays,
+        zero_crossings_km=zero_crossings,
+        is_multivalued=(len(zero_crossings) > 1)
+    )
+
+    return final_d_curve
+```
+
+---
+
+## 19. Fidelity Checklist
+
+Before considering this module complete, verify that it satisfies the following paper/config requirements:
+
+- Uses BP distance grid:
+  \[
+  100\text{–}6000 \ \mathrm{km}, \Delta L=100 \ \mathrm{km}
+  \]
+
+- Uses magnetic-field candidate grid:
+  \[
+  100\text{–}6000 \ \mathrm{km}, \Delta L_{\mathrm{mf}}=100 \ \mathrm{km}
+  \]
+
+- Uses IGRF-defined BP planes through `BpPlaneBuilder`.
+
+- Uses stationary-transmitter correction Option 2 for FFT BP.
+
+- Uses FFT/plane-wave back propagation.
+
+- Computes:
+  \[
+  V(L)=\frac{\langle A^2\rangle}{\langle A\rangle^2}-1
+  \]
+
+- Smooths \(V(L)\) using `QualityController`.
+
+- Finds global local minimum \(L_0\).
+
+- Computes \(Q\).
+
+- Forms:
+  \[
+  D(L_{\mathrm{mf}})=L_0-L_{\mathrm{mf}}
+  \]
+
+- Finds all zero crossings over the full BP interval.
+
+- Marks multi-valued cases when more than one zero crossing exists.
+
+- Does not discard multi-valued cases internally; only marks them for final QC.
+
+- Does not hard-code paper thresholds except where explicitly required by the current design call flow, such as `option=2`.
+
+- Does not perform unrelated tasks such as phase detrending, pre-BP QC, plotting, file writing, or geodetic conversion.

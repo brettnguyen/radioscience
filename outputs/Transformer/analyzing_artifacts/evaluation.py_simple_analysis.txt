@@ -1,0 +1,123 @@
+Below is a detailed logic analysis for the Evaluation module (evaluation.py). This analysis explains how the Evaluation class will be structured and how its methods will operate to run inference using beam search and assess model performance for both translation (BLEU) and constituency parsing (F1). All evaluation settings—such as beam search parameters and maximum output length—are driven by the configuration settings (with overrides for parsing, as noted in the paper and plan).
+
+──────────────────────────────
+Overview
+
+• The Evaluation class is responsible for:
+ – Setting the model to evaluation mode and disabling gradients during inference.
+ – Running beam search decoding to generate predictions from the model.
+ – Post-processing the model outputs (i.e., converting token IDs to string sentences or parse trees).
+ – Computing evaluation metrics:
+  – For translation: BLEU score (using SacreBLEU).
+  – For parsing: F1 score (measuring bracket overlap between predicted and gold parse tree structures).
+ – Returning a dictionary of metric values for later logging or checkpointing.
+
+• The Evaluation class will import both the trained TransformerModel and evaluation configurations from config.py. It will use evaluation beam search parameters and maximum output length as defined in the config for translation tasks, while for parsing tasks the plan specifies distinct hyperparameters (for example, beam_size = 21, length_penalty = 0.3, and max_output_length computed as “input_length + 300”).
+
+──────────────────────────────
+Initialization (__init__)
+
+1. Input Parameters:
+ – model: the trained TransformerModel instance.
+ – config: the configuration dictionary imported from config.py.
+
+2. Steps:
+ a. Store the provided model and configuration.
+ b. Extract evaluation settings from config (i.e., beam_size, length_penalty, max_output_length) for translation tasks.
+ c. Optionally (or later), prepare any post-processing helpers (for example, a tokenizer helper to convert token IDs to strings, if not integrated into model output).
+
+──────────────────────────────
+Method: evaluate_translation(test_data: DataLoader) -> dict
+
+The goal of this method is to compute the BLEU score for a translation test set.
+
+1. Set the model to evaluation mode:
+ – Call model.eval() and ensure that gradient computation is disabled (using torch.no_grad()).
+
+2. Initialize containers:
+ – An empty list for predicted sentences.
+ – A corresponding list (or nested list) for reference target sentences.
+
+3. For each batch in the test_data DataLoader:
+ a. Extract the source sequences (and optionally gold target sequences).
+ b. Compute the “maximum output length” for each sample:
+  – The config specifies “input_length + 50”. So for each source sequence, the maximum allowed decoded length is computed as its length plus 50.
+ c. Run beam search:
+  – Use the model’s decoding procedure (or call a dedicated beam_search function) with the following parameters:
+   • beam_size = config.evaluation.beam_size (which is 4).
+   • length_penalty = config.evaluation.length_penalty (0.6).
+   • the computed maximum output length.
+ d. Convert the decoded output (a sequence of token indices) into a string:
+  – Use the shared embedding/tokenizer conversion function.
+  – Append this string to the predictions list.
+ e. Also, obtain the corresponding reference sentence(s) and store them.
+
+4. Once all batches have been processed:
+ a. Use SacreBLEU’s corpus_bleu() function to compute the BLEU score:
+  – Pass the list of predictions and the references.
+ b. Create and return a result dictionary containing:
+  – A key ("BLEU") with the BLEU score.
+  – Optionally, include the list of predictions for further inspection.
+
+──────────────────────────────
+Method: evaluate_parsing(test_data: DataLoader) -> dict
+
+This method is dedicated to evaluating constituency parsing performance via F1 score.
+
+1. Adjust beam search parameters for parsing:
+ – Although the shared config sets beam_size = 4 and max_output_length = “input_length + 50” by default, the plan specifies that for parsing tasks:
+  • beam_size should be set to 21.
+  • length_penalty should be 0.3.
+  • maximum output length should be computed as “input_length + 300”.
+ – The Evaluation class can override these evaluation settings within this method.
+
+2. Set the model to evaluation mode (using model.eval() and torch.no_grad()).
+
+3. Initialize containers:
+ – A list for predicted parse trees.
+ – A list for gold (reference) parse trees.
+
+4. For each batch or sample in the parsing test_data DataLoader:
+ a. Extract the input sequence and the gold parse.
+ b. Compute the maximum output length per input (input_length + 300).
+ c. Run beam search decoding using the overridden parsing parameters (beam_size = 21, length_penalty = 0.3).
+ d. Convert the output token sequences into parse trees:
+  – This may include additional post-processing (e.g., converting token sequences into bracketed tree expressions).
+ e. Append the predicted parse tree and its corresponding gold parse tree to the respective lists.
+
+5. Compute the F1 score:
+ – Use a utility function (either a custom bracket F1 scorer or an external library function) that compares predicted and gold parse tree structures.
+ – Ensure that the function measures unlabeled F1 (or the metric specified in the plan).
+ – Construct a result dictionary containing the F1 score under key ("F1").
+
+──────────────────────────────
+Additional Considerations
+
+• Beam Search Implementation:
+ – The evaluation module may call a beam_search method provided by the TransformerModel or a separate utility. The search should incorporate length penalty and consider early termination when an end-of-sequence token is generated.
+ – The maximum output length is computed dynamically per sample based on its input length plus an offset (50 for translation, 300 for parsing).
+
+• Token Conversion:
+ – Predicted outputs (which are sequences of token IDs) must be converted to human-readable text or structured parse representations.
+ – The same shared tokenizer (or decoder function) used during training should be called here for consistency.
+
+• Resource Management:
+ – Wrap the inference loop within a torch.no_grad() context to reduce memory footprint.
+ – Ensure model and data tensors are on the correct device (e.g., GPU versus CPU) as determined by the overall training and evaluation setup.
+
+• Logging and Error Handling:
+ – Log progress while iterating over the test DataLoader.
+ – Include try/except blocks (if necessary) for robust evaluation in case of decoding errors.
+
+• Output:
+ – Each evaluation method returns a dictionary with metric names as keys (e.g., {"BLEU": score} or {"F1": score}) to be logged by the Main class.
+ – Detailed logging of intermediate predictions can be enabled for debugging purposes but should be optional in the final implementation.
+
+──────────────────────────────
+Conclusion
+
+This logic analysis clearly outlines the structure and steps to be taken when implementing evaluation.py. The Evaluation class will support both translation and parsing tasks by:
+ – Performing beam search decoding using parameters drawn from the configuration (with necessary overrides for parsing).
+ – Post-processing predictions to obtain text or parse trees.
+ – Calculating BLEU and F1 scores via sacrebleu and a parsing F1 utility, respectively.
+By following this detailed design (which adheres to the configurations and methodology specified in the paper and experimental plan), reproducibility and consistency with the original Transformer experiments will be ensured.

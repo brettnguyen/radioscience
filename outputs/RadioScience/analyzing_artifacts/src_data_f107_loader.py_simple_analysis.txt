@@ -1,0 +1,456 @@
+## Logic Analysis: `src/data/f107_loader.py`
+
+### 1. Purpose and Paper Alignment
+
+`src/data/f107_loader.py` implements the `F107Loader` class for loading or downloading daily F10.7 solar radio flux data used only for Figure 22-style solar activity comparison in the paper.
+
+The paper uses F10.7 data to support interpretation of the much larger number of accepted COSMIC-2 geolocations in 2023 compared with 2021:
+
+- 2021 accepted L1 geolocations: approximately `332,000`
+- 2023 accepted L1 geolocations: approximately `1,108,000`
+- The paper states that the average F10.7 index increased about twofold from 2021 to 2023.
+- F10.7 data source: NASA OMNIWeb  
+  Config reference:
+  ```yaml
+  data:
+    f107:
+      source: "https://omniweb.gsfc.nasa.gov/form/dx1.html"
+      required_for: "Solar activity comparison, Figure 22-style analysis"
+  ```
+
+This module is independent from the actual back-propagation geolocation pipeline. It does not affect geolocation QC, scintillation metrics, BP propagation, or monthly map generation.
+
+---
+
+### 2. Required Interface from Design
+
+The implementation must follow the design exactly:
+
+```text
+class F107Loader {
+    +__init__(source_url: str)
+    +download(start: date, end: date) DataFrame
+    +load_cached(path: Path) DataFrame
+}
+```
+
+Do not add public methods beyond the design unless absolutely necessary. Internal helper functions may be private.
+
+---
+
+### 3. Configuration Dependencies
+
+Although the class constructor only accepts `source_url: str`, `main.py` or `RealDataExperiments` should pass the value from config:
+
+```yaml
+data:
+  f107:
+    source: "https://omniweb.gsfc.nasa.gov/form/dx1.html"
+```
+
+Cached file path comes from:
+
+```yaml
+paths:
+  f107_data_path: "data/f107/f107.csv"
+```
+
+Plotting is controlled elsewhere by:
+
+```yaml
+outputs:
+  save_f107_plot: true
+```
+
+The module itself should not hard-code:
+
+- OMNIWeb source URL
+- cache path
+- output path
+- plotting settings
+
+Those should be provided by caller code using `config.yaml`.
+
+---
+
+### 4. Dependencies
+
+Allowed Python dependencies from the task:
+
+- `pandas`
+- standard library:
+  - `datetime`
+  - `pathlib`
+  - `urllib.request`
+  - `urllib.parse`
+  - `io`
+  - `csv` if needed
+
+Important: `requests` is not listed in the required packages. Therefore the downloader should not require `requests`. If online download is implemented, use standard-library `urllib`.
+
+---
+
+### 5. Expected DataFrame Contract
+
+Both `download()` and `load_cached()` should return a normalized `pandas.DataFrame`.
+
+Recommended columns:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `date` | `datetime64[ns]` or Python date-compatible datetime | Daily date |
+| `f107` | `float` | Daily F10.7 solar flux index, usually in solar flux units |
+| `source` | `str`, optional | Source label, e.g. `"OMNIWeb"` |
+
+Minimum required columns for downstream plotting:
+
+```text
+date
+f107
+```
+
+The `Plotter.plot_f107(f107: DataFrame, output_path: Path)` method can then plot `date` versus `f107`.
+
+---
+
+### 6. `__init__(source_url: str)` Logic
+
+Responsibilities:
+
+1. Store the configured F10.7 source URL.
+2. Do not download data during initialization.
+3. Do not validate network accessibility during initialization.
+4. Keep the class lightweight because F10.7 data are optional reporting data.
+
+Expected behavior:
+
+```text
+loader = F107Loader(source_url=config.data.f107.source)
+```
+
+Internal state:
+
+```text
+self.source_url = source_url
+```
+
+---
+
+### 7. `load_cached(path: Path)` Logic
+
+This should be the primary reliable loading path because OMNIWeb URLs and formats may need manual verification.
+
+#### Inputs
+
+```text
+path: Path
+```
+
+Usually from config:
+
+```yaml
+paths:
+  f107_data_path: "data/f107/f107.csv"
+```
+
+#### Expected Accepted Cache Formats
+
+The cache should support at least CSV. It should be flexible with common column names.
+
+Possible input column variants:
+
+| Possible cached name | Normalized name |
+|---|---|
+| `date` | `date` |
+| `datetime` | `date` |
+| `time` | `date` |
+| `year`, `doy` | construct `date` |
+| `f107` | `f107` |
+| `F10.7` | `f107` |
+| `f10.7` | `f107` |
+| `f107_sfu` | `f107` |
+| `F10_INDEX` | `f107` |
+| `F10.7_INDEX` | `f107` |
+
+#### Processing Steps
+
+1. Verify the file exists.
+2. Read using `pandas.read_csv`.
+3. Normalize column names:
+   - lower case
+   - strip spaces
+   - replace special characters where useful
+4. Identify date information:
+   - Prefer a direct `date` column.
+   - Otherwise use `year` + `doy` if available.
+5. Identify F10.7 column.
+6. Convert date column to pandas datetime.
+7. Convert F10.7 values to numeric.
+8. Replace common missing fill values with `NaN`, for example:
+   - `999`
+   - `999.9`
+   - `9999`
+   - `99999`
+9. Sort by date.
+10. Drop duplicate dates, keeping the first or last consistently.
+11. Return only normalized columns, at minimum:
+    ```text
+    date, f107
+    ```
+
+#### Failure Modes
+
+Raise clear exceptions for:
+
+- file not found
+- no usable date column
+- no usable F10.7 column
+- empty file
+- all F10.7 values missing after parsing
+
+Do not silently return malformed data.
+
+---
+
+### 8. `download(start: date, end: date)` Logic
+
+The paper specifies OMNIWeb as the F10.7 source, but `config.yaml` provides the OMNIWeb form URL:
+
+```yaml
+https://omniweb.gsfc.nasa.gov/form/dx1.html
+```
+
+This is a user-facing form URL, not necessarily a stable direct API endpoint. Therefore the downloader should be implemented carefully.
+
+#### Inputs
+
+```text
+start: date
+end: date
+```
+
+For reproducing the paper’s Figure 22-style context, callers may request approximately 2020 through most of 2024, but this module should not hard-code that range.
+
+#### Validation
+
+1. Require `start <= end`.
+2. Accept Python `datetime.date`, `datetime.datetime`, or pandas-compatible date-like objects if implementation chooses to normalize.
+3. Convert to date-only values internally.
+
+#### Download Strategy
+
+Because `requests` is not a required dependency, use standard-library `urllib`.
+
+Recommended implementation approach:
+
+1. If `source_url` is a direct CSV/text endpoint, download it directly.
+2. If `source_url` is the OMNIWeb form URL from config, construct the appropriate OMNIWeb query only after verifying the OMNIWeb API format.
+3. If the direct query format is not implemented or fails, raise a clear `RuntimeError` explaining that the user should provide a cached CSV at `paths.f107_data_path`.
+
+This is preferable to silently returning incorrect solar flux data.
+
+#### Output Normalization
+
+Downloaded data should be normalized using the same rules as cached data:
+
+```text
+date, f107
+```
+
+The logic should reuse private parsing/normalization helpers so `download()` and `load_cached()` produce identical schema.
+
+---
+
+### 9. Missing-Value Handling
+
+OMNI-style data products often use sentinel values for unavailable data.
+
+The loader should convert these to `NaN`:
+
+```text
+999
+999.9
+9999
+99999
+99999.9
+```
+
+Recommended behavior:
+
+- Keep rows with `NaN` F10.7 if preserving date continuity is useful for plotting.
+- For summary statistics, downstream code can ignore `NaN`.
+- Do not interpolate F10.7 values in this loader unless explicitly required later. The paper does not describe interpolation.
+
+---
+
+### 10. Units and Naming
+
+The paper refers to the F10.7 index but does not specify adjusted versus observed flux. The config also does not specify this distinction.
+
+Therefore:
+
+- Use the value available from OMNIWeb as the daily F10.7 index.
+- Name the normalized column simply:
+  ```text
+  f107
+  ```
+- Optionally document in README/cache metadata whether the cached value is observed or adjusted if known.
+
+Do not invent a correction or conversion.
+
+---
+
+### 11. Relationship to Plotting
+
+This module should not generate plots directly.
+
+It only returns a clean DataFrame. Plotting is handled by the design’s `Plotter` interface:
+
+```text
+Plotter.plot_f107(f107: DataFrame, output_path: Path)
+```
+
+The returned DataFrame should be sufficient for Figure 22-style plotting:
+
+```text
+x-axis: date
+y-axis: f107
+```
+
+Expected downstream usage:
+
+```text
+loader = F107Loader(config.data.f107.source)
+df = loader.load_cached(config.paths.f107_data_path)
+plotter.plot_f107(df, output_path)
+```
+
+or:
+
+```text
+df = loader.download(start_date, end_date)
+```
+
+---
+
+### 12. Validation Against Paper
+
+After loading or downloading data, downstream reporting should be able to verify:
+
+1. Daily F10.7 time series spans the requested date range.
+2. Values are plausible solar flux values.
+3. Average F10.7 in 2023 is substantially larger than in 2021.
+4. This supports the paper’s qualitative statement that F10.7 roughly doubled from 2021 to 2023.
+
+This module may not compute those statistics publicly because the design only specifies `download()` and `load_cached()`. However, private or downstream logic can compute:
+
+```text
+mean_2021 = mean(f107 where date year == 2021)
+mean_2023 = mean(f107 where date year == 2023)
+ratio = mean_2023 / mean_2021
+```
+
+The expected qualitative result is:
+
+```text
+ratio ≈ 2
+```
+
+Do not enforce this as a hard validation criterion inside `F107Loader`, because exact values depend on the chosen OMNIWeb F10.7 product and date coverage.
+
+---
+
+### 13. Error Handling Recommendations
+
+Use explicit, actionable errors.
+
+Examples:
+
+- If cache file is absent:
+  ```text
+  FileNotFoundError: F10.7 cache file not found: data/f107/f107.csv
+  ```
+
+- If cache columns cannot be recognized:
+  ```text
+  ValueError: Could not identify F10.7 column in cached file.
+  ```
+
+- If OMNIWeb download is not implemented for the configured source:
+  ```text
+  RuntimeError: Direct OMNIWeb download for source URL ... is not implemented or failed. Provide a cached CSV at paths.f107_data_path.
+  ```
+
+---
+
+### 14. Reproducibility Notes
+
+For reproducibility, the cached F10.7 file should be archived with outputs or logged with:
+
+- source URL from config:
+  ```yaml
+  data.f107.source
+  ```
+- cache path:
+  ```yaml
+  paths.f107_data_path
+  ```
+- date range used
+- date downloaded
+- column interpretation
+
+This is important because OMNIWeb data products or query formats may change over time.
+
+---
+
+### 15. Non-Responsibilities
+
+`src/data/f107_loader.py` should not:
+
+1. Process COSMIC-2 HR data.
+2. Load receiver or GNSS orbits.
+3. Compute scintillation indices.
+4. Run back propagation.
+5. Apply geolocation QC.
+6. Bin monthly geolocation maps.
+7. Plot figures directly.
+8. Hard-code the 2021 and 2023 experiment years.
+9. Hard-code the Figure 22 date span.
+10. Depend on `AppConfig` directly, because the required design constructor is:
+    ```text
+    __init__(source_url: str)
+    ```
+
+---
+
+### 16. Minimal Implementation Plan
+
+Recommended implementation sequence:
+
+1. Implement `F107Loader.__init__(source_url)`.
+2. Implement robust cached CSV loading through `load_cached(path)`.
+3. Implement private normalization helper for date/F10.7 columns.
+4. Implement missing-value cleanup.
+5. Implement `download(start, end)` using `urllib` if a verified direct OMNIWeb endpoint is available.
+6. If direct endpoint is not verified, make `download()` fail clearly and recommend cached CSV usage.
+7. Ensure returned DataFrame always contains:
+   ```text
+   date, f107
+   ```
+8. Add documentation in README explaining the expected cache format.
+
+---
+
+### 17. Expected Final Behavior
+
+A successful `F107Loader` implementation should allow the real-data reporting pipeline to do the following:
+
+```text
+1. Load daily F10.7 data from data/f107/f107.csv.
+2. Return a clean pandas DataFrame with date and f107 columns.
+3. Pass that DataFrame to Plotter.plot_f107().
+4. Reproduce a Figure 22-style solar activity time series.
+5. Support comparison of solar activity between 2021 and 2023.
+```
+
+This satisfies the paper’s use of F10.7 data without introducing unsupported assumptions into the geolocation algorithm.

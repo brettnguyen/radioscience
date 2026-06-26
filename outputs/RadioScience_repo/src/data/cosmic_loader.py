@@ -1,0 +1,1919 @@
+"""COSMIC-2 high-rate scintillation data ingestion.
+
+This module implements the COSMIC-2 high-rate phase/amplitude adapter used by
+the real-data reproduction pipeline. It converts external CDAAC-style
+NetCDF/HDF products into standardized ``SignalWindow`` objects.
+
+The exact COSMIC-2 HR file schema is explicitly ambiguous in the paper and in
+``config.yaml``. Therefore this loader is intentionally schema-tolerant:
+
+* files are discovered recursively using year/signal hints when available;
+* xarray is preferred for NetCDF/HDF ingestion;
+* h5py and netCDF4 fallbacks are provided;
+* common aliases for time, carrier phase, SNR/amplitude, metadata, and optional
+  orbit state variables are recognized;
+* unsupported or ambiguous scientific units fail explicitly rather than being
+  silently guessed.
+
+The loader does not perform downstream scientific processing. In particular, it
+does not detrend phase, normalize amplitude beyond preserving SNR as amplitude,
+compute scintillation indices, apply tangent-height/scintillation QC, perform
+back propagation, filter by local time, or pair L1/L2 cases.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+import logging
+import math
+from pathlib import Path
+import re
+from typing import Any, Iterator, Mapping, Sequence
+
+import h5py
+import netCDF4
+import numpy as np
+from numpy.typing import NDArray
+import xarray as xr
+
+from src.config import AppConfig
+from src.core import constants
+from src.core.types import SignalWindow, StateVector, Vector3
+from src.data.orbit_loader import OrbitLoader, OrbitLoaderError
+
+
+_LOGGER = logging.getLogger(__name__)
+
+_SUPPORTED_SUFFIXES: frozenset[str] = frozenset(
+    {".nc", ".nc4", ".cdf", ".h5", ".hdf", ".hdf5"}
+)
+
+_COMPRESSED_SUFFIXES: frozenset[str] = frozenset({".gz", ".zip", ".z"})
+
+_DEFAULT_WINDOW_SECONDS: int = constants.DEFAULT_WINDOW_SECONDS
+_DEFAULT_GPS_SAMPLING_HZ: float = constants.DEFAULT_GPS_HR_SAMPLING_RATE_HZ
+_DEFAULT_GLONASS_SAMPLING_HZ: float = constants.DEFAULT_GLONASS_HR_SAMPLING_RATE_HZ
+
+_MIN_SAMPLES_PER_WINDOW: int = 2
+_EPOCH_SECONDS_HEURISTIC: float = 1.0e8
+_NANOSECONDS_PER_SECOND: float = 1.0e9
+_M_PER_KM: float = 1000.0
+_SAMPLE_TIME_TOLERANCE_S: float = 1.0e-9
+
+_TIME_NAMES: tuple[str, ...] = (
+    "time",
+    "times",
+    "timestamp",
+    "timestamps",
+    "utc",
+    "utc_time",
+    "gps_time",
+    "sec",
+    "seconds",
+    "sample_time",
+    "t",
+)
+
+_PHASE_NAME_HINTS: tuple[str, ...] = (
+    "phase",
+    "carrier_phase",
+    "excess_phase",
+    "phase_l",
+    "phase_rad",
+    "phase_cycle",
+    "phase_cycles",
+    "phi",
+    "phs",
+)
+
+_PHASE_EXCLUDE_HINTS: tuple[str, ...] = (
+    "sigma",
+    "std",
+    "s4",
+    "index",
+    "quality",
+    "flag",
+    "snr",
+    "amplitude",
+    "amp",
+)
+
+_SNR_NAME_HINTS: tuple[str, ...] = (
+    "snr",
+    "signal_to_noise",
+    "signal_noise",
+    "amplitude",
+    "amp",
+    "ca_snr",
+    "l1_snr",
+    "l2_snr",
+)
+
+_SNR_EXCLUDE_HINTS: tuple[str, ...] = (
+    "s4",
+    "sigma",
+    "std",
+    "phase",
+    "flag",
+    "quality",
+)
+
+_EVENT_ID_KEYS: tuple[str, ...] = (
+    "event_id",
+    "occultation_id",
+    "occ_id",
+    "profile_id",
+    "file_id",
+    "arc_id",
+)
+
+_LEO_ID_KEYS: tuple[str, ...] = (
+    "leo_id",
+    "receiver_id",
+    "receiver",
+    "spacecraft",
+    "spacecraft_id",
+    "cosmic_id",
+    "fm",
+    "leo",
+)
+
+_GNSS_ID_KEYS: tuple[str, ...] = (
+    "gnss_id",
+    "transmitter_id",
+    "transmitter",
+    "prn",
+    "sv",
+    "satellite",
+    "satellite_id",
+    "gps_prn",
+    "glo_prn",
+)
+
+_CONSTELLATION_KEYS: tuple[str, ...] = (
+    "constellation",
+    "gnss_constellation",
+    "system",
+    "gnss_system",
+    "nav_system",
+)
+
+_SIGNAL_KEYS: tuple[str, ...] = (
+    "signal",
+    "signal_name",
+    "frequency",
+    "frequency_name",
+    "carrier",
+    "band",
+    "tracking_signal",
+)
+
+_ANTENNA_KEYS: tuple[str, ...] = (
+    "antenna",
+    "antenna_id",
+    "pod_antenna",
+    "antenna_direction",
+    "receiver_antenna",
+)
+
+_SAMPLING_RATE_KEYS: tuple[str, ...] = (
+    "sampling_rate",
+    "sampling_rate_hz",
+    "sample_rate",
+    "sample_rate_hz",
+    "fs",
+    "rate_hz",
+)
+
+_TANGENT_HEIGHT_KEYS: tuple[str, ...] = (
+    "tangent_height",
+    "tangent_height_km",
+    "tan_height",
+    "tan_height_km",
+    "impact_height",
+    "impact_height_km",
+    "los_tangent_height",
+)
+
+_RX_POSITION_HINTS: tuple[str, ...] = (
+    "rx_position",
+    "receiver_position",
+    "leo_position",
+    "sc_position",
+    "rx_pos",
+    "leo_pos",
+)
+_TX_POSITION_HINTS: tuple[str, ...] = (
+    "tx_position",
+    "transmitter_position",
+    "gnss_position",
+    "sv_position",
+    "tx_pos",
+    "gnss_pos",
+)
+_RX_VELOCITY_HINTS: tuple[str, ...] = (
+    "rx_velocity",
+    "receiver_velocity",
+    "leo_velocity",
+    "sc_velocity",
+    "rx_vel",
+    "leo_vel",
+)
+_TX_VELOCITY_HINTS: tuple[str, ...] = (
+    "tx_velocity",
+    "transmitter_velocity",
+    "gnss_velocity",
+    "sv_velocity",
+    "tx_vel",
+    "gnss_vel",
+)
+
+
+class CosmicLoaderError(RuntimeError):
+    """Raised when COSMIC-2 HR data cannot be read or normalized."""
+
+
+@dataclass(slots=True)
+class _VariableValue:
+    """Internal representation of an extracted file variable."""
+
+    name: str
+    values: NDArray[Any]
+    attrs: dict[str, Any] = field(default_factory=dict)
+    dims: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(slots=True)
+class _EventData:
+    """Internal event-level data before 10-second segmentation."""
+
+    source_path: Path
+    event_id: str
+    leo_id: str
+    gnss_id: str
+    constellation: str
+    signal_name: str
+    antenna: str
+    sample_datetimes: list[datetime]
+    phase_rad: NDArray[np.float64]
+    snr_vv: NDArray[np.float64]
+    amplitude: NDArray[np.float64]
+    sampling_rate_hz: float
+    tangent_height_km: NDArray[np.float64] | None = None
+    rx_states: list[StateVector] | None = None
+    tx_states: list[StateVector] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class CosmicLoader:
+    """Load COSMIC-2 high-rate scintillation files into ``SignalWindow`` objects.
+
+    Args:
+        config: Application configuration. The loader uses ``cosmic_data_dir``
+            and constructs an internal ``OrbitLoader`` for optional receiver and
+            transmitter orbit attachment.
+
+    Public methods match the project design:
+        * ``list_events(year, signal)``
+        * ``load_event(path)``
+        * ``iter_windows(year, signal)``
+        * ``segment_to_windows(event_data, window_seconds)``
+    """
+
+    def __init__(self, config: AppConfig) -> None:
+        """Initialize the COSMIC-2 loader without scanning or loading data."""
+        if not isinstance(config, AppConfig):
+            raise TypeError(
+                f"config must be an AppConfig, got {type(config).__name__}."
+            )
+
+        self.config: AppConfig = config
+        self.cosmic_data_dir: Path = Path(config.cosmic_data_dir).expanduser()
+        self.window_seconds: int = int(
+            getattr(config, "window_seconds", _DEFAULT_WINDOW_SECONDS)
+        )
+        if self.window_seconds <= 0:
+            self.window_seconds = _DEFAULT_WINDOW_SECONDS
+
+        self.orbit_loader: OrbitLoader = OrbitLoader(config)
+
+    def list_events(self, year: int, signal: str) -> list[Path]:
+        """List likely COSMIC-2 HR event files for a year and signal.
+
+        Args:
+            year: UTC calendar year, e.g. ``2021`` or ``2023``.
+            signal: Requested signal family/name, e.g. ``"L1"``, ``"L2"``,
+                or ``"L2C"``.
+
+        Returns:
+            Sorted list of candidate event-file paths. An empty list is returned
+            when no candidates are found.
+
+        Raises:
+            ValueError: If inputs are invalid.
+            CosmicLoaderError: If the COSMIC-2 HR data path exists but is not a
+                directory.
+        """
+        request_year: int = self._validate_year(year)
+        requested_signal: str = self._normalize_signal_name(signal)
+
+        if not self.cosmic_data_dir.exists():
+            _LOGGER.warning(
+                "COSMIC-2 HR data directory does not exist: %s",
+                self.cosmic_data_dir,
+            )
+            return []
+        if not self.cosmic_data_dir.is_dir():
+            raise CosmicLoaderError(
+                f"COSMIC-2 HR data path is not a directory: {self.cosmic_data_dir}"
+            )
+
+        year_directory: Path = self.cosmic_data_dir / str(request_year)
+        search_roots: list[Path] = (
+            [year_directory] if year_directory.is_dir() else [self.cosmic_data_dir]
+        )
+
+        candidates: list[Path] = []
+        for search_root in search_roots:
+            for path in search_root.rglob("*"):
+                if not path.is_file():
+                    continue
+                if not self._is_supported_data_file(path):
+                    continue
+                if not self._path_matches_year(path, request_year, strict=not year_directory.is_dir()):
+                    continue
+                if not self._path_is_compatible_with_signal(path, requested_signal):
+                    continue
+                candidates.append(path)
+
+        unique_sorted_candidates: list[Path] = sorted(
+            set(candidates),
+            key=self._path_sort_key,
+        )
+        return unique_sorted_candidates
+
+    def load_event(self, path: Path) -> list[SignalWindow]:
+        """Read one COSMIC-2 HR event file and segment it into windows.
+
+        Args:
+            path: Path to one NetCDF/HDF COSMIC-2 HR file.
+
+        Returns:
+            List of 10-second ``SignalWindow`` objects.
+
+        Raises:
+            FileNotFoundError: If ``path`` does not exist.
+            CosmicLoaderError: If the file cannot be opened or lacks required
+                time/phase/SNR data.
+        """
+        event_path: Path = Path(path).expanduser()
+        if not event_path.exists():
+            raise FileNotFoundError(f"COSMIC-2 HR file does not exist: {event_path}")
+        if not event_path.is_file():
+            raise CosmicLoaderError(f"COSMIC-2 HR path is not a file: {event_path}")
+        if not self._is_supported_data_file(event_path):
+            raise CosmicLoaderError(f"Unsupported COSMIC-2 HR file type: {event_path}")
+
+        event_data_list: list[_EventData] = self._read_event_file(event_path)
+        if not event_data_list:
+            raise CosmicLoaderError(
+                f"No usable high-rate events were extracted from {event_path}."
+            )
+
+        all_windows: list[SignalWindow] = []
+        for event_data in event_data_list:
+            windows: list[SignalWindow] = self.segment_to_windows(
+                event_data,
+                self.window_seconds,
+            )
+            for window in windows:
+                self._attach_orbits_if_available(window)
+            all_windows.extend(windows)
+
+        return all_windows
+
+    def iter_windows(self, year: int, signal: str) -> Iterator[SignalWindow]:
+        """Yield COSMIC-2 HR windows for a year and requested signal.
+
+        File-level schema errors are logged and skipped so full-year processing
+        can proceed robustly.
+
+        Args:
+            year: UTC calendar year.
+            signal: Requested signal family/name.
+
+        Yields:
+            ``SignalWindow`` objects matching the requested signal.
+        """
+        requested_signal: str = self._normalize_signal_name(signal)
+        for path in self.list_events(year=year, signal=requested_signal):
+            try:
+                windows: list[SignalWindow] = self.load_event(path)
+            except Exception as exc:
+                _LOGGER.warning("Skipping COSMIC-2 HR file %s: %s", path, exc)
+                continue
+
+            for window in windows:
+                if self._signal_matches(window.signal_name, requested_signal):
+                    yield window
+
+    def segment_to_windows(
+        self,
+        event_data: Any,
+        window_seconds: int,
+    ) -> list[SignalWindow]:
+        """Split one event into contiguous processing windows.
+
+        Args:
+            event_data: Internal ``_EventData`` object or a mapping with
+                equivalent keys.
+            window_seconds: Window duration in seconds. The paper uses
+                10 seconds.
+
+        Returns:
+            List of valid ``SignalWindow`` objects. Empty/invalid windows are
+            skipped.
+
+        Raises:
+            ValueError: If ``window_seconds`` is not positive.
+            CosmicLoaderError: If event data cannot be normalized.
+        """
+        if int(window_seconds) <= 0:
+            raise ValueError("window_seconds must be positive.")
+
+        normalized_event: _EventData = self._coerce_event_data(event_data)
+        sample_count: int = len(normalized_event.sample_datetimes)
+        if sample_count == 0:
+            return []
+
+        self._validate_event_array_lengths(normalized_event)
+
+        time_seconds: NDArray[np.float64] = np.asarray(
+            [
+                self._datetime_to_seconds(sample_datetime)
+                for sample_datetime in normalized_event.sample_datetimes
+            ],
+            dtype=np.float64,
+        )
+        phase_rad: NDArray[np.float64] = np.asarray(
+            normalized_event.phase_rad,
+            dtype=np.float64,
+        )
+        snr_vv: NDArray[np.float64] = np.asarray(normalized_event.snr_vv, dtype=np.float64)
+        amplitude: NDArray[np.float64] = np.asarray(
+            normalized_event.amplitude,
+            dtype=np.float64,
+        )
+
+        valid_mask: NDArray[np.bool_] = (
+            np.isfinite(time_seconds)
+            & np.isfinite(phase_rad)
+            & np.isfinite(snr_vv)
+            & np.isfinite(amplitude)
+            & (snr_vv > 0.0)
+            & (amplitude > 0.0)
+        )
+
+        if not np.any(valid_mask):
+            return []
+
+        order: NDArray[np.int64] = np.argsort(time_seconds[valid_mask])
+        valid_indices: NDArray[np.int64] = np.flatnonzero(valid_mask)[order]
+
+        time_seconds = time_seconds[valid_indices]
+        phase_rad = phase_rad[valid_indices]
+        snr_vv = snr_vv[valid_indices]
+        amplitude = amplitude[valid_indices]
+
+        sample_datetimes: list[datetime] = [
+            normalized_event.sample_datetimes[int(index)] for index in valid_indices
+        ]
+
+        tangent_height_values: NDArray[np.float64] | None = None
+        if normalized_event.tangent_height_km is not None:
+            tangent_height_values = np.asarray(
+                normalized_event.tangent_height_km,
+                dtype=np.float64,
+            )[valid_indices]
+
+        rx_states: list[StateVector] | None = None
+        if normalized_event.rx_states is not None and len(normalized_event.rx_states) == sample_count:
+            rx_states = [normalized_event.rx_states[int(index)] for index in valid_indices]
+
+        tx_states: list[StateVector] | None = None
+        if normalized_event.tx_states is not None and len(normalized_event.tx_states) == sample_count:
+            tx_states = [normalized_event.tx_states[int(index)] for index in valid_indices]
+
+        if time_seconds.size < _MIN_SAMPLES_PER_WINDOW:
+            return []
+
+        first_time_s: float = float(time_seconds[0])
+        last_time_s: float = float(time_seconds[-1])
+        window_duration_s: float = float(window_seconds)
+
+        windows: list[SignalWindow] = []
+        window_index: int = 0
+        current_start_s: float = first_time_s
+
+        while current_start_s <= last_time_s + _SAMPLE_TIME_TOLERANCE_S:
+            current_end_s: float = current_start_s + window_duration_s
+            if current_end_s > last_time_s + _SAMPLE_TIME_TOLERANCE_S:
+                break
+
+            if math.isclose(current_end_s, last_time_s, abs_tol=_SAMPLE_TIME_TOLERANCE_S):
+                in_window_mask: NDArray[np.bool_] = (
+                    (time_seconds >= current_start_s - _SAMPLE_TIME_TOLERANCE_S)
+                    & (time_seconds <= current_end_s + _SAMPLE_TIME_TOLERANCE_S)
+                )
+            else:
+                in_window_mask = (
+                    (time_seconds >= current_start_s - _SAMPLE_TIME_TOLERANCE_S)
+                    & (time_seconds < current_end_s - _SAMPLE_TIME_TOLERANCE_S)
+                )
+
+            window_indices: NDArray[np.int64] = np.flatnonzero(in_window_mask)
+            if window_indices.size >= _MIN_SAMPLES_PER_WINDOW:
+                start_time: datetime = self._seconds_to_datetime(current_start_s)
+                end_time: datetime = self._seconds_to_datetime(current_end_s)
+                mid_time: datetime = self._seconds_to_datetime(
+                    current_start_s + 0.5 * window_duration_s
+                )
+
+                relative_times_s: NDArray[np.float64] = (
+                    time_seconds[window_indices] - current_start_s
+                ).astype(np.float64, copy=False)
+
+                sampling_rate_hz: float = self._infer_sampling_rate(
+                    sample_time_seconds=time_seconds[window_indices],
+                    constellation=normalized_event.constellation,
+                    fallback=normalized_event.sampling_rate_hz,
+                )
+
+                tangent_height_km: float = math.nan
+                if tangent_height_values is not None:
+                    finite_tangent_values: NDArray[np.float64] = tangent_height_values[
+                        window_indices
+                    ][np.isfinite(tangent_height_values[window_indices])]
+                    if finite_tangent_values.size > 0:
+                        tangent_height_km = float(np.nanmin(finite_tangent_values))
+
+                window_rx_states: list[StateVector] = []
+                if rx_states is not None:
+                    window_rx_states = [rx_states[int(index)] for index in window_indices]
+
+                window_tx_states: list[StateVector] = []
+                if tx_states is not None:
+                    window_tx_states = [tx_states[int(index)] for index in window_indices]
+
+                window_event_id: str = self._window_event_id(
+                    base_event_id=normalized_event.event_id,
+                    window_start=start_time,
+                    window_index=window_index,
+                )
+
+                windows.append(
+                    SignalWindow(
+                        event_id=window_event_id,
+                        leo_id=normalized_event.leo_id,
+                        gnss_id=normalized_event.gnss_id,
+                        constellation=normalized_event.constellation,
+                        signal_name=normalized_event.signal_name,
+                        antenna=normalized_event.antenna,
+                        start_time=start_time,
+                        mid_time=mid_time,
+                        end_time=end_time,
+                        sampling_rate_hz=sampling_rate_hz,
+                        times=relative_times_s,
+                        phase_rad=phase_rad[window_indices].astype(
+                            np.float64,
+                            copy=True,
+                        ),
+                        amplitude=amplitude[window_indices].astype(
+                            np.float64,
+                            copy=True,
+                        ),
+                        snr_vv=snr_vv[window_indices].astype(np.float64, copy=True),
+                        rx_states=window_rx_states,
+                        tx_states=window_tx_states,
+                        tangent_height_km=tangent_height_km,
+                    )
+                )
+
+            current_start_s = current_end_s
+            window_index += 1
+
+        return windows
+
+    def _read_event_file(self, path: Path) -> list[_EventData]:
+        """Read one event file using xarray, then h5py/netCDF4 fallbacks."""
+        errors: list[str] = []
+
+        try:
+            with xr.open_dataset(path, decode_times=True, mask_and_scale=True) as dataset:
+                loaded_dataset: xr.Dataset = dataset.load()
+            return self._events_from_xarray(path=path, dataset=loaded_dataset)
+        except Exception as exc:
+            errors.append(f"xarray: {exc}")
+
+        try:
+            return self._events_from_h5py(path)
+        except Exception as exc:
+            errors.append(f"h5py: {exc}")
+
+        try:
+            return self._events_from_netcdf4(path)
+        except Exception as exc:
+            errors.append(f"netCDF4: {exc}")
+
+        raise CosmicLoaderError(
+            f"Could not read COSMIC-2 HR file {path}. Errors: {'; '.join(errors)}"
+        )
+
+    def _events_from_xarray(self, path: Path, dataset: xr.Dataset) -> list[_EventData]:
+        """Extract one or more event records from an xarray dataset."""
+        variables: dict[str, _VariableValue] = {}
+        for name in dataset.variables:
+            data_array: xr.DataArray = dataset[name]
+            variables[str(name)] = _VariableValue(
+                name=str(name),
+                values=np.asarray(data_array.values),
+                attrs=self._clean_attrs(data_array.attrs),
+                dims=tuple(str(dim) for dim in data_array.dims),
+            )
+
+        metadata: dict[str, Any] = self._clean_attrs(dataset.attrs)
+        return self._events_from_variable_mapping(
+            path=path,
+            variables=variables,
+            global_attrs=metadata,
+        )
+
+    def _events_from_h5py(self, path: Path) -> list[_EventData]:
+        """Extract event records from an HDF5 file using h5py."""
+        variables: dict[str, _VariableValue] = {}
+        global_attrs: dict[str, Any] = {}
+
+        with h5py.File(path, "r") as file:
+            global_attrs = self._clean_attrs(dict(file.attrs))
+
+            def visitor(name: str, obj: Any) -> None:
+                if isinstance(obj, h5py.Dataset):
+                    try:
+                        values: NDArray[Any] = np.asarray(obj[()])
+                    except Exception:
+                        return
+                    variables[name] = _VariableValue(
+                        name=name,
+                        values=values,
+                        attrs=self._clean_attrs(dict(obj.attrs)),
+                        dims=tuple(),
+                    )
+
+            file.visititems(visitor)
+
+        return self._events_from_variable_mapping(
+            path=path,
+            variables=variables,
+            global_attrs=global_attrs,
+        )
+
+    def _events_from_netcdf4(self, path: Path) -> list[_EventData]:
+        """Extract event records from a NetCDF file using netCDF4."""
+        variables: dict[str, _VariableValue] = {}
+
+        with netCDF4.Dataset(path, mode="r") as dataset:
+            global_attrs: dict[str, Any] = {
+                attr_name: getattr(dataset, attr_name)
+                for attr_name in dataset.ncattrs()
+            }
+            global_attrs = self._clean_attrs(global_attrs)
+
+            for group_prefix, group in self._iter_netcdf_groups(dataset):
+                for variable_name, variable in group.variables.items():
+                    full_name: str = (
+                        variable_name if not group_prefix else f"{group_prefix}/{variable_name}"
+                    )
+                    try:
+                        values = np.asarray(variable[:])
+                    except Exception:
+                        continue
+                    variables[full_name] = _VariableValue(
+                        name=full_name,
+                        values=values,
+                        attrs=self._clean_attrs(
+                            {
+                                attr_name: getattr(variable, attr_name)
+                                for attr_name in variable.ncattrs()
+                            }
+                        ),
+                        dims=tuple(str(dim) for dim in variable.dimensions),
+                    )
+
+        return self._events_from_variable_mapping(
+            path=path,
+            variables=variables,
+            global_attrs=global_attrs,
+        )
+
+    def _events_from_variable_mapping(
+        self,
+        path: Path,
+        variables: Mapping[str, _VariableValue],
+        global_attrs: Mapping[str, Any],
+    ) -> list[_EventData]:
+        """Extract event records from generic variables and attributes."""
+        if not variables:
+            raise CosmicLoaderError(f"No variables found in COSMIC-2 HR file {path}.")
+
+        time_variable: _VariableValue = self._find_time_variable(variables)
+        sample_datetimes: list[datetime] = self._decode_time_variable(time_variable)
+        if not sample_datetimes:
+            raise CosmicLoaderError(f"Time variable is empty in {path}.")
+
+        time_len: int = len(sample_datetimes)
+
+        phase_variables: list[_VariableValue] = self._find_phase_variables(
+            variables=variables,
+            time_len=time_len,
+        )
+        if not phase_variables:
+            raise CosmicLoaderError(
+                f"No high-rate phase variable was found in {path}. "
+                "Expected a connected carrier/excess phase variable."
+            )
+
+        snr_variables: list[_VariableValue] = self._find_snr_variables(
+            variables=variables,
+            time_len=time_len,
+        )
+        if not snr_variables:
+            raise CosmicLoaderError(
+                f"No SNR/amplitude variable was found in {path}. "
+                "The paper uses SNR scaled to a 1-Hz band as amplitude."
+            )
+
+        metadata_base: dict[str, Any] = dict(global_attrs)
+        metadata_base.update(self._metadata_from_file_name(path))
+
+        events: list[_EventData] = []
+        for phase_variable in phase_variables:
+            phase_signal: str = self._infer_signal_name(
+                attrs={**metadata_base, **phase_variable.attrs},
+                name=phase_variable.name,
+            )
+
+            snr_variable: _VariableValue = self._select_snr_for_phase(
+                phase_variable=phase_variable,
+                snr_variables=snr_variables,
+                signal_name=phase_signal,
+            )
+
+            combined_metadata: dict[str, Any] = dict(metadata_base)
+            combined_metadata.update(phase_variable.attrs)
+            combined_metadata.update(
+                {
+                    f"snr_{key}": value
+                    for key, value in snr_variable.attrs.items()
+                }
+            )
+
+            phase_values_raw: NDArray[np.float64] = self._extract_1d_time_series(
+                variable=phase_variable,
+                time_len=time_len,
+            )
+            snr_values: NDArray[np.float64] = self._extract_1d_time_series(
+                variable=snr_variable,
+                time_len=time_len,
+            )
+
+            signal_name: str = self._infer_signal_name(
+                attrs=combined_metadata,
+                name=phase_variable.name,
+                fallback=phase_signal,
+            )
+            constellation: str = self._infer_constellation(
+                attrs=combined_metadata,
+                gnss_id_hint=self._metadata_value(combined_metadata, _GNSS_ID_KEYS),
+            )
+
+            phase_rad: NDArray[np.float64] = self._convert_phase_to_radians(
+                phase_values=phase_values_raw,
+                variable=phase_variable,
+                signal_name=signal_name,
+                constellation=constellation,
+            )
+
+            snr_vv: NDArray[np.float64] = snr_values.astype(np.float64, copy=False)
+            amplitude: NDArray[np.float64] = snr_vv.copy()
+
+            leo_id: str = self._infer_leo_id(attrs=combined_metadata, path=path)
+            gnss_id: str = self._infer_gnss_id(attrs=combined_metadata)
+            antenna: str = self._infer_antenna(attrs=combined_metadata, path=path)
+
+            sampling_rate_hz: float = self._infer_sampling_rate(
+                sample_time_seconds=np.asarray(
+                    [self._datetime_to_seconds(value) for value in sample_datetimes],
+                    dtype=np.float64,
+                ),
+                constellation=constellation,
+                fallback=self._metadata_float(combined_metadata, _SAMPLING_RATE_KEYS),
+            )
+
+            tangent_height: NDArray[np.float64] | None = self._extract_tangent_height(
+                variables=variables,
+                attrs=combined_metadata,
+                time_len=time_len,
+            )
+
+            rx_states: list[StateVector] | None = self._extract_state_series(
+                variables=variables,
+                time_len=time_len,
+                sample_datetimes=sample_datetimes,
+                position_hints=_RX_POSITION_HINTS,
+                velocity_hints=_RX_VELOCITY_HINTS,
+            )
+            tx_states: list[StateVector] | None = self._extract_state_series(
+                variables=variables,
+                time_len=time_len,
+                sample_datetimes=sample_datetimes,
+                position_hints=_TX_POSITION_HINTS,
+                velocity_hints=_TX_VELOCITY_HINTS,
+            )
+
+            event_start: datetime = sample_datetimes[0]
+            event_id: str = self._stable_event_id(
+                attrs=combined_metadata,
+                path=path,
+                leo_id=leo_id,
+                gnss_id=gnss_id,
+                antenna=antenna,
+                start_time=event_start,
+            )
+
+            events.append(
+                _EventData(
+                    source_path=path,
+                    event_id=event_id,
+                    leo_id=leo_id,
+                    gnss_id=gnss_id,
+                    constellation=constellation,
+                    signal_name=signal_name,
+                    antenna=antenna,
+                    sample_datetimes=sample_datetimes,
+                    phase_rad=phase_rad,
+                    snr_vv=snr_vv,
+                    amplitude=amplitude,
+                    sampling_rate_hz=sampling_rate_hz,
+                    tangent_height_km=tangent_height,
+                    rx_states=rx_states,
+                    tx_states=tx_states,
+                    metadata=combined_metadata,
+                )
+            )
+
+        return events
+
+    def _attach_orbits_if_available(self, window: SignalWindow) -> None:
+        """Attach receiver/transmitter states via OrbitLoader when possible."""
+        if window.rx_states and window.tx_states:
+            return
+
+        if not window.rx_states:
+            try:
+                window.rx_states = self.orbit_loader.interpolate_rx_states(window)
+            except OrbitLoaderError as exc:
+                _LOGGER.debug(
+                    "Receiver orbit interpolation unavailable for event %s: %s",
+                    window.event_id,
+                    exc,
+                )
+            except Exception as exc:
+                _LOGGER.debug(
+                    "Unexpected receiver orbit interpolation failure for event %s: %s",
+                    window.event_id,
+                    exc,
+                )
+
+        if not window.tx_states:
+            try:
+                window.tx_states = self.orbit_loader.interpolate_tx_states(window)
+            except OrbitLoaderError as exc:
+                _LOGGER.debug(
+                    "Transmitter orbit interpolation unavailable for event %s: %s",
+                    window.event_id,
+                    exc,
+                )
+            except Exception as exc:
+                _LOGGER.debug(
+                    "Unexpected transmitter orbit interpolation failure for event %s: %s",
+                    window.event_id,
+                    exc,
+                )
+
+    @staticmethod
+    def _is_supported_data_file(path: Path) -> bool:
+        """Return whether a path has a supported NetCDF/HDF suffix."""
+        suffixes: tuple[str, ...] = tuple(suffix.lower() for suffix in path.suffixes)
+        if not suffixes:
+            return False
+        if suffixes[-1] in _SUPPORTED_SUFFIXES:
+            return True
+        if suffixes[-1] in _COMPRESSED_SUFFIXES and len(suffixes) >= 2:
+            return suffixes[-2] in _SUPPORTED_SUFFIXES
+        return False
+
+    @staticmethod
+    def _validate_year(year: int) -> int:
+        """Validate a calendar year."""
+        year_value: int = int(year)
+        if year_value < 1995 or year_value > 2100:
+            raise ValueError(f"year is outside expected range: {year_value}")
+        return year_value
+
+    @staticmethod
+    def _path_matches_year(path: Path, year: int, strict: bool) -> bool:
+        """Return whether a path is compatible with a year."""
+        if not strict:
+            return True
+        text: str = str(path)
+        year_text: str = str(year)
+        return year_text in text
+
+    @classmethod
+    def _path_is_compatible_with_signal(cls, path: Path, signal: str) -> bool:
+        """Signal-filter path names only when a signal token is evident."""
+        normalized_signal: str = cls._normalize_signal_name(signal)
+        path_text: str = cls._normalize_signal_name(str(path))
+
+        known_tokens: tuple[str, ...] = (
+            "L1",
+            "L2",
+            "L2C",
+            "L2P",
+            "GPS_L1",
+            "GPS_L2",
+            "GPS_L2C",
+            "GPS_L2P",
+            "GLO_L1",
+            "GLO_L2",
+            "GLONASS_L1",
+            "GLONASS_L2",
+        )
+        present_tokens: set[str] = {
+            token for token in known_tokens if cls._token_present(path_text, token)
+        }
+
+        if not present_tokens:
+            return True
+
+        if normalized_signal == "L2":
+            return any("L2" in token for token in present_tokens)
+        if normalized_signal == "L1":
+            return any("L1" in token for token in present_tokens)
+
+        return any(
+            cls._signal_matches(token, normalized_signal) for token in present_tokens
+        )
+
+    @staticmethod
+    def _path_sort_key(path: Path) -> tuple[str, str]:
+        """Sort paths deterministically with date-like strings first."""
+        text: str = str(path)
+        match = re.search(r"(20\d{2}[-_/]?\d{2}[-_/]?\d{2}|20\d{2}\d{3})", text)
+        date_key: str = match.group(1) if match else ""
+        return date_key, text
+
+    @staticmethod
+    def _clean_attrs(attrs: Mapping[Any, Any]) -> dict[str, Any]:
+        """Convert backend attributes into simple Python values."""
+        cleaned: dict[str, Any] = {}
+        for key, value in attrs.items():
+            cleaned[str(key)] = CosmicLoader._decode_attr_value(value)
+        return cleaned
+
+    @staticmethod
+    def _decode_attr_value(value: Any) -> Any:
+        """Decode bytes, scalar arrays, and backend scalar values."""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace").strip()
+        if isinstance(value, np.ndarray):
+            if value.size == 1:
+                return CosmicLoader._decode_attr_value(np.ravel(value)[0])
+            if value.dtype.kind in {"S", "U"}:
+                return "".join(
+                    CosmicLoader._decode_attr_value(item) for item in value.ravel()
+                ).strip()
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    @staticmethod
+    def _iter_netcdf_groups(dataset: netCDF4.Dataset) -> Iterator[tuple[str, Any]]:
+        """Yield NetCDF root and nested groups."""
+        yield "", dataset
+        stack: list[tuple[str, Any]] = [("", dataset)]
+        while stack:
+            prefix, group = stack.pop()
+            for group_name, child_group in group.groups.items():
+                child_prefix: str = group_name if not prefix else f"{prefix}/{group_name}"
+                yield child_prefix, child_group
+                stack.append((child_prefix, child_group))
+
+    @classmethod
+    def _find_time_variable(
+        cls,
+        variables: Mapping[str, _VariableValue],
+    ) -> _VariableValue:
+        """Find the best time variable."""
+        candidates: list[tuple[int, str, _VariableValue]] = []
+        for name, variable in variables.items():
+            lower_name: str = cls._lower_base_name(name)
+            attrs_text: str = cls._attrs_text(variable.attrs)
+            score: int = 0
+            if lower_name in _TIME_NAMES:
+                score += 10
+            if any(token in lower_name for token in _TIME_NAMES):
+                score += 5
+            if "time" in attrs_text:
+                score += 3
+            if np.asarray(variable.values).ndim <= 2:
+                score += 1
+            if score > 0:
+                candidates.append((score, name, variable))
+
+        if not candidates:
+            raise CosmicLoaderError("Could not identify a time variable.")
+
+        return sorted(candidates, key=lambda item: (-item[0], item[1]))[0][2]
+
+    @classmethod
+    def _find_phase_variables(
+        cls,
+        variables: Mapping[str, _VariableValue],
+        time_len: int,
+    ) -> list[_VariableValue]:
+        """Find carrier/excess phase variables."""
+        candidates: list[tuple[int, str, _VariableValue]] = []
+        for name, variable in variables.items():
+            lower_name: str = cls._lower_base_name(name)
+            if any(exclude in lower_name for exclude in _PHASE_EXCLUDE_HINTS):
+                continue
+            if not cls._variable_can_align_to_time(variable, time_len):
+                continue
+
+            attrs_text: str = cls._attrs_text(variable.attrs)
+            score: int = 0
+            if any(hint in lower_name for hint in _PHASE_NAME_HINTS):
+                score += 10
+            if "phase" in attrs_text or "carrier" in attrs_text:
+                score += 4
+            if "rad" in lower_name:
+                score += 1
+            if "cycle" in lower_name:
+                score += 1
+            if score > 0:
+                candidates.append((score, name, variable))
+
+        return [item[2] for item in sorted(candidates, key=lambda item: (-item[0], item[1]))]
+
+    @classmethod
+    def _find_snr_variables(
+        cls,
+        variables: Mapping[str, _VariableValue],
+        time_len: int,
+    ) -> list[_VariableValue]:
+        """Find SNR/amplitude variables."""
+        candidates: list[tuple[int, str, _VariableValue]] = []
+        for name, variable in variables.items():
+            lower_name: str = cls._lower_base_name(name)
+            if any(exclude in lower_name for exclude in _SNR_EXCLUDE_HINTS):
+                continue
+            if not cls._variable_can_align_to_time(variable, time_len):
+                continue
+
+            attrs_text: str = cls._attrs_text(variable.attrs)
+            score: int = 0
+            if any(hint in lower_name for hint in _SNR_NAME_HINTS):
+                score += 10
+            if "snr" in attrs_text or "amplitude" in attrs_text:
+                score += 4
+            if "1hz" in lower_name or "1_hz" in lower_name:
+                score += 2
+            if score > 0:
+                candidates.append((score, name, variable))
+
+        return [item[2] for item in sorted(candidates, key=lambda item: (-item[0], item[1]))]
+
+    @classmethod
+    def _select_snr_for_phase(
+        cls,
+        phase_variable: _VariableValue,
+        snr_variables: Sequence[_VariableValue],
+        signal_name: str,
+    ) -> _VariableValue:
+        """Select an SNR variable most compatible with a phase variable."""
+        if not snr_variables:
+            raise CosmicLoaderError("No SNR variables are available.")
+
+        phase_text: str = cls._normalize_signal_name(phase_variable.name)
+        signal_text: str = cls._normalize_signal_name(signal_name)
+
+        scored: list[tuple[int, str, _VariableValue]] = []
+        for snr_variable in snr_variables:
+            snr_text: str = cls._normalize_signal_name(snr_variable.name)
+            score: int = 0
+            if signal_text and cls._signal_matches(snr_text, signal_text):
+                score += 5
+            for token in ("L1", "L2", "L2C", "L2P"):
+                if cls._token_present(phase_text, token) and cls._token_present(snr_text, token):
+                    score += 4
+            scored.append((score, snr_variable.name, snr_variable))
+
+        return sorted(scored, key=lambda item: (-item[0], item[1]))[0][2]
+
+    @staticmethod
+    def _variable_can_align_to_time(variable: _VariableValue, time_len: int) -> bool:
+        """Return True if a variable has an axis compatible with time length."""
+        array: NDArray[Any] = np.asarray(variable.values)
+        if array.size == 0:
+            return False
+        squeezed: NDArray[Any] = np.squeeze(array)
+        if squeezed.ndim == 0:
+            return time_len == 1
+        return any(axis_len == time_len for axis_len in squeezed.shape)
+
+    @staticmethod
+    def _extract_1d_time_series(
+        variable: _VariableValue,
+        time_len: int,
+    ) -> NDArray[np.float64]:
+        """Extract a one-dimensional time series from a variable."""
+        array: NDArray[Any] = np.asarray(variable.values)
+        if array.dtype.kind in {"S", "U", "O"}:
+            raise CosmicLoaderError(
+                f"Variable {variable.name!r} is not numeric and cannot be a "
+                "time-series signal."
+            )
+
+        numeric_array: NDArray[np.float64] = np.asarray(array, dtype=np.float64)
+        squeezed: NDArray[np.float64] = np.squeeze(numeric_array)
+
+        if squeezed.ndim == 0:
+            if time_len != 1:
+                raise CosmicLoaderError(
+                    f"Variable {variable.name!r} is scalar, expected time length "
+                    f"{time_len}."
+                )
+            return np.asarray([float(squeezed)], dtype=np.float64)
+
+        time_axes: list[int] = [
+            axis for axis, axis_len in enumerate(squeezed.shape) if axis_len == time_len
+        ]
+        if not time_axes:
+            raise CosmicLoaderError(
+                f"Variable {variable.name!r} cannot be aligned to time length "
+                f"{time_len}; shape={squeezed.shape}."
+            )
+
+        time_axis: int = time_axes[0]
+        moved: NDArray[np.float64] = np.moveaxis(squeezed, time_axis, 0)
+        if moved.ndim == 1:
+            return moved.astype(np.float64, copy=False)
+
+        trailing_shape: tuple[int, ...] = moved.shape[1:]
+        first_index: tuple[int, ...] = tuple(0 for _ in trailing_shape)
+        extracted: NDArray[np.float64] = moved[(slice(None), *first_index)]
+        return np.asarray(extracted, dtype=np.float64).reshape(time_len)
+
+    @classmethod
+    def _decode_time_variable(cls, variable: _VariableValue) -> list[datetime]:
+        """Decode a time variable to UTC datetimes."""
+        values: NDArray[Any] = np.asarray(variable.values)
+        squeezed: NDArray[Any] = np.squeeze(values)
+
+        if squeezed.ndim > 1:
+            time_axis_candidates: list[int] = [
+                axis for axis, size in enumerate(squeezed.shape) if size > 1
+            ]
+            if not time_axis_candidates:
+                squeezed = squeezed.reshape(1)
+            else:
+                axis: int = time_axis_candidates[0]
+                moved = np.moveaxis(squeezed, axis, 0)
+                first_index: tuple[int, ...] = tuple(0 for _ in moved.shape[1:])
+                squeezed = moved[(slice(None), *first_index)]
+
+        flat_values: NDArray[Any] = np.ravel(squeezed)
+        if flat_values.size == 0:
+            return []
+
+        if np.issubdtype(flat_values.dtype, np.datetime64):
+            return [
+                cls._numpy_datetime64_to_datetime(value)
+                for value in flat_values.astype("datetime64[ns]")
+            ]
+
+        if flat_values.dtype.kind in {"S", "U", "O"}:
+            parsed_datetimes: list[datetime] = []
+            for value in flat_values:
+                parsed_datetimes.append(cls._parse_datetime_string(cls._decode_attr_value(value)))
+            return parsed_datetimes
+
+        numeric_values: NDArray[np.float64] = np.asarray(flat_values, dtype=np.float64)
+        if not np.all(np.isfinite(numeric_values)):
+            raise CosmicLoaderError(f"Time variable {variable.name!r} is non-finite.")
+
+        units: str = str(variable.attrs.get("units", "")).strip()
+        if units:
+            try:
+                decoded_times = netCDF4.num2date(
+                    numeric_values,
+                    units=units,
+                    calendar=str(variable.attrs.get("calendar", "standard")),
+                    only_use_cftime_datetimes=False,
+                    only_use_python_datetimes=True,
+                )
+                return [cls._ensure_utc_datetime(item) for item in np.ravel(decoded_times)]
+            except Exception as exc:
+                _LOGGER.debug(
+                    "netCDF4 time decoding failed for units %r: %s",
+                    units,
+                    exc,
+                )
+
+        if float(np.nanmedian(np.abs(numeric_values))) > _EPOCH_SECONDS_HEURISTIC:
+            return [cls._seconds_to_datetime(float(value)) for value in numeric_values]
+
+        base_time: datetime | None = cls._base_time_from_attrs(variable.attrs)
+        if base_time is not None:
+            return [
+                base_time + timedelta(seconds=float(value))
+                for value in numeric_values
+            ]
+
+        # Last-resort deterministic behavior: relative seconds from Unix epoch.
+        return [
+            datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=float(value))
+            for value in numeric_values
+        ]
+
+    @classmethod
+    def _convert_phase_to_radians(
+        cls,
+        phase_values: NDArray[np.float64],
+        variable: _VariableValue,
+        signal_name: str,
+        constellation: str,
+    ) -> NDArray[np.float64]:
+        """Convert phase values to radians based on units metadata."""
+        phase_array: NDArray[np.float64] = np.asarray(phase_values, dtype=np.float64)
+        units: str = str(variable.attrs.get("units", "")).strip().lower()
+        name_text: str = cls._lower_base_name(variable.name)
+
+        if not units:
+            if "rad" in name_text:
+                units = "rad"
+            elif "cycle" in name_text or "cycles" in name_text:
+                units = "cycle"
+            elif "meter" in name_text or name_text.endswith("_m"):
+                units = "m"
+
+        if units in {"rad", "radian", "radians"} or "radian" in units:
+            return phase_array
+        if units in {"cycle", "cycles", "cyc"} or "cycle" in units or "cycles" in units:
+            return phase_array * constants.TWO_PI
+        if units in {"deg", "degree", "degrees"} or "degree" in units:
+            return phase_array * constants.DEG_TO_RAD
+        if units in {"m", "meter", "meters", "metre", "metres"} or "meter" in units or "metre" in units:
+            wavelength_m: float = constants.signal_wavelength_m(
+                signal_name=signal_name,
+                constellation=constellation,
+            )
+            return phase_array * constants.TWO_PI / wavelength_m
+
+        raise CosmicLoaderError(
+            f"Unsupported or missing phase units for variable {variable.name!r}: "
+            f"{units!r}. The loader must output phase in radians."
+        )
+
+    @classmethod
+    def _extract_tangent_height(
+        cls,
+        variables: Mapping[str, _VariableValue],
+        attrs: Mapping[str, Any],
+        time_len: int,
+    ) -> NDArray[np.float64] | None:
+        """Extract tangent height as a per-sample km array when available."""
+        attr_value: float = cls._metadata_float(attrs, _TANGENT_HEIGHT_KEYS)
+        if math.isfinite(attr_value):
+            return np.full(time_len, attr_value, dtype=np.float64)
+
+        for name, variable in variables.items():
+            lower_name: str = cls._lower_base_name(name)
+            if not any(key in lower_name for key in _TANGENT_HEIGHT_KEYS):
+                continue
+
+            values: NDArray[np.float64]
+            if cls._variable_can_align_to_time(variable, time_len):
+                values = cls._extract_1d_time_series(variable, time_len)
+            else:
+                scalar_values = np.asarray(variable.values, dtype=np.float64).ravel()
+                if scalar_values.size == 0:
+                    continue
+                values = np.full(time_len, float(scalar_values[0]), dtype=np.float64)
+
+            units: str = str(variable.attrs.get("units", "")).strip().lower()
+            if "m" in units and "km" not in units:
+                values = values / _M_PER_KM
+            return values.astype(np.float64, copy=False)
+
+        return None
+
+    @classmethod
+    def _extract_state_series(
+        cls,
+        variables: Mapping[str, _VariableValue],
+        time_len: int,
+        sample_datetimes: Sequence[datetime],
+        position_hints: tuple[str, ...],
+        velocity_hints: tuple[str, ...],
+    ) -> list[StateVector] | None:
+        """Extract optional ECEF state vectors from event variables."""
+        position_variable: _VariableValue | None = cls._find_vector_variable(
+            variables=variables,
+            hints=position_hints,
+            time_len=time_len,
+        )
+        if position_variable is None:
+            return None
+
+        positions_m: NDArray[np.float64] = cls._extract_vector_time_series(
+            variable=position_variable,
+            time_len=time_len,
+        )
+        positions_m = cls._positions_to_meters(
+            positions_m,
+            units=str(position_variable.attrs.get("units", "")),
+        )
+
+        velocity_variable: _VariableValue | None = cls._find_vector_variable(
+            variables=variables,
+            hints=velocity_hints,
+            time_len=time_len,
+        )
+        if velocity_variable is not None:
+            velocities_mps: NDArray[np.float64] = cls._extract_vector_time_series(
+                variable=velocity_variable,
+                time_len=time_len,
+            )
+            velocities_mps = cls._velocities_to_mps(
+                velocities_mps,
+                units=str(velocity_variable.attrs.get("units", "")),
+            )
+        else:
+            velocities_mps = cls._derive_velocity_from_positions(
+                sample_datetimes=sample_datetimes,
+                positions_m=positions_m,
+            )
+
+        states: list[StateVector] = []
+        for index in range(time_len):
+            states.append(
+                StateVector(
+                    time=sample_datetimes[index],
+                    position_m=Vector3(
+                        float(positions_m[index, 0]),
+                        float(positions_m[index, 1]),
+                        float(positions_m[index, 2]),
+                    ),
+                    velocity_mps=Vector3(
+                        float(velocities_mps[index, 0]),
+                        float(velocities_mps[index, 1]),
+                        float(velocities_mps[index, 2]),
+                    ),
+                )
+            )
+        return states
+
+    @classmethod
+    def _find_vector_variable(
+        cls,
+        variables: Mapping[str, _VariableValue],
+        hints: tuple[str, ...],
+        time_len: int,
+    ) -> _VariableValue | None:
+        """Find a vector variable with shape compatible with (time, 3)."""
+        scored: list[tuple[int, str, _VariableValue]] = []
+        for name, variable in variables.items():
+            lower_name: str = cls._lower_base_name(name)
+            if not any(hint in lower_name for hint in hints):
+                continue
+
+            values: NDArray[Any] = np.squeeze(np.asarray(variable.values))
+            if values.ndim < 2:
+                continue
+            if not any(size == time_len for size in values.shape):
+                continue
+            if not any(size == 3 for size in values.shape):
+                continue
+
+            score: int = 10
+            if "ecef" in lower_name:
+                score += 3
+            scored.append((score, name, variable))
+
+        if not scored:
+            return None
+        return sorted(scored, key=lambda item: (-item[0], item[1]))[0][2]
+
+    @classmethod
+    def _extract_vector_time_series(
+        cls,
+        variable: _VariableValue,
+        time_len: int,
+    ) -> NDArray[np.float64]:
+        """Extract vector time series with shape (time_len, 3)."""
+        array: NDArray[np.float64] = np.squeeze(
+            np.asarray(variable.values, dtype=np.float64)
+        )
+        if array.ndim < 2:
+            raise CosmicLoaderError(
+                f"Vector variable {variable.name!r} has invalid shape {array.shape}."
+            )
+
+        time_axes: list[int] = [
+            axis for axis, size in enumerate(array.shape) if size == time_len
+        ]
+        component_axes: list[int] = [
+            axis for axis, size in enumerate(array.shape) if size == 3
+        ]
+
+        if not time_axes or not component_axes:
+            raise CosmicLoaderError(
+                f"Vector variable {variable.name!r} cannot be aligned to "
+                f"(time, 3); shape={array.shape}."
+            )
+
+        time_axis: int = time_axes[0]
+        component_axis: int = component_axes[-1]
+        moved: NDArray[np.float64] = np.moveaxis(array, [time_axis, component_axis], [0, 1])
+
+        if moved.ndim > 2:
+            trailing_shape: tuple[int, ...] = moved.shape[2:]
+            if int(np.prod(trailing_shape)) != 1:
+                first_index: tuple[int, ...] = tuple(0 for _ in trailing_shape)
+                moved = moved[(slice(None), slice(None), *first_index)]
+            else:
+                moved = moved.reshape(time_len, 3)
+
+        return moved.reshape(time_len, 3).astype(np.float64, copy=False)
+
+    @staticmethod
+    def _positions_to_meters(
+        positions: NDArray[np.float64],
+        units: str,
+    ) -> NDArray[np.float64]:
+        """Convert ECEF positions to meters."""
+        values: NDArray[np.float64] = np.asarray(positions, dtype=np.float64)
+        lower_units: str = units.lower()
+        if "km" in lower_units:
+            return values * _M_PER_KM
+        if "m" in lower_units:
+            return values
+
+        median_radius: float = float(np.nanmedian(np.linalg.norm(values, axis=1)))
+        if math.isfinite(median_radius) and median_radius < 1.0e6:
+            return values * _M_PER_KM
+        return values
+
+    @staticmethod
+    def _velocities_to_mps(
+        velocities: NDArray[np.float64],
+        units: str,
+    ) -> NDArray[np.float64]:
+        """Convert ECEF velocities to meters per second."""
+        values: NDArray[np.float64] = np.asarray(velocities, dtype=np.float64)
+        lower_units: str = units.lower().replace(" ", "")
+        if "km/s" in lower_units or "kms" in lower_units:
+            return values * _M_PER_KM
+        if "m/s" in lower_units or "mps" in lower_units:
+            return values
+
+        median_speed: float = float(np.nanmedian(np.linalg.norm(values, axis=1)))
+        if math.isfinite(median_speed) and median_speed < 100.0:
+            return values * _M_PER_KM
+        return values
+
+    @classmethod
+    def _derive_velocity_from_positions(
+        cls,
+        sample_datetimes: Sequence[datetime],
+        positions_m: NDArray[np.float64],
+    ) -> NDArray[np.float64]:
+        """Derive velocities from positions using finite differences."""
+        times_s: NDArray[np.float64] = np.asarray(
+            [cls._datetime_to_seconds(value) for value in sample_datetimes],
+            dtype=np.float64,
+        )
+        if len(sample_datetimes) < 2:
+            return np.zeros_like(positions_m, dtype=np.float64)
+        return np.gradient(positions_m, times_s, axis=0, edge_order=1)
+
+    @staticmethod
+    def _infer_sampling_rate(
+        sample_time_seconds: NDArray[np.float64],
+        constellation: str,
+        fallback: float = math.nan,
+    ) -> float:
+        """Infer high-rate sampling rate from timestamps or metadata."""
+        fallback_value: float = float(fallback) if fallback is not None else math.nan
+        if math.isfinite(fallback_value) and fallback_value > 0.0:
+            return fallback_value
+
+        time_values: NDArray[np.float64] = np.asarray(sample_time_seconds, dtype=np.float64)
+        if time_values.size >= 2:
+            sorted_times: NDArray[np.float64] = np.sort(time_values)
+            diffs: NDArray[np.float64] = np.diff(sorted_times)
+            valid_diffs: NDArray[np.float64] = diffs[np.isfinite(diffs) & (diffs > 0.0)]
+            if valid_diffs.size > 0:
+                median_dt_s: float = float(np.median(valid_diffs))
+                if math.isfinite(median_dt_s) and median_dt_s > 0.0:
+                    return float(1.0 / median_dt_s)
+
+        constellation_key: str = str(constellation).strip().upper()
+        if constellation_key in {"GLONASS", "GLO", "R"}:
+            return _DEFAULT_GLONASS_SAMPLING_HZ
+        return _DEFAULT_GPS_SAMPLING_HZ
+
+    @classmethod
+    def _infer_signal_name(
+        cls,
+        attrs: Mapping[str, Any],
+        name: str,
+        fallback: str = "",
+    ) -> str:
+        """Infer signal name from attrs and variable/file names."""
+        value: str = cls._metadata_value(attrs, _SIGNAL_KEYS)
+        if value:
+            normalized_value: str = cls._normalize_signal_name(value)
+            if "L2C" in normalized_value:
+                return "L2C"
+            if "L2P" in normalized_value:
+                return "L2P"
+            if "L1" in normalized_value:
+                return "L1"
+            if "L2" in normalized_value:
+                return "L2"
+
+        text: str = cls._normalize_signal_name(name)
+        if "L2C" in text:
+            return "L2C"
+        if "L2P" in text:
+            return "L2P"
+        if "L1" in text:
+            return "L1"
+        if "L2" in text:
+            return "L2"
+
+        if fallback:
+            return str(fallback)
+        return constants.DEFAULT_PRIMARY_SIGNAL
+
+    @classmethod
+    def _infer_constellation(
+        cls,
+        attrs: Mapping[str, Any],
+        gnss_id_hint: str = "",
+    ) -> str:
+        """Infer GNSS constellation."""
+        value: str = cls._metadata_value(attrs, _CONSTELLATION_KEYS)
+        text: str = cls._normalize_signal_name(value or gnss_id_hint)
+        if text.startswith("R") or "GLONASS" in text or "GLO" in text:
+            return "GLONASS"
+        if text.startswith("G") or "GPS" in text or "NAVSTAR" in text:
+            return "GPS"
+        if text.startswith("E") or "GALILEO" in text:
+            return "GALILEO"
+        if text.startswith("C") or "BDS" in text or "BEIDOU" in text:
+            return "BEIDOU"
+        return value.strip().upper() if value else "GPS"
+
+    @classmethod
+    def _infer_leo_id(cls, attrs: Mapping[str, Any], path: Path) -> str:
+        """Infer COSMIC-2 receiver ID."""
+        value: str = cls._metadata_value(attrs, _LEO_ID_KEYS)
+        if value:
+            return cls._normalize_object_id(value)
+
+        text: str = str(path).upper()
+        match = re.search(r"(C2E\d{1,2}|COSMIC[-_]?2[-_]?FM\d{1,2}|FM\d{1,2})", text)
+        if match:
+            return cls._normalize_object_id(match.group(1))
+        return "UNKNOWN_LEO"
+
+    @classmethod
+    def _infer_gnss_id(cls, attrs: Mapping[str, Any]) -> str:
+        """Infer GNSS transmitter ID."""
+        value: str = cls._metadata_value(attrs, _GNSS_ID_KEYS)
+        if not value:
+            return "UNKNOWN_GNSS"
+
+        normalized: str = cls._normalize_signal_name(value)
+        match = re.search(r"([GREJC])[_-]?(\d{1,3})", normalized)
+        if match:
+            return f"{match.group(1)}{int(match.group(2)):02d}"
+
+        digit_match = re.search(r"(\d{1,3})", normalized)
+        if digit_match:
+            return f"G{int(digit_match.group(1)):02d}"
+
+        return cls._normalize_object_id(value)
+
+    @classmethod
+    def _infer_antenna(cls, attrs: Mapping[str, Any], path: Path) -> str:
+        """Infer POD antenna direction."""
+        value: str = cls._metadata_value(attrs, _ANTENNA_KEYS)
+        text: str = cls._normalize_signal_name(value or str(path))
+        if "ANTI" in text:
+            return "anti_velocity_facing"
+        if "VELOCITY" in text or "VEL" in text:
+            return "velocity_facing"
+        return value.strip() if value else "unknown"
+
+    @classmethod
+    def _stable_event_id(
+        cls,
+        attrs: Mapping[str, Any],
+        path: Path,
+        leo_id: str,
+        gnss_id: str,
+        antenna: str,
+        start_time: datetime,
+    ) -> str:
+        """Construct a stable event ID, avoiding signal-specific components."""
+        metadata_event_id: str = cls._metadata_value(attrs, _EVENT_ID_KEYS)
+        if metadata_event_id:
+            return cls._sanitize_identifier(metadata_event_id)
+
+        time_token: str = start_time.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        components: list[str] = [
+            cls._sanitize_identifier(leo_id),
+            cls._sanitize_identifier(gnss_id),
+            cls._sanitize_identifier(antenna),
+            time_token,
+        ]
+        if "UNKNOWN" in leo_id or "UNKNOWN" in gnss_id:
+            components.append(cls._sanitize_identifier(path.stem))
+        return "__".join(component for component in components if component)
+
+    @staticmethod
+    def _window_event_id(
+        base_event_id: str,
+        window_start: datetime,
+        window_index: int,
+    ) -> str:
+        """Append a deterministic 10-second window identifier."""
+        start_token: str = window_start.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        return f"{base_event_id}__w{window_index:05d}_{start_token}"
+
+    @staticmethod
+    def _metadata_from_file_name(path: Path) -> dict[str, Any]:
+        """Infer weak metadata hints from a filename."""
+        text: str = path.name.upper()
+        metadata: dict[str, Any] = {}
+
+        if "L2C" in text:
+            metadata["signal_name"] = "L2C"
+        elif "L2P" in text:
+            metadata["signal_name"] = "L2P"
+        elif "L1" in text:
+            metadata["signal_name"] = "L1"
+        elif "L2" in text:
+            metadata["signal_name"] = "L2"
+
+        if "GLONASS" in text or re.search(r"\bGLO\b", text) or re.search(r"\bR\d{2}\b", text):
+            metadata["constellation"] = "GLONASS"
+        elif "GPS" in text or re.search(r"\bG\d{2}\b", text):
+            metadata["constellation"] = "GPS"
+
+        return metadata
+
+    @staticmethod
+    def _metadata_value(attrs: Mapping[str, Any], keys: Sequence[str]) -> str:
+        """Return the first non-empty metadata string value for candidate keys."""
+        lower_mapping: dict[str, Any] = {
+            str(key).strip().lower(): value for key, value in attrs.items()
+        }
+        for key in keys:
+            key_lower: str = key.lower()
+            if key_lower in lower_mapping:
+                value: Any = lower_mapping[key_lower]
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+
+        for attr_key, value in lower_mapping.items():
+            if any(key.lower() in attr_key for key in keys):
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+
+        return ""
+
+    @staticmethod
+    def _metadata_float(attrs: Mapping[str, Any], keys: Sequence[str]) -> float:
+        """Return the first finite metadata float for candidate keys."""
+        value: str = CosmicLoader._metadata_value(attrs, keys)
+        if not value:
+            return math.nan
+        try:
+            result: float = float(value)
+        except (TypeError, ValueError):
+            return math.nan
+        return result if math.isfinite(result) else math.nan
+
+    @staticmethod
+    def _attrs_text(attrs: Mapping[str, Any]) -> str:
+        """Return lowercase searchable text for attrs."""
+        return " ".join(f"{key} {value}" for key, value in attrs.items()).lower()
+
+    @staticmethod
+    def _lower_base_name(name: str) -> str:
+        """Lowercase final path component of a variable name."""
+        return str(name).split("/")[-1].strip().lower()
+
+    @staticmethod
+    def _normalize_signal_name(value: str) -> str:
+        """Normalize signal/object text for comparisons."""
+        return str(value).strip().upper().replace("-", "_").replace(" ", "_").replace("/", "_")
+
+    @staticmethod
+    def _normalize_object_id(value: str) -> str:
+        """Normalize a spacecraft/satellite identifier."""
+        normalized: str = CosmicLoader._normalize_signal_name(value)
+        return re.sub(r"[^A-Z0-9_]", "", normalized) or "UNKNOWN"
+
+    @staticmethod
+    def _sanitize_identifier(value: str) -> str:
+        """Sanitize identifier components for event IDs."""
+        normalized: str = str(value).strip().upper()
+        sanitized: str = re.sub(r"[^A-Z0-9_.-]+", "_", normalized)
+        return sanitized.strip("_") or "UNKNOWN"
+
+    @classmethod
+    def _signal_matches(cls, observed_signal: str, requested_signal: str) -> bool:
+        """Return whether an observed signal satisfies a requested signal."""
+        observed: str = cls._normalize_signal_name(observed_signal)
+        requested: str = cls._normalize_signal_name(requested_signal)
+
+        if requested == observed:
+            return True
+        if requested == "L1":
+            return "L1" in observed and "L2" not in observed
+        if requested == "L2":
+            return "L2" in observed
+        if requested == "GPS_L2":
+            return "L2" in observed and "GPS" in observed
+        return cls._token_present(observed, requested)
+
+    @staticmethod
+    def _token_present(text: str, token: str) -> bool:
+        """Return True if a normalized token is present as a loose token."""
+        normalized_text: str = CosmicLoader._normalize_signal_name(text)
+        normalized_token: str = CosmicLoader._normalize_signal_name(token)
+        if normalized_token in normalized_text.split("_"):
+            return True
+        return normalized_token in normalized_text
+
+    @staticmethod
+    def _coerce_event_data(event_data: Any) -> _EventData:
+        """Coerce supported event-data representations to ``_EventData``."""
+        if isinstance(event_data, _EventData):
+            return event_data
+
+        if isinstance(event_data, Mapping):
+            try:
+                return _EventData(**dict(event_data))
+            except TypeError as exc:
+                raise CosmicLoaderError(
+                    "Mapping event_data cannot be converted to _EventData."
+                ) from exc
+
+        raise CosmicLoaderError(
+            f"segment_to_windows expected _EventData or mapping, got "
+            f"{type(event_data).__name__}."
+        )
+
+    @staticmethod
+    def _validate_event_array_lengths(event_data: _EventData) -> None:
+        """Validate event arrays have equal time length."""
+        sample_count: int = len(event_data.sample_datetimes)
+        lengths: dict[str, int] = {
+            "phase_rad": len(event_data.phase_rad),
+            "snr_vv": len(event_data.snr_vv),
+            "amplitude": len(event_data.amplitude),
+        }
+        if event_data.tangent_height_km is not None:
+            lengths["tangent_height_km"] = len(event_data.tangent_height_km)
+        if event_data.rx_states is not None:
+            lengths["rx_states"] = len(event_data.rx_states)
+        if event_data.tx_states is not None:
+            lengths["tx_states"] = len(event_data.tx_states)
+
+        bad_lengths: dict[str, int] = {
+            key: value for key, value in lengths.items() if value != sample_count
+        }
+        if bad_lengths:
+            raise CosmicLoaderError(
+                f"Event arrays must match time length {sample_count}, got "
+                f"{bad_lengths}."
+            )
+
+    @staticmethod
+    def _base_time_from_attrs(attrs: Mapping[str, Any]) -> datetime | None:
+        """Extract a base time from common attributes."""
+        for key in ("start_time", "time_start", "epoch", "base_time", "reference_time"):
+            if key in {str(attr_key).lower() for attr_key in attrs}:
+                for attr_key, value in attrs.items():
+                    if str(attr_key).lower() == key and str(value).strip():
+                        try:
+                            return CosmicLoader._parse_datetime_string(value)
+                        except Exception:
+                            continue
+        return None
+
+    @staticmethod
+    def _parse_datetime_string(value: Any) -> datetime:
+        """Parse common datetime string encodings to aware UTC datetime."""
+        text: str = str(value).strip()
+        if not text:
+            raise CosmicLoaderError("Empty datetime string.")
+
+        text = text.replace("Z", "+00:00")
+        try:
+            parsed: datetime = datetime.fromisoformat(text)
+            return CosmicLoader._ensure_utc_datetime(parsed)
+        except ValueError:
+            pass
+
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y%m%dT%H%M%S.%f",
+            "%Y%m%dT%H%M%S",
+            "%Y%m%d%H%M%S",
+            "%Y-%jT%H:%M:%S",
+            "%Y%j%H%M%S",
+        ):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                return parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+        raise CosmicLoaderError(f"Unsupported datetime string: {value!r}")
+
+    @staticmethod
+    def _numpy_datetime64_to_datetime(value: np.datetime64) -> datetime:
+        """Convert numpy datetime64 to aware UTC datetime."""
+        nanoseconds: int = int(value.astype("datetime64[ns]").astype(np.int64))
+        return datetime.fromtimestamp(
+            nanoseconds / _NANOSECONDS_PER_SECOND,
+            tz=timezone.utc,
+        )
+
+    @staticmethod
+    def _ensure_utc_datetime(value: Any) -> datetime:
+        """Convert Python/cftime-like datetime to aware UTC datetime."""
+        if isinstance(value, datetime):
+            result: datetime = value
+        else:
+            result = datetime(
+                int(value.year),
+                int(value.month),
+                int(value.day),
+                int(value.hour),
+                int(value.minute),
+                int(value.second),
+                int(getattr(value, "microsecond", 0)),
+            )
+        if result.tzinfo is None:
+            return result.replace(tzinfo=timezone.utc)
+        return result.astimezone(timezone.utc)
+
+    @staticmethod
+    def _datetime_to_seconds(value: datetime) -> float:
+        """Convert datetime to Unix seconds."""
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return float(value.timestamp())
+
+    @staticmethod
+    def _seconds_to_datetime(seconds: float) -> datetime:
+        """Convert Unix seconds to aware UTC datetime."""
+        return datetime.fromtimestamp(float(seconds), tz=timezone.utc)
+
+
+__all__ = ["CosmicLoader", "CosmicLoaderError"]

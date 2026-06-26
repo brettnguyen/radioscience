@@ -1,0 +1,1077 @@
+## Logic Analysis: `src/geometry/bp_plane.py`
+
+### 1. Purpose of this module
+
+`src/geometry/bp_plane.py` implements `BpPlaneBuilder`, which constructs the 2D back-propagation plane used by the COSMIC-2 geolocation algorithm.
+
+This module is central to the paper’s method because the back-propagation result depends on the magnetic-field-defined plane orientation at each candidate distance \(L_{\mathrm{mf}}\). For every 10-s `SignalWindow` and every magnetic-field candidate distance, the code must define the BP plane, compute the scan angle \(\alpha\), and return a `BpPlaneGeometry`.
+
+The downstream geolocation criterion is:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+where:
+
+- \(L_{\mathrm{mf}}\) is the distance used to evaluate IGRF-13 and define the BP plane.
+- \(L_0\) is the distance of the minimum of the BP amplitude variance \(V(L)\).
+
+Therefore, this module must accurately reproduce the paper’s geometric construction.
+
+---
+
+## 2. Relevant paper methodology
+
+The paper reduces the 3D radio occultation geometry to a 2D BP problem by assuming that ionospheric irregularities are elongated along geomagnetic field lines.
+
+For each candidate irregularity distance along the GNSS–LEO line of sight:
+
+1. Define the midpoint Tx–Rx line as the local \(x\)-axis.
+2. Define a phase-screen plane perpendicular to the \(x\)-axis.
+3. Evaluate the IGRF-13 magnetic-field vector at the candidate point.
+4. Project the magnetic-field vector onto the phase-screen plane.
+5. Treat the projected magnetic-field direction as the irregularity-alignment direction.
+6. Define the BP plane perpendicular to that projected irregularity direction.
+7. Compute the scan angle \(\alpha\), which measures how the LOS scan direction crosses the irregularities.
+
+The paper states:
+
+- If \(\alpha\) is close to \(90^\circ\), the LOS scans along the irregularity direction and produces little usable scintillation.
+- Final QC rejects cases with:
+
+\[
+\cos\alpha \leq 0.1
+\]
+
+This threshold comes from `config.yaml`:
+
+```yaml
+back_propagation:
+  quality_control:
+    cos_alpha_threshold: 0.1
+```
+
+`bp_plane.py` should compute `cos_alpha`; it should not apply this threshold itself. Final rejection belongs in `QualityController`.
+
+---
+
+## 3. Required public interface
+
+This file must follow the design exactly.
+
+### Class
+
+```text
+BpPlaneBuilder
+```
+
+### Constructor
+
+```text
+__init__(los_geometry: LosGeometry, magnetic_model: MagneticFieldModel)
+```
+
+The class should not require `AppConfig` directly, because the design does not include it in the constructor. Configuration is applied upstream through:
+
+- `LosGeometry`
+- `MagneticFieldModel`
+- `BackpropProcessor`
+- `QualityController`
+
+### Public methods
+
+```text
+build(window: SignalWindow, l_mf_km: float) -> BpPlaneGeometry
+```
+
+```text
+project_state(state: StateVector, plane: BpPlaneGeometry) -> tuple
+```
+
+```text
+compute_scan_angle(window: SignalWindow, plane: BpPlaneGeometry) -> float
+```
+
+No additional public methods should be required by other modules.
+
+Internal helper functions may be used, but other modules should rely only on the public interface above.
+
+---
+
+## 4. Configuration values relevant to this module
+
+This module must respect values passed from the configured processing pipeline.
+
+From `config.yaml`:
+
+```yaml
+data:
+  magnetic_field:
+    model: "IGRF-13"
+    use_field_direction_only: true
+```
+
+The `MagneticFieldModel` used by this module must therefore provide IGRF-13 field direction only. The magnitude is not used.
+
+Candidate magnetic-field distances come from:
+
+```yaml
+back_propagation:
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+`bp_plane.py` receives one `l_mf_km` at a time from `BackpropProcessor`. It should not hard-code this grid.
+
+The scan-angle QC threshold is:
+
+```yaml
+back_propagation:
+  quality_control:
+    cos_alpha_threshold: 0.1
+```
+
+Again, this module computes `cos_alpha`; it does not decide acceptance.
+
+---
+
+## 5. Data structures used
+
+### Input
+
+`build()` receives:
+
+```text
+SignalWindow
+```
+
+Relevant fields:
+
+- `mid_time`
+- `rx_states`
+- `tx_states`
+- `times`
+- `tangent_height_km`
+- metadata fields for diagnostics only
+
+The Tx/Rx state lists must already be populated by `OrbitLoader` or `CosmicLoader`.
+
+### Output
+
+`build()` returns:
+
+```text
+BpPlaneGeometry
+```
+
+Required fields:
+
+```text
+l_mf_km
+los_unit
+x_axis
+y_axis
+z_axis
+magnetic_unit
+cos_alpha
+alpha_rad
+beta_rad
+candidate_position_m
+```
+
+All vector quantities are ECEF-based `Vector3` objects.
+
+---
+
+# 6. Core geometry definition
+
+## 6.1 Midpoint LOS and local x-axis
+
+The paper defines the \(x\)-axis using the Tx/Rx positions at the midpoint of the 10-s interval.
+
+Implementation should use:
+
+```text
+los_geometry.midpoint_los(window)
+```
+
+This returns the LOS unit vector according to the project’s established sign convention.
+
+The `BpPlaneBuilder` should not independently redefine the sign convention. This avoids inconsistency with `LosGeometry.candidate_position()` and `LosGeometry.geolocation_from_distance()`.
+
+Set:
+
+\[
+\hat{x} = \hat{n}_{LOS}
+\]
+
+In `BpPlaneGeometry`:
+
+```text
+los_unit = x_axis = midpoint_los(window)
+```
+
+The sign must be consistent with `LosGeometry`. The paper’s final geolocation equation has a sign ambiguity noted in `config.yaml`, so this module should rely on `LosGeometry` as the single source of truth.
+
+---
+
+## 6.2 Candidate point at \(L_{\mathrm{mf}}\)
+
+For a magnetic-field candidate distance:
+
+\[
+L_{\mathrm{mf}}
+\]
+
+compute the candidate point along the LOS using:
+
+```text
+los_geometry.candidate_position(window, l_mf_km)
+```
+
+This point is where IGRF-13 is evaluated.
+
+This returned point becomes:
+
+```text
+candidate_position_m
+```
+
+in `BpPlaneGeometry`.
+
+The phase-screen plane for this candidate is perpendicular to `x_axis` and passes through `candidate_position_m`.
+
+---
+
+## 6.3 Magnetic-field vector
+
+Evaluate magnetic field at the candidate point and midpoint time:
+
+```text
+magnetic_model.field_unit(window.mid_time, candidate_position_m)
+```
+
+The paper uses IGRF-13 and only the magnetic-field direction.
+
+From `config.yaml`:
+
+```yaml
+data:
+  magnetic_field:
+    model: "IGRF-13"
+    use_field_direction_only: true
+```
+
+Let:
+
+\[
+\hat{H}
+\]
+
+be the unit magnetic-field vector.
+
+Store it as:
+
+```text
+magnetic_unit
+```
+
+---
+
+# 7. Defining the BP plane axes
+
+## 7.1 Phase-screen plane
+
+The phase-screen plane is perpendicular to the LOS direction.
+
+Its normal vector is:
+
+\[
+\hat{x}
+\]
+
+Any vector \(\mathbf{v}\) can be projected into the phase-screen plane by removing its \(x\)-component:
+
+\[
+\mathbf{v}_{\perp x}
+=
+\mathbf{v}
+-
+(\mathbf{v}\cdot \hat{x})\hat{x}
+\]
+
+---
+
+## 7.2 Project magnetic field onto the phase screen
+
+Project the IGRF field direction into the phase-screen plane:
+
+\[
+\mathbf{H}_{ps}
+=
+\hat{H}
+-
+(\hat{H}\cdot \hat{x})\hat{x}
+\]
+
+The paper uses this projected magnetic-field direction to represent the irregularity-alignment direction.
+
+Normalize:
+
+\[
+\hat{y}
+=
+\frac{\mathbf{H}_{ps}}{|\mathbf{H}_{ps}|}
+\]
+
+This becomes:
+
+```text
+y_axis
+```
+
+Physical meaning:
+
+- `y_axis` is the direction of elongated field-aligned irregularities projected onto the phase screen.
+- The BP plane must be perpendicular to this direction.
+
+---
+
+## 7.3 Degenerate magnetic-field geometry
+
+If:
+
+\[
+|\mathbf{H}_{ps}| \approx 0
+\]
+
+then the magnetic field is nearly parallel to the LOS. In the paper’s notation, this corresponds to \(\beta\) close to \(90^\circ\), and the 3D-to-2D reduction becomes invalid.
+
+The paper discusses this limitation but does not define a final explicit \(\beta\)-threshold. The final listed QC only uses `cos_alpha > 0.1`.
+
+Recommended implementation behavior:
+
+1. Detect near-zero projection norm.
+2. Avoid division by zero.
+3. Mark the geometry as effectively invalid by setting:
+   - `beta_rad ≈ pi / 2`
+   - `cos_alpha = 0.0` or `NaN`, depending on downstream handling
+4. If a fallback axis is required to construct `BpPlaneGeometry`, choose a deterministic axis perpendicular to `x_axis`, but ensure the result will fail later QC or be treated as invalid by `BackpropProcessor`.
+
+Because `BpPlaneGeometry` has no explicit validity flag, the cleanest practical approach is:
+
+- either raise a controlled exception that `BackpropProcessor` catches, or
+- return a geometry with `cos_alpha = 0.0`, causing rejection by final QC.
+
+The exact choice should be consistent with the rest of the implementation.
+
+---
+
+## 7.4 Define the z-axis
+
+The BP plane is perpendicular to the irregularity direction `y_axis` and contains the LOS direction `x_axis`.
+
+Therefore, the third axis is:
+
+\[
+\hat{z}
+=
+\frac{\hat{x} \times \hat{y}}
+{|\hat{x} \times \hat{y}|}
+\]
+
+Store this as:
+
+```text
+z_axis
+```
+
+The local axes should satisfy:
+
+\[
+\hat{x}\cdot \hat{y} = 0
+\]
+
+\[
+\hat{x}\cdot \hat{z} = 0
+\]
+
+\[
+\hat{y}\cdot \hat{z} = 0
+\]
+
+and approximately:
+
+\[
+|\hat{x}| = |\hat{y}| = |\hat{z}| = 1
+\]
+
+The sign of `z_axis` is not physically important for \(V(L)\), because the scan-angle calculation uses absolute projection. However, using a consistent right-handed convention is important for reproducibility and debugging.
+
+---
+
+# 8. Beta angle diagnostic
+
+The paper defines \(\beta\) as the angle between the magnetic-field vector and its projection onto the phase-screen plane.
+
+Since `y_axis` is the normalized projection of the magnetic field onto the phase screen:
+
+\[
+\cos\beta = |\hat{H}\cdot \hat{y}|
+\]
+
+Equivalently:
+
+\[
+\cos\beta = |\mathbf{H}_{ps}|
+\]
+
+because \(\hat{H}\) is unit length.
+
+Then:
+
+\[
+\beta = \arccos(\mathrm{clip}(\cos\beta, 0, 1))
+\]
+
+Store:
+
+```text
+beta_rad
+```
+
+Interpretation:
+
+- \(\beta \approx 0\): magnetic field lies mostly in the phase-screen plane.
+- \(\beta \approx \pi/2\): magnetic field is nearly parallel to LOS, making 2D BP invalid.
+
+The paper does not apply a final beta QC threshold, so this field is diagnostic.
+
+---
+
+# 9. Scan angle \(\alpha\)
+
+## 9.1 Physical definition
+
+The scan angle \(\alpha\) is the angle between:
+
+1. the LOS scan trajectory on the phase screen, and
+2. the BP plane.
+
+Because the scan trajectory lies in the phase-screen plane, and the BP plane intersects the phase screen along the `z_axis`, this is equivalent to the angle between:
+
+- the scan trajectory direction in the phase screen, and
+- `z_axis`.
+
+Therefore:
+
+\[
+\cos\alpha
+=
+|\hat{s}\cdot \hat{z}|
+\]
+
+where \(\hat{s}\) is the unit scan direction on the phase screen.
+
+Interpretation:
+
+- \(\cos\alpha \approx 1\): LOS scans across irregularities in the BP-sensitive direction.
+- \(\cos\alpha \approx 0\): LOS scans along irregularities, poor localization.
+- Final QC rejects cases with:
+
+\[
+\cos\alpha \leq 0.1
+\]
+
+---
+
+## 9.2 Computing LOS intersections with the candidate phase screen
+
+For each high-rate sample in the 10-s `SignalWindow`, compute where the instantaneous Tx–Rx LOS intersects the candidate phase screen.
+
+Let:
+
+- \(\mathbf{r}_{rx}(t)\): receiver position
+- \(\mathbf{r}_{tx}(t)\): transmitter position
+- \(\mathbf{O}\): `candidate_position_m`
+- \(\hat{x}\): `x_axis`
+
+The candidate phase screen is:
+
+\[
+(\mathbf{r} - \mathbf{O}) \cdot \hat{x} = 0
+\]
+
+Parametrize the instantaneous LOS from receiver to transmitter:
+
+\[
+\mathbf{r}(u)
+=
+\mathbf{r}_{rx}
++
+u(\mathbf{r}_{tx} - \mathbf{r}_{rx})
+\]
+
+Solve for \(u\):
+
+\[
+u
+=
+-
+\frac{(\mathbf{r}_{rx}-\mathbf{O})\cdot \hat{x}}
+{(\mathbf{r}_{tx}-\mathbf{r}_{rx})\cdot \hat{x}}
+\]
+
+Then:
+
+\[
+\mathbf{r}_{s}(t)
+=
+\mathbf{r}_{rx}(t)
++
+u(t)(\mathbf{r}_{tx}(t)-\mathbf{r}_{rx}(t))
+\]
+
+This gives the LOS scan point on the candidate phase screen.
+
+---
+
+## 9.3 Project scan points into the phase-screen coordinates
+
+For each screen-intersection point:
+
+\[
+\Delta\mathbf{r}_s(t)
+=
+\mathbf{r}_s(t) - \mathbf{O}
+\]
+
+Compute coordinates:
+
+\[
+y_s(t) =
+\Delta\mathbf{r}_s(t)\cdot \hat{y}
+\]
+
+\[
+z_s(t) =
+\Delta\mathbf{r}_s(t)\cdot \hat{z}
+\]
+
+The scan trajectory on the phase screen is then represented by the sequence:
+
+\[
+(y_s(t), z_s(t))
+\]
+
+---
+
+## 9.4 Estimate scan direction
+
+The scan direction should be estimated robustly over the 10-s window.
+
+Recommended approach:
+
+1. Convert `window.times` to seconds relative to `window.mid_time`.
+2. Fit a straight line to \(y_s(t)\):
+
+\[
+y_s(t) \approx a_y t + b_y
+\]
+
+3. Fit a straight line to \(z_s(t)\):
+
+\[
+z_s(t) \approx a_z t + b_z
+\]
+
+4. The scan-direction vector in the phase screen is:
+
+\[
+\mathbf{s}_{ps} =
+a_y\hat{y} + a_z\hat{z}
+\]
+
+In phase-screen coordinates, the direction vector is:
+
+\[
+(a_y, a_z)
+\]
+
+Normalize:
+
+\[
+|\mathbf{s}_{ps}| =
+\sqrt{a_y^2 + a_z^2}
+\]
+
+Then:
+
+\[
+\cos\alpha =
+\frac{|a_z|}
+{\sqrt{a_y^2 + a_z^2}}
+\]
+
+and:
+
+\[
+\alpha =
+\arccos(\mathrm{clip}(\cos\alpha, 0, 1))
+\]
+
+This is more stable than using only the first and last sample.
+
+If the scan displacement is too small, then \(\alpha\) is numerically unreliable. In that case, set `cos_alpha` to `0.0` or return an invalid geometry to be rejected downstream.
+
+---
+
+## 9.5 Return value of `compute_scan_angle`
+
+The design specifies:
+
+```text
+compute_scan_angle(window: SignalWindow, plane: BpPlaneGeometry) -> float
+```
+
+The method name implies it should return:
+
+```text
+alpha_rad
+```
+
+Therefore recommended behavior:
+
+- `compute_scan_angle()` returns `alpha_rad`.
+- `build()` computes:
+
+\[
+\cos\alpha = \cos(\alpha)
+\]
+
+However, because `BpPlaneGeometry` also needs `cos_alpha`, the implementation may internally compute both. If only one scalar can be returned publicly, returning `alpha_rad` is most consistent with the method name.
+
+---
+
+# 10. `project_state()` behavior
+
+The design requires:
+
+```text
+project_state(state: StateVector, plane: BpPlaneGeometry) -> tuple
+```
+
+Recommended semantics:
+
+1. Use `plane.candidate_position_m` as the local origin.
+2. Project the ECEF state position onto the BP-plane axes:
+
+\[
+x =
+(\mathbf{r} - \mathbf{O})\cdot \hat{x}
+\]
+
+\[
+z =
+(\mathbf{r} - \mathbf{O})\cdot \hat{z}
+\]
+
+3. Return:
+
+```text
+(x_m, z_m)
+```
+
+This matches the 2D BP coordinate system used by `StationaryCorrector`.
+
+Important caveat:
+
+- `plane.candidate_position_m` corresponds to `l_mf_km`.
+- During the inner BP loop, `StationaryCorrector` evaluates many screen distances \(L\), not just \(L_{\mathrm{mf}}\).
+- For a screen distance \(L\), the screen origin can be obtained by translating along `plane.los_unit`:
+
+\[
+\mathbf{O}_{L}
+=
+\mathbf{O}_{mf}
++
+(L - L_{\mathrm{mf}})\hat{x}
+\]
+
+where distances must be converted from km to m.
+
+Therefore, `project_state()` is most naturally tied to the candidate \(L_{\mathrm{mf}}\) origin. If `StationaryCorrector` needs coordinates relative to another screen distance, it must account for that translation.
+
+This module should document that convention clearly.
+
+---
+
+# 11. `build()` method logic
+
+`build(window, l_mf_km)` should perform the full construction.
+
+Expected sequence:
+
+1. Get midpoint LOS unit vector:
+
+\[
+\hat{x}
+\]
+
+from `los_geometry.midpoint_los(window)`.
+
+2. Compute candidate position:
+
+\[
+\mathbf{O}_{mf}
+\]
+
+from `los_geometry.candidate_position(window, l_mf_km)`.
+
+3. Evaluate IGRF-13 magnetic-field unit vector:
+
+\[
+\hat{H}
+\]
+
+using `magnetic_model.field_unit(window.mid_time, candidate_position_m)`.
+
+4. Project \(\hat{H}\) into the phase-screen plane:
+
+\[
+\mathbf{H}_{ps}
+=
+\hat{H}
+-
+(\hat{H}\cdot\hat{x})\hat{x}
+\]
+
+5. Normalize to create `y_axis`.
+
+6. Compute:
+
+\[
+\hat{z} = \hat{x}\times\hat{y}
+\]
+
+7. Compute beta:
+
+\[
+\beta = \arccos(|\hat{H}\cdot\hat{y}|)
+\]
+
+8. Temporarily construct a `BpPlaneGeometry` object or equivalent internal structure with axes.
+
+9. Compute scan angle \(\alpha\) using `compute_scan_angle(window, plane)`.
+
+10. Compute:
+
+\[
+\cos\alpha = \cos(\alpha)
+\]
+
+or use the directly estimated value from scan-direction projection.
+
+11. Return `BpPlaneGeometry`.
+
+---
+
+# 12. Numerical robustness requirements
+
+This module should defensively handle common numerical issues.
+
+## 12.1 Vector normalization
+
+Before normalizing any vector, check its norm.
+
+Problematic cases:
+
+- zero LOS vector
+- magnetic field unavailable or zero
+- projected magnetic field nearly zero
+- scan trajectory displacement nearly zero
+
+Use small numerical tolerances, but avoid embedding science thresholds not in config.
+
+The final scientific threshold is only:
+
+\[
+\cos\alpha > 0.1
+\]
+
+and belongs in `QualityController`.
+
+---
+
+## 12.2 Clipping inverse-trigonometric inputs
+
+All inputs to `arccos` should be clipped:
+
+\[
+[-1, 1]
+\]
+
+For angles defined using absolute values:
+
+\[
+[0, 1]
+\]
+
+This prevents numerical errors from floating-point roundoff.
+
+---
+
+## 12.3 Sign-insensitive angles
+
+Use absolute values for diagnostic angle cosines where the physical orientation is bidirectional:
+
+\[
+\cos\alpha = |\hat{s}\cdot\hat{z}|
+\]
+
+\[
+\cos\beta = |\hat{H}\cdot\hat{y}|
+\]
+
+The field-aligned irregularity direction has no meaningful sign; reversing `y_axis` should not change the result.
+
+---
+
+# 13. Interaction with downstream modules
+
+## 13.1 `BackpropProcessor`
+
+`BackpropProcessor.compute_d_curve()` calls `build()` for each:
+
+\[
+L_{\mathrm{mf}} = 100, 200, ..., 6000 \text{ km}
+\]
+
+from the configured magnetic-field candidate grid:
+
+```yaml
+back_propagation:
+  magnetic_field_candidate_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+```
+
+Each returned `BpPlaneGeometry` defines the BP orientation for the inner loop over screen distances.
+
+---
+
+## 13.2 `StationaryCorrector`
+
+`StationaryCorrector` uses the BP plane axes to project Tx/Rx states into local \(x,z\) coordinates.
+
+The origin convention must be clear:
+
+- `BpPlaneGeometry.candidate_position_m` is the origin for \(L_{\mathrm{mf}}\).
+- Other screen distances can be represented by translating along `plane.los_unit`.
+
+This is important because the paper’s stationary-transmitter correction depends on local coordinates \((x_1,z_1)\), \((x_2,z_2)\).
+
+---
+
+## 13.3 `QualityController`
+
+`QualityController` uses `cos_alpha` for final QC:
+
+\[
+\cos\alpha > 0.1
+\]
+
+from `config.yaml`.
+
+`bp_plane.py` should not reject on this criterion directly unless geometry is mathematically invalid.
+
+---
+
+# 14. Expected diagnostics
+
+For each `BpPlaneGeometry`, the following diagnostics should be reliable:
+
+| Field | Meaning |
+|---|---|
+| `l_mf_km` | Candidate distance where IGRF was evaluated |
+| `candidate_position_m` | ECEF candidate point |
+| `magnetic_unit` | IGRF-13 magnetic-field direction |
+| `x_axis` | LOS direction |
+| `y_axis` | Projected magnetic-field / irregularity direction |
+| `z_axis` | BP-plane transverse direction |
+| `alpha_rad` | Scan angle |
+| `cos_alpha` | Used for final QC |
+| `beta_rad` | Magnetic-field alignment diagnostic |
+
+These diagnostics are important for reproducing Figure 19-style outputs, especially `cos_alpha(L)`.
+
+---
+
+# 15. Testing strategy for this module
+
+Unit tests should use synthetic geometries where the expected scan angle is known.
+
+## 15.1 Axis orthonormality
+
+Construct simple Tx/Rx geometry and magnetic field.
+
+Verify:
+
+\[
+|\hat{x}| \approx 1
+\]
+
+\[
+|\hat{y}| \approx 1
+\]
+
+\[
+|\hat{z}| \approx 1
+\]
+
+\[
+\hat{x}\cdot\hat{y} \approx 0
+\]
+
+\[
+\hat{x}\cdot\hat{z} \approx 0
+\]
+
+\[
+\hat{y}\cdot\hat{z} \approx 0
+\]
+
+---
+
+## 15.2 Scan exactly across irregularities
+
+If the scan trajectory is along `z_axis`, then:
+
+\[
+\alpha \approx 0
+\]
+
+\[
+\cos\alpha \approx 1
+\]
+
+---
+
+## 15.3 Scan along irregularities
+
+If the scan trajectory is along `y_axis`, then:
+
+\[
+\alpha \approx 90^\circ
+\]
+
+\[
+\cos\alpha \approx 0
+\]
+
+This should later fail the configured final QC threshold:
+
+\[
+\cos\alpha > 0.1
+\]
+
+---
+
+## 15.4 Magnetic field parallel to LOS
+
+If:
+
+\[
+\hat{H} \parallel \hat{x}
+\]
+
+then:
+
+\[
+|\mathbf{H}_{ps}| \approx 0
+\]
+
+Expected behavior:
+
+- no division by zero,
+- `beta_rad` near \(\pi/2\),
+- geometry marked invalid or assigned `cos_alpha = 0.0`.
+
+---
+
+## 15.5 Reversal invariance
+
+Reverse the magnetic-field vector:
+
+\[
+\hat{H} \rightarrow -\hat{H}
+\]
+
+The BP plane should be physically equivalent.
+
+Expected:
+
+- `cos_alpha` unchanged,
+- `alpha_rad` unchanged,
+- `beta_rad` unchanged.
+
+Signs of `y_axis` and `z_axis` may flip, but scalar diagnostics should not.
+
+---
+
+# 16. Key implementation constraints
+
+1. Do not hard-code candidate distance grid values in this file.
+   - Use the `l_mf_km` argument supplied by `BackpropProcessor`.
+
+2. Do not hard-code QC thresholds in this file.
+   - `cos_alpha_threshold: 0.1` belongs to `QualityController`.
+
+3. Use IGRF-13 through `MagneticFieldModel`.
+   - Do not call `ppigrf` directly from this module if `MagneticFieldModel` already abstracts it.
+
+4. Keep units explicit:
+   - `l_mf_km` is kilometers.
+   - ECEF coordinates and vector projections are meters.
+   - Angles are radians.
+
+5. Preserve the design interface.
+   - Do not add public methods required by downstream modules.
+   - Do not change `BpPlaneGeometry`.
+
+6. Use `LosGeometry` for LOS sign convention.
+   - Do not independently reinterpret the paper’s ambiguous final vector formula.
+
+---
+
+# 17. Summary of intended module behavior
+
+`src/geometry/bp_plane.py` should convert each 10-s COSMIC-2 observation window and candidate magnetic-field distance into a fully specified 2D BP geometry:
+
+\[
+\{\hat{x}, \hat{y}, \hat{z}, \alpha, \beta\}
+\]
+
+where:
+
+- \(\hat{x}\) is the midpoint LOS direction,
+- \(\hat{y}\) is the projected IGRF-13 magnetic-field direction on the phase screen,
+- \(\hat{z}\) defines the BP plane transverse coordinate,
+- \(\alpha\) measures how the LOS scans through the irregularities,
+- \(\beta\) diagnoses whether the magnetic field is too aligned with LOS.
+
+The output `BpPlaneGeometry` is then used by the real-data BP pipeline to compute \(V(L)\), \(L_0\), and ultimately the zero crossing of:
+
+\[
+D(L_{\mathrm{mf}}) = L_0 - L_{\mathrm{mf}}
+\]
+
+Faithful implementation of this module is essential because errors in BP-plane orientation directly cause geolocation errors, as described in the paper by:
+
+\[
+\Delta L = 2L\tan(\alpha)\Delta\alpha
+\]

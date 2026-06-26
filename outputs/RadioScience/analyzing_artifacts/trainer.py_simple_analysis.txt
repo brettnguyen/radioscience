@@ -1,0 +1,125 @@
+Below is a detailed logic analysis for the Trainer class (in trainer.py) that explains how we will process each 10‑second data interval. The Trainer is responsible for taking a BPModel instance and a list of preprocessed intervals (each represented as a dictionary containing the observed signal, timestamps, Tx/Rx geometry, and quality-related metadata) and then producing geolocation results. The following analysis breaks down the end‐to‐end process, explaining each step and how it ties back to the paper, plan, design, and configuration (config.yaml).
+
+──────────────────────────────
+1. Preliminary Checks and Setup
+
+• For each 10‑second data interval obtained from DatasetLoader, first verify that the “basic” quality conditions are met:
+ – Check that the phase scintillation index (σϕ) exceeds the qc.sigma_phi_threshold (0.25 rad from config).
+ – Verify that the LOS tangent point is higher than qc.LOS_tangent_min_km (150 km by config).
+ – If these conditions are not met, the interval is skipped.
+
+• Extract the required geometry information from the interval. This includes:
+ – Tx and Rx positions (and, if available, velocities) for the duration of the interval.
+ – Other metadata such as SNR, timestamps, etc.
+
+──────────────────────────────
+2. Geometry Correction
+
+• Call the BPModel.apply_geometry_corrections(signal, tx, rx) method:
+ – This method will use the IGRF-13 based magnetic field orientation together with the Tx/Rx positions.
+ – The Tx/Rx correction is applied using the correction option specified by config.tx_rx_correction.option (Option 1: keep x₂ unchanged; Option 2: reposition to a fixed mid‐point).
+ – The goal is to “project” the observed (nonstationary) signal onto a common (approximately stationary) BP plane.
+ – Note: any curvature correction (adding the quadratic term) is also applied here so that the effective wavefront behaves like a plane wave.
+
+• The output is a “corrected” signal (and associated geometric vectors) that will be used in the BP integration.
+
+──────────────────────────────
+3. Nested Loop Structure for BP Integration
+
+The detection of the geolocation is done via a two‐nested loop mechanism:
+ A. Outer Loop – Varying the BP Plane Orientation (L_mf loop):
+  – For each candidate “magnetic field reference” distance L_mf (with sampling step given by bp_plane.L_mf_step_km, e.g., 100 km), we define a different BP plane.
+  – For each L_mf value, recalculate (or set) the BP plane orientation using the magnetic field vector at that distance.
+  – This loop is crucial because the orientation (and thus the scan angle α) changes along the LOS, producing a function D(L_mf) defined as follows:
+    D = L₀ − L_mf      (where L₀ is the location of the minimum computed by the inner loop).
+
+ B. Inner Loop – BP Integration over Candidate Distances L:
+  – For the current BP plane set by a given L_mf, define the range of trial distances L from integration.L_min_km to integration.L_max_km in steps of integration.L_step_km.
+  – For each L in this range, call BPModel.back_propagation(corrected_signal, L) and/or use BPModel.compute_V(corrected_signal, L) to compute the normalized amplitude variance V(L).
+  – (Optionally, apply a smoothing function such as a second-order sliding polynomial regression over a 1000 km window on the computed V(L) array to reduce the effect of noise.)
+  – Identify the global minimum V₀ in V(L) and record its corresponding distance L₀.
+  – For that same V(L) curve, determine the “monotonic” end-points L₁ and L₂. These are the distances on each side of L₀ where the variance stops increasing monotonically. (They must be at least two steps away to avoid end-effects.)
+  – Compute the quality metric Q = min(V(L₀−L₁), V(L₀+L₂)) / V₀.
+  – Also check that the computed cos(α) from the geometry (or retrieved by BPModel during BP) exceeds qc.cos_alpha_min (i.e., 0.1).
+
+──────────────────────────────
+4. Detection of the Correct BP Plane Orientation (Zero Crossing)
+
+• For each L_mf tried in the outer loop, you will have a candidate pair (L_mf, L₀) and can compute the difference:
+  D = L₀ − L_mf
+
+• Store the results from every L_mf iteration (namely, the candidate L₀, the computed D, the quality metric Q, and the computed cos(α)).
+
+• After finishing the outer loop:
+ – Scan through the array of computed D values and search for sign changes (i.e., places where D transitions from positive to negative or vice versa).
+ – Use linear interpolation on adjacent L_mf points to determine the zero crossing where D = 0.
+ – If a unique zero crossing is found, that defines the correct L_mf (and its associated L₀) that satisfy the condition L₀ = L_mf. This “crossing” is assumed to correspond to the true location of the plasma irregularities.
+ – If more than one zero crossing is found (i.e., multi-valued geolocations) or none are found, reject the interval (as multi-valued solutions are discarded per the paper).
+
+• Optionally, compute the local slope:
+  M = |∆D/∆L| (from the two adjacent L_mf values around the crossing)
+  This can serve as an additional error or uncertainty estimate.
+
+──────────────────────────────
+5. Quality Control and Geolocation Computation
+
+• For the candidate geolocation (from the zero crossing):
+ – Verify that the Q metric >= qc.Q_threshold (e.g., 1.2).
+ – Verify that the computed cos(α) meets the minimum requirement (> 0.1).
+ – Confirm that the minimum (L₀) is not at or too near the boundaries of the BP integration range (to avoid edge effects).
+
+• If the candidate fails any quality check (or is multi-valued), mark the interval as invalid and do not include a geolocation.
+
+• Otherwise, compute the geolocation vector:
+  R_geo = R_rx + L₀ · n_rt
+  where:
+   – R_rx is the receiver’s geocentric position (normally as determined from the 10‑s interval, e.g., the midpoint position).
+   – n_rt is the unit vector from the Rx toward Tx computed from the mid‐point geometry.
+ – This follows the paper’s prescription for converting the distance L (from Rx to irregularities) to a geolocated position.
+
+• Store the following information in a results dictionary for the interval:
+ – Geolocation vector R_geo (latitude, longitude, height)
+ – L₀ (the computed propagation distance at the global minimum)
+ – The quality metric Q
+ – The slope M (if computed)
+ – A flag for “multi-valued” (if applicable) and/or “valid” (for passing all checks)
+ – Any additional metadata from the interval (e.g., Tx/Rx positions used, BP plane orientation)
+
+──────────────────────────────
+6. Loop Completion and Output
+
+• Process each 10‑s interval in the data list in the manner described.
+• Collect all valid geolocation results into a single list.
+• Return or output this list so that the main.py (or the Evaluation class) can perform statistical analyses and generate visualizations (such as monthly maps and L1 vs L2 comparisons).
+
+──────────────────────────────
+7. Additional Considerations
+
+• Parameterization:  
+ – All key parameters (BP integration range, step sizes, sigma_phi thresholds, Q threshold, Tx/Rx correction option, L_mf step, etc.) must be read from the config.yaml via the configuration dictionary.
+ – This makes it easier to tune the processing (and document any assumptions made due to ambiguities in numerical integration or correction strategy).
+
+• Error Handling and Logging:  
+ – Use try/except blocks to capture any numerical issues (for example, if an inner loop fails to locate a global minimum or if a zero crossing is ambiguous).
+ – Log warnings for intervals that are rejected due to quality or multi-valued geolocation detections.
+
+• Modularity:  
+ – Keep the nested loops (outer L_mf and inner L) clearly separated so that adjustments to the BP plane selection are isolated from the BP integration procedure.
+ – If needed, “helper” utility functions for monotonic segment detection or smoothing V(L) should be factored out for clarity.
+
+──────────────────────────────
+Summary
+
+The Trainer class’s logic performs the following for each 10‑second interval:
+1. Validates the interval using σϕ and LOS tangent filters.
+2. Applies geometry corrections to the observed signal according to Tx/Rx corrections and BP plane projection.
+3. Runs a nested loop:
+ – The inner loop computes V(L) over the BP integration distance range for a fixed BP plane orientation.
+ – The outer loop varies the BP plane orientation (through different L_mf values) to build a function D(L_mf) = L₀ – L_mf.
+4. Identifies a unique zero crossing in D(L_mf) and computes quality metrics (Q, cos(α), edge checks, and slope M).
+5. If all quality checks pass and a unique geolocation is detected, computes the geolocation vector R_geo.
+6. Outputs the results along with quality flags and associated uncertainty metrics.
+
+This logic aligns with the methodology described in the paper and the provided experimental plan, ensuring that the implementation stays true to the prescribed back propagation geolocation method while remaining flexible to parameter tuning via the configuration file.
+
+This concludes the logic analysis for trainer.py.

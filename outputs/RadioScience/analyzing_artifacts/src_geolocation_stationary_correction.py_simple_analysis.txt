@@ -1,0 +1,1133 @@
+## Logic Analysis: `src/geolocation/stationary_correction.py`
+
+### 1. Purpose of this module
+
+`src/geolocation/stationary_correction.py` implements the real-observation geometry correction described in Section 3 of the paper. Its role is to transform the observed COSMIC-2 high-rate complex signal into a form suitable for 2D back propagation.
+
+For each candidate back-propagation screen distance \(L\), this module must:
+
+1. Project Tx/Rx positions into the BP plane.
+2. Place the candidate phase screen at \(x=0\).
+3. Correct moving-GNSS-transmitter geometry so the wavefield is approximately stationary.
+4. Correct the observed phase/path for the modified Tx/Rx geometry.
+5. Keep amplitude unchanged.
+6. Apply the finite-wavefront-curvature correction.
+7. Interpolate the corrected signal onto a uniform \(z\)-grid for FFT-based propagation.
+
+This module is called inside the inner BP loop of `BackpropProcessor`, for every candidate screen distance in the configured BP distance grid.
+
+From `config.yaml`, the relevant paper-aligned settings are:
+
+```yaml
+back_propagation:
+  distance_grid:
+    min_km: 100
+    max_km: 6000
+    step_km: 100
+
+  stationary_transmitter_correction:
+    enabled: true
+    default_option: 2
+
+  wavefront_curvature_correction:
+    enabled: true
+    correction_path_term: "z^2 * tan(alpha)^2 / (2R)"
+
+  propagation_method_default: "fft_plane_wave"
+```
+
+The configured default is therefore stationary-transmitter correction **Option 2**, which is the option suitable for FFT plane-wave back propagation after interpolation to a uniform \(z\)-grid.
+
+---
+
+## 2. Required class and public interface
+
+The design requires this public class and methods:
+
+```text
+class StationaryCorrector {
+    +__init__(config: AppConfig)
+    +correct(window: SignalWindow, plane: BpPlaneGeometry, screen_distance_km: float, option: int) CorrectedSignal
+    +apply_tx_rx_correction(window: SignalWindow, plane: BpPlaneGeometry, screen_distance_km: float, option: int) tuple
+    +apply_phase_correction(phase_rad: ndarray, original_path_m: ndarray, corrected_path_m: ndarray, wavelength_m: float) ndarray
+    +apply_curvature_correction(phase_rad: ndarray, z_m: ndarray, alpha_rad: float, radius_m: float, wavelength_m: float) ndarray
+}
+```
+
+No additional public methods should be required. Helper functions, if implemented, should remain private.
+
+The output must be a `CorrectedSignal`:
+
+```text
+CorrectedSignal {
+    +float screen_distance_km
+    +ndarray z_m
+    +ndarray complex_signal
+    +ndarray amplitude
+    +ndarray phase_rad
+    +float curvature_radius_m
+}
+```
+
+---
+
+## 3. Scientific background from the paper
+
+The paper explains that for real GNSS-LEO geometry, the observed wavefield is not strictly stationary because the GNSS transmitter moves during the 10-s interval.
+
+The correction is based on Figure 14 of the paper.
+
+For each sample in the 10-s window, Tx and Rx positions are projected into the 2D BP plane:
+
+- transmitter:
+  \[
+  (x_1, z_1)
+  \]
+
+- receiver:
+  \[
+  (x_2, z_2)
+  \]
+
+The candidate phase screen is placed at:
+
+\[
+x = 0
+\]
+
+The line from actual Tx to actual Rx crosses the phase screen at height:
+
+\[
+z_s =
+z_1 -
+x_1
+\frac{z_2-z_1}{x_2-x_1}
+\]
+
+The stationary transmitter is fixed at its midpoint position:
+
+\[
+(x_{10}, 0)
+\]
+
+The corrected receiver coordinate is:
+
+\[
+z_2' =
+z_s
+\left(
+1 - \frac{x_2'}{x_{10}}
+\right)
+\]
+
+The paper defines two options:
+
+### Option 1
+
+\[
+x_2' = x_2
+\]
+
+This preserves the original receiver \(x\)-coordinate and is recommended for the Kirchhoff diffraction integral.
+
+### Option 2
+
+\[
+x_2' = x_{20}
+\]
+
+where \(x_{20}\) is the receiver \(x\)-coordinate at the midpoint of the interval.
+
+This places the corrected receiver trajectory on a plane perpendicular to propagation and is recommended for FFT plane-wave propagation.
+
+The reproduction design defaults to **Option 2**, consistent with:
+
+```yaml
+back_propagation:
+  stationary_transmitter_correction:
+    default_option: 2
+  propagation_method_default: "fft_plane_wave"
+```
+
+---
+
+## 4. Coordinate conventions
+
+### 4.1 Input coordinates
+
+`SignalWindow.rx_states` and `SignalWindow.tx_states` contain ECEF positions in meters.
+
+`BpPlaneGeometry` provides the BP plane orientation:
+
+```text
+BpPlaneGeometry {
+    +Vector3 los_unit
+    +Vector3 x_axis
+    +Vector3 y_axis
+    +Vector3 z_axis
+    +float cos_alpha
+    +float alpha_rad
+    ...
+}
+```
+
+The module should treat:
+
+- `plane.x_axis` as the local LOS/BP propagation axis.
+- `plane.z_axis` as the transverse axis in the BP plane.
+- The candidate phase screen as lying at \(x=0\).
+- The corrected signal as a function of \(z\).
+
+### 4.2 Important distinction: `l_mf_km` versus `screen_distance_km`
+
+`BpPlaneGeometry.l_mf_km` is the distance at which the magnetic field was evaluated to define the BP plane.
+
+`screen_distance_km` is the candidate screen distance used in the inner BP loop.
+
+These are not necessarily equal.
+
+Therefore, `StationaryCorrector` must not blindly use `plane.candidate_position_m` as the screen origin unless:
+
+\[
+L_{\mathrm{mf}} = L
+\]
+
+Instead, for every call to `correct(...)`, the screen origin should be recomputed using `screen_distance_km` and the midpoint Tx/Rx geometry.
+
+---
+
+## 5. Screen-origin construction
+
+For a given `screen_distance_km`, define a screen origin point on the midpoint LOS.
+
+Let:
+
+- \(\mathbf{R}_{rx,0}\): midpoint receiver ECEF position.
+- \(\mathbf{R}_{tx,0}\): midpoint transmitter ECEF position.
+- \(\hat{\mathbf{x}}\): `plane.x_axis`.
+
+Because the sign convention of the published final geolocation vector is explicitly marked unclear in `config.yaml`, this module should avoid assuming that `plane.x_axis` always points from Rx to Tx.
+
+Instead:
+
+1. Compute the physical midpoint direction from receiver to transmitter:
+
+\[
+\mathbf{d}_{rx \rightarrow tx}
+=
+\mathbf{R}_{tx,0} - \mathbf{R}_{rx,0}
+\]
+
+2. Determine the sign of `plane.x_axis` relative to that direction:
+
+\[
+s =
+\operatorname{sign}
+\left(
+\mathbf{d}_{rx \rightarrow tx}
+\cdot
+\hat{\mathbf{x}}
+\right)
+\]
+
+3. Define the screen origin:
+
+\[
+\mathbf{R}_{screen}
+=
+\mathbf{R}_{rx,0}
++
+s \, L \, \hat{\mathbf{x}}
+\]
+
+where:
+
+\[
+L = 1000 \times \texttt{screen_distance_km}
+\]
+
+This guarantees that the candidate screen lies between Rx and Tx along the LOS, provided the configured distance is physically valid.
+
+The configured BP range is:
+
+```yaml
+back_propagation:
+  distance_grid:
+    min_km: 100
+    max_km: 6000
+```
+
+The module should still guard against pathological geometry where the Tx-Rx midpoint range is shorter than the requested screen distance.
+
+---
+
+## 6. Projection into the BP plane
+
+For each sample \(i\), define coordinates relative to the screen origin:
+
+\[
+\Delta \mathbf{R}_{tx,i}
+=
+\mathbf{R}_{tx,i}
+-
+\mathbf{R}_{screen}
+\]
+
+\[
+\Delta \mathbf{R}_{rx,i}
+=
+\mathbf{R}_{rx,i}
+-
+\mathbf{R}_{screen}
+\]
+
+Then project into the local BP plane:
+
+\[
+x_{1,i}
+=
+\Delta \mathbf{R}_{tx,i}
+\cdot
+\hat{\mathbf{x}}
+\]
+
+\[
+z_{1,i}
+=
+\Delta \mathbf{R}_{tx,i}
+\cdot
+\hat{\mathbf{z}}
+\]
+
+\[
+x_{2,i}
+=
+\Delta \mathbf{R}_{rx,i}
+\cdot
+\hat{\mathbf{x}}
+\]
+
+\[
+z_{2,i}
+=
+\Delta \mathbf{R}_{rx,i}
+\cdot
+\hat{\mathbf{z}}
+\]
+
+The midpoint coordinates are:
+
+\[
+x_{10}
+=
+x_1(t_0)
+\]
+
+\[
+x_{20}
+=
+x_2(t_0)
+\]
+
+At the midpoint, because the coordinate origin is placed on the midpoint LOS screen crossing, \(z_1\) and \(z_2\) should be close to zero. Small numerical deviations are acceptable.
+
+---
+
+## 7. `apply_tx_rx_correction(...)`
+
+### 7.1 Responsibility
+
+This method performs the geometric correction only. It should compute the original and corrected projected trajectories and path lengths needed for phase correction.
+
+Inputs:
+
+```text
+window: SignalWindow
+plane: BpPlaneGeometry
+screen_distance_km: float
+option: int
+```
+
+Output:
+
+```text
+tuple
+```
+
+The design does not specify the tuple structure. Internally, the tuple should contain enough information for `correct(...)` to proceed, for example:
+
+```text
+(
+    z2_prime_m,
+    original_path_m,
+    corrected_path_m,
+    x2_prime_m,
+    x10_m,
+    x20_m,
+    curvature_radius_m
+)
+```
+
+The exact tuple content can be implementation-specific, but it must remain internal to this class.
+
+### 7.2 Screen crossing height
+
+Use the paper equation:
+
+\[
+z_s =
+z_1 -
+x_1
+\frac{z_2-z_1}{x_2-x_1}
+\]
+
+This must be computed sample-wise.
+
+Guard against:
+
+- \(x_2 - x_1 \approx 0\)
+- NaN/Inf state vectors
+- missing Tx/Rx states
+- mismatched Tx/Rx sample counts
+
+### 7.3 Option 1
+
+If:
+
+```text
+option == 1
+```
+
+then:
+
+\[
+x_2' = x_2
+\]
+
+This option is physically intended for arbitrary-trajectory Kirchhoff propagation.
+
+Because the default pipeline uses FFT plane-wave propagation, Option 1 should be supported but should be clearly documented as not the default FFT path.
+
+### 7.4 Option 2
+
+If:
+
+```text
+option == 2
+```
+
+then:
+
+\[
+x_2' = x_{20}
+\]
+
+for every sample.
+
+This creates a corrected receiver trajectory on a constant-\(x\) plane.
+
+This is the paper-compatible option for FFT plane-wave BP and is the configured default:
+
+```yaml
+back_propagation:
+  stationary_transmitter_correction:
+    default_option: 2
+```
+
+### 7.5 Corrected receiver height
+
+For both options:
+
+\[
+z_2'
+=
+z_s
+\left(
+1 - \frac{x_2'}{x_{10}}
+\right)
+\]
+
+Guard against:
+
+\[
+x_{10} \approx 0
+\]
+
+which would imply the transmitter is near the candidate screen, physically invalid for the COSMIC-2 GNSS-LEO geometry.
+
+### 7.6 Original and corrected path lengths
+
+The paper defines the original projected Tx-Rx path length:
+
+\[
+L_{tr}
+=
+\sqrt{
+(x_2 - x_1)^2
++
+(z_2 - z_1)^2
+}
+\]
+
+The corrected path length is:
+
+\[
+L'_{tr}
+=
+\sqrt{
+(x_2' - x_{10})^2
++
+(z_2')^2
+}
+\]
+
+These are 2D BP-plane path lengths, consistent with the paper’s reduced geometry.
+
+The curvature radius \(R\) used later should be the midpoint Tx-Rx range. The paper describes \(R\) as the finite Tx-Rx distance. A stable implementation should use:
+
+\[
+R =
+\left\|
+\mathbf{R}_{tx,0}
+-
+\mathbf{R}_{rx,0}
+\right\|
+\]
+
+---
+
+## 8. `apply_phase_correction(...)`
+
+### 8.1 Paper equation
+
+The paper defines the observed excess path:
+
+\[
+S_{\mathrm{exc}}
+=
+S
+-
+L_{tr}
+\]
+
+Then the corrected path/phase quantity is:
+
+\[
+S'
+=
+S_{\mathrm{exc}}
++
+L'_{tr}
+\]
+
+In radians, using:
+
+\[
+k = \frac{2\pi}{\lambda}
+\]
+
+this becomes:
+
+\[
+\phi'
+=
+\phi
+-
+k L_{tr}
++
+k L'_{tr}
+\]
+
+or:
+
+\[
+\phi'
+=
+\phi
++
+k
+\left(
+L'_{tr}
+-
+L_{tr}
+\right)
+\]
+
+Therefore:
+
+```text
+phase_corrected_rad =
+phase_rad + k * (corrected_path_m - original_path_m)
+```
+
+### 8.2 Wavelength handling
+
+The design method signature requires:
+
+```text
+apply_phase_correction(
+    phase_rad,
+    original_path_m,
+    corrected_path_m,
+    wavelength_m
+)
+```
+
+However, the public `correct(...)` interface does not include `wavelength_m`.
+
+Therefore, `correct(...)` must obtain the wavelength internally in a design-compatible way, most likely from:
+
+- `window.constellation`
+- `window.signal_name`
+- constants in `src/core/constants.py`
+
+This must be consistent with the wavelength used by `BackpropProcessor` and `FftPropagator`.
+
+Relevant configured signal information:
+
+```yaml
+signals:
+  primary_signal: "L1"
+
+synthetic_experiments:
+  wavelength:
+    default_signal: "L1"
+```
+
+The real-data module must support at least L1 and L2/L2C, because the paper compares L1 and L2 geolocations.
+
+### 8.3 Important phase convention warning
+
+This module should not detrend or unwrap phase itself. It should use `window.phase_rad` as supplied by `SignalPreprocessor`.
+
+For paper fidelity, BP should use the connected high-rate phase suitable for constructing the complex RO signal. The exact CDAAC phase convention is listed as unclear in `config.yaml`:
+
+```yaml
+unclear_from_paper:
+  - "Exact COSMIC-2 HR data field names and preprocessing state."
+  - "Exact phase detrending method before sigma_phi calculation."
+```
+
+Therefore, implementation should document whether `window.phase_rad` is:
+
+1. connected carrier phase,
+2. excess phase,
+3. detrended scintillation phase,
+4. or product-specific corrected phase.
+
+The path correction above assumes the phase convention is compatible with the paper’s \(S - L_{tr}\) formulation.
+
+---
+
+## 9. `apply_curvature_correction(...)`
+
+### 9.1 Paper correction
+
+Projection into the BP plane assumes an incident plane wave, but the actual Tx wavefront is spherical.
+
+The paper states that projection changes the wavefront curvature radius from:
+
+\[
+R
+\]
+
+to:
+
+\[
+R_1 = R\cos^2\alpha
+\]
+
+To correct this, add the quadratic path term:
+
+\[
+\Delta S_{\mathrm{curv}}
+=
+\frac{
+z^2 \tan^2 \alpha
+}{
+2R
+}
+\]
+
+The configuration explicitly records this:
+
+```yaml
+back_propagation:
+  wavefront_curvature_correction:
+    enabled: true
+    correction_path_term: "z^2 * tan(alpha)^2 / (2R)"
+```
+
+In radians:
+
+\[
+\Delta \phi_{\mathrm{curv}}
+=
+k
+\frac{
+z^2 \tan^2 \alpha
+}{
+2R
+}
+\]
+
+Therefore:
+
+```text
+phase_curvature_corrected =
+phase_rad + k * z_m**2 * tan(alpha_rad)**2 / (2 * radius_m)
+```
+
+### 9.2 Numerical guard for large scan angles
+
+Final QC rejects cases with:
+
+```yaml
+back_propagation:
+  quality_control:
+    cos_alpha_threshold: 0.1
+```
+
+When \(\cos\alpha\) is very small, \(\tan\alpha\) becomes very large. Although such cases are rejected later, the correction should still avoid numerical overflow or invalid values.
+
+Implementation should guard against:
+
+- nonfinite `alpha_rad`
+- nonfinite `tan(alpha_rad)`
+- zero or negative `radius_m`
+
+---
+
+## 10. Interpolation onto a uniform \(z\)-grid
+
+### 10.1 Why interpolation is needed
+
+For FFT plane-wave propagation, `FftPropagator.backpropagate_2d(...)` expects the complex signal on a regularly sampled spatial coordinate:
+
+```text
+field_z: ndarray
+z_m: ndarray
+distance_m: float
+```
+
+Option 2 gives a corrected receiver trajectory with constant \(x_2' = x_{20}\), but the corrected \(z_2'\) samples are generally not exactly uniformly spaced.
+
+Therefore, `correct(...)` must interpolate the corrected complex signal onto a uniform \(z\)-grid.
+
+### 10.2 Grid spacing
+
+The paper does not specify a real-data interpolation grid spacing.
+
+Therefore, this module should not hard-code a fixed spatial step.
+
+Instead, derive the uniform grid spacing from the corrected observed samples, for example using the median spacing of sorted \(z_2'\):
+
+\[
+\Delta z =
+\operatorname{median}
+\left(
+\left|
+z'_{i+1} - z'_i
+\right|
+\right)
+\]
+
+This respects the COSMIC-2 sampling information in `config.yaml`:
+
+```yaml
+data:
+  cosmic2:
+    sampling_rates_hz:
+      gps: 50
+      glonass: 100
+```
+
+and avoids inventing an unconfigured real-data grid.
+
+### 10.3 Sorting and duplicate handling
+
+Before interpolation:
+
+1. Remove NaN/Inf samples.
+2. Sort by \(z_2'\).
+3. Remove or average duplicate \(z_2'\) values.
+4. Require enough valid samples for interpolation.
+
+### 10.4 Complex interpolation
+
+The corrected complex signal is:
+
+\[
+u'(z_2')
+=
+A'(z_2')
+\exp(i\phi'(z_2'))
+\]
+
+where:
+
+\[
+A' = A
+\]
+
+The paper explicitly states amplitude is not corrected.
+
+For interpolation, interpolate the real and imaginary components separately:
+
+\[
+\Re(u')
+\]
+
+\[
+\Im(u')
+\]
+
+This avoids direct interpolation of wrapped phase.
+
+After interpolation:
+
+\[
+A_{\mathrm{grid}} = |u_{\mathrm{grid}}|
+\]
+
+\[
+\phi_{\mathrm{grid}} = \arg(u_{\mathrm{grid}})
+\]
+
+The returned `CorrectedSignal` should contain:
+
+```text
+z_m = uniform_z_grid
+complex_signal = interpolated complex field
+amplitude = abs(complex_signal)
+phase_rad = angle(complex_signal)
+curvature_radius_m = R
+screen_distance_km = screen_distance_km
+```
+
+---
+
+## 11. Main method: `correct(...)`
+
+### 11.1 Responsibility
+
+`correct(...)` is the public orchestration method used by `BackpropProcessor`.
+
+It should perform:
+
+1. Wavelength resolution.
+2. Tx/Rx geometry correction.
+3. Phase correction.
+4. Curvature correction.
+5. Complex signal construction.
+6. Uniform \(z\)-grid interpolation.
+7. Return `CorrectedSignal`.
+
+### 11.2 Expected call context
+
+According to the design call flow:
+
+```text
+BP->>ST: correct(window, plane, screen_distance_km, option=2)
+ST->>ST: apply_tx_rx_correction(...)
+ST->>ST: apply_phase_correction(...)
+ST->>ST: apply_curvature_correction(...)
+ST-->>BP: CorrectedSignal
+```
+
+`BackpropProcessor` then calls:
+
+```text
+FftPropagator.backpropagate_2d(
+    complex_signal,
+    z_m,
+    distance_m
+)
+```
+
+The `distance_m` used by `BackpropProcessor` should correspond to:
+
+\[
+1000 \times \texttt{screen_distance_km}
+\]
+
+or equivalently \(|x_{20}|\) for Option 2.
+
+### 11.3 Correct sequence
+
+The recommended sequence is:
+
+1. Resolve wavelength:
+   \[
+   \lambda
+   \]
+
+2. Call:
+
+```text
+apply_tx_rx_correction(...)
+```
+
+to obtain:
+
+- corrected \(z_2'\)
+- original path \(L_{tr}\)
+- corrected path \(L'_{tr}\)
+- curvature radius \(R\)
+
+3. Apply phase correction:
+
+\[
+\phi'
+=
+\phi
++
+k
+(L'_{tr} - L_{tr})
+\]
+
+4. If enabled in config, apply curvature correction:
+
+\[
+\phi''
+=
+\phi'
++
+k
+\frac{z'^2\tan^2\alpha}{2R}
+\]
+
+5. Keep amplitude unchanged:
+
+\[
+A' = A
+\]
+
+6. Construct corrected complex signal:
+
+\[
+u'(z')
+=
+A'
+\exp(i\phi'')
+\]
+
+7. Interpolate to uniform \(z\)-grid.
+
+8. Return `CorrectedSignal`.
+
+---
+
+## 12. Interaction with quality control
+
+This module should not decide final acceptance or rejection based on:
+
+- \(Q\)
+- multi-valued geolocation
+- \(\cos\alpha\)
+- \(\sigma_\phi\)
+- tangent height
+
+Those are handled by `QualityController` and `Geolocator`.
+
+However, this module may raise or return invalid results for nonphysical or numerically impossible geometry, such as:
+
+- missing Tx/Rx states
+- too few samples
+- zero Tx-Rx range
+- candidate screen not between Tx and Rx
+- invalid interpolation grid
+- nonfinite corrected phase
+
+The final QC thresholds from `config.yaml` are:
+
+```yaml
+processing:
+  scintillation_indices:
+    sigma_phi_threshold_rad: 0.25
+
+  tangent_point_filter:
+    min_height_km: 150
+
+back_propagation:
+  quality_control:
+    q_threshold: 1.2
+    cos_alpha_threshold: 0.1
+    require_single_valued_geolocation: true
+    discard_multivalued_geolocations: true
+```
+
+Those should remain outside this module.
+
+---
+
+## 13. Numerical and implementation risks
+
+### 13.1 Phase convention ambiguity
+
+The paper’s correction is path-based. If the COSMIC-2 phase product is already excess phase or detrended phase, applying the full path correction incorrectly may introduce large artificial phase terms.
+
+This is explicitly unclear in `config.yaml`:
+
+```yaml
+unclear_from_paper:
+  - "Exact COSMIC-2 HR data field names and preprocessing state."
+  - "Exact phase detrending method before sigma_phi calculation."
+```
+
+Implementation should log or document the assumed convention.
+
+### 13.2 Wavelength mismatch
+
+Because `correct(...)` does not accept `wavelength_m`, the wavelength must be resolved internally from `SignalWindow`.
+
+This must match the `wavelength_m` used by `BackpropProcessor` and `FftPropagator`.
+
+Otherwise, phase correction and propagation will be inconsistent.
+
+### 13.3 \(L_{\mathrm{mf}}\) versus \(L\)
+
+The BP plane orientation is defined by magnetic field at \(L_{\mathrm{mf}}\), but the screen correction is performed for candidate propagation distance \(L\).
+
+Using `plane.candidate_position_m` as the screen origin would be wrong except when:
+
+\[
+L = L_{\mathrm{mf}}
+\]
+
+The screen origin must be recomputed from `screen_distance_km`.
+
+### 13.4 Option 1 with FFT propagation
+
+Option 1 produces an arbitrary corrected receiver trajectory in \(x,z\), not a constant-\(x\) receiver plane.
+
+Therefore, Option 1 should not be used with FFT plane-wave propagation unless additional approximation is explicitly accepted.
+
+The configured default is Option 2, so this issue should not affect the main reproduction path.
+
+### 13.5 Large \(\tan\alpha\)
+
+When \(\cos\alpha\) is near zero, the curvature correction can become numerically unstable.
+
+Such cases are later rejected by:
+
+\[
+\cos\alpha > 0.1
+\]
+
+but the correction code should still avoid overflow.
+
+---
+
+## 14. Minimal validation tests for this module
+
+### Test 1: Midpoint geometry consistency
+
+For a simple synthetic Tx/Rx straight-line geometry:
+
+- midpoint Tx and Rx should project to \(z \approx 0\)
+- screen origin should lie between Tx and Rx
+- \(|x_{20}|\) should approximately equal `screen_distance_km * 1000`
+
+### Test 2: Option 2 constant receiver plane
+
+With `option=2`:
+
+\[
+x_2' = x_{20}
+\]
+
+for all samples.
+
+### Test 3: Screen crossing preservation
+
+For each sample, the line from stationary Tx \((x_{10},0)\) to corrected Rx \((x_2',z_2')\) should cross \(x=0\) at the same \(z_s\) as the original Tx-Rx line.
+
+### Test 4: Phase correction identity case
+
+If:
+
+\[
+L'_{tr} = L_{tr}
+\]
+
+then:
+
+\[
+\phi' = \phi
+\]
+
+before curvature correction.
+
+### Test 5: Curvature correction disabled/enabled
+
+If curvature correction is disabled, output phase should omit:
+
+\[
+k z^2 \tan^2\alpha / (2R)
+\]
+
+If enabled, the difference should exactly match that term.
+
+### Test 6: Uniform interpolation
+
+Returned `CorrectedSignal.z_m` should be strictly increasing and uniformly spaced within numerical tolerance.
+
+### Test 7: Amplitude unchanged before interpolation
+
+Before interpolation, amplitude should be identical to `window.amplitude`.
+
+After interpolation, amplitude may differ only because of interpolation of the complex field.
+
+---
+
+## 15. Summary of required behavior
+
+`StationaryCorrector` must implement the paper’s real-geometry correction faithfully:
+
+\[
+z_s =
+z_1 -
+x_1
+\frac{z_2-z_1}{x_2-x_1}
+\]
+
+\[
+z_2' =
+z_s
+\left(
+1 - \frac{x_2'}{x_{10}}
+\right)
+\]
+
+with default:
+
+\[
+x_2' = x_{20}
+\]
+
+Then:
+
+\[
+\phi'
+=
+\phi
++
+\frac{2\pi}{\lambda}
+(L'_{tr} - L_{tr})
+\]
+
+and, if enabled:
+
+\[
+\phi''
+=
+\phi'
++
+\frac{2\pi}{\lambda}
+\frac{z^2\tan^2\alpha}{2R}
+\]
+
+Amplitude remains unchanged.
+
+The corrected complex signal must be interpolated onto a uniform \(z\)-grid and returned as `CorrectedSignal` for FFT-based back propagation.

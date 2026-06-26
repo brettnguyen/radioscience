@@ -1,0 +1,734 @@
+## Logic Analysis: `src/signal/preprocessing.py`
+
+### 1. Role in the Reproduction Pipeline
+
+`src/signal/preprocessing.py` implements the `SignalPreprocessor` class defined in the project design.
+
+This module prepares each 10-second COSMIC-2 high-rate scintillation window before:
+
+1. phase scintillation index computation,
+2. amplitude scintillation index computation,
+3. complex-signal construction for back propagation.
+
+According to the paper, COSMIC-2 high-rate data consist of phase and amplitude/SNR sampled at:
+
+- GPS: `50 Hz`
+- GLONASS: `100 Hz`
+
+The paper states that high-rate SNR and connected phase are used for back propagation in 10-second intervals. The phase scintillation index `sigma_phi` is calculated in ground processing, but the exact detrending procedure is not specified. Therefore this module must implement a conservative, configurable detrending procedure while preserving the paper’s methodology.
+
+The relevant configuration entries from `config.yaml` are:
+
+```yaml
+processing:
+  window_seconds: 10
+
+  scintillation_indices:
+    phase_detrending:
+      method: "unspecified_in_paper"
+      default_implementation: "polynomial"
+      polynomial_order: 1
+```
+
+The paper’s QC threshold using the output of this module is:
+
+```yaml
+processing:
+  scintillation_indices:
+    sigma_phi_threshold_rad: 0.25
+```
+
+This threshold itself is applied later by `ScintillationCalculator` and `QualityController`, not inside `SignalPreprocessor`.
+
+---
+
+### 2. Required Public Interface
+
+This module must follow the existing design exactly.
+
+The class is:
+
+```text
+class SignalPreprocessor {
+    +__init__(config: AppConfig)
+    +detrend_phase(phase_rad: ndarray, times: ndarray) ndarray
+    +normalize_amplitude(amplitude: ndarray) ndarray
+    +make_complex_signal(amplitude: ndarray, phase_rad: ndarray) ndarray
+    +prepare_window(window: SignalWindow) SignalWindow
+}
+```
+
+No additional public methods should be required by downstream modules.
+
+Private helpers may be used internally, but downstream modules should only call the public methods listed above.
+
+Primary downstream caller:
+
+```text
+Geolocator.process_window()
+```
+
+Expected call sequence:
+
+1. `prepare_window(window)`
+2. `ScintillationCalculator.compute(prepared_window)`
+3. `BackpropProcessor.compute_d_curve(prepared_window, wavelength_m)`
+
+---
+
+### 3. Inputs and Outputs
+
+#### 3.1 Input Type: `SignalWindow`
+
+`SignalPreprocessor.prepare_window()` receives a `SignalWindow` object with the fields defined in `src/core/types.py`:
+
+```text
+SignalWindow {
+    event_id
+    leo_id
+    gnss_id
+    constellation
+    signal_name
+    antenna
+    start_time
+    mid_time
+    end_time
+    sampling_rate_hz
+    times
+    phase_rad
+    amplitude
+    snr_vv
+    rx_states
+    tx_states
+    tangent_height_km
+    copy()
+}
+```
+
+The fields relevant to preprocessing are:
+
+- `times`
+- `phase_rad`
+- `amplitude`
+- `snr_vv`
+- `sampling_rate_hz`
+- metadata fields used only for diagnostics or error messages
+
+#### 3.2 Output Type: `SignalWindow`
+
+`prepare_window()` should return a copied `SignalWindow`, not mutate the input in-place unless the project explicitly decides otherwise.
+
+The returned window should contain:
+
+- cleaned and detrended `phase_rad`
+- normalized `amplitude`
+- preserved `snr_vv`
+- unchanged geometry/orbit metadata
+- unchanged timestamps
+- unchanged event metadata
+
+The `SignalWindow.copy()` method exists in the design and should be used to avoid modifying the original object.
+
+---
+
+### 4. Scientific Requirements from the Paper
+
+The paper uses high-rate COSMIC-2 phase and amplitude data for back propagation.
+
+Relevant methodological statements:
+
+1. COSMIC-2 POD antennas provide high-rate phase and amplitude/SNR.
+2. GPS is closed-loop tracked with onboard data-modulation removal and phase connection.
+3. GLONASS is open-loop tracked and may require ground removal of data modulation and phase connection.
+4. Phase scintillation index `sigma_phi` is computed in 10-second intervals.
+5. Back propagation uses complex signal constructed from amplitude and phase.
+6. Amplitude is represented by SNR scaled to a 1-Hz band.
+7. The exact phase detrending method is not specified.
+
+Therefore this module should:
+
+- preserve high-rate phase fluctuations,
+- remove only slow phase trend,
+- avoid filtering out scintillation-scale fluctuations,
+- normalize amplitude in a way that does not distort relative amplitude scintillation,
+- construct the complex field as:
+
+\[
+u(t) = A(t)\exp(i\phi(t))
+\]
+
+where:
+
+- \(A(t)\) is the normalized amplitude/SNR,
+- \(\phi(t)\) is the detrended phase in radians.
+
+---
+
+### 5. Phase Handling Logic
+
+#### 5.1 Validate Phase Array
+
+`detrend_phase(phase_rad, times)` should first validate:
+
+- `phase_rad` is one-dimensional.
+- `times` is one-dimensional and has the same length as `phase_rad`.
+- There are enough finite samples to fit the configured trend.
+- NaN or infinite values are handled safely.
+
+The phase array must be in radians, consistent with:
+
+```yaml
+Shared Knowledge:
+  Phase is in radians.
+```
+
+#### 5.2 Phase Unwrapping
+
+The paper says GPS phase is already connected onboard and GLONASS may require ground connection if not already provided.
+
+Because `detrend_phase()` only receives `phase_rad` and `times`, it cannot know whether the signal is GPS or GLONASS unless `prepare_window()` performs metadata-aware handling.
+
+Recommended logic:
+
+- In `prepare_window()`, apply `numpy.unwrap()` to `window.phase_rad` defensively.
+- This is safe for already-connected phase unless the data contain large nonphysical jumps.
+- It helps with open-loop or partially wrapped phase.
+- It does not remove slow trends; it only removes \(2\pi\) discontinuities.
+
+Important limitation:
+
+- True GLONASS data-bit modulation removal is not possible in this generic preprocessing method unless the COSMIC-2 loader provides already-demodulated phase or additional metadata.
+- This limitation should be documented in code comments and README, consistent with `config.yaml`:
+
+```yaml
+data:
+  cosmic2:
+    notes:
+      - "GLONASS signals are tracked in open-loop mode and require ground processing if connected phase is not already provided."
+```
+
+#### 5.3 Detrending Requirement
+
+The paper does not specify the detrending method. The configuration explicitly records this ambiguity:
+
+```yaml
+processing:
+  scintillation_indices:
+    phase_detrending:
+      method: "unspecified_in_paper"
+      default_implementation: "polynomial"
+      polynomial_order: 1
+```
+
+Therefore the default implementation should be polynomial detrending with order `1`, i.e. linear detrending over each 10-second window.
+
+This is consistent with the reproduction plan:
+
+> Default should be simple polynomial detrending over each 10 s window.
+
+The detrended phase is:
+
+\[
+\phi_{\mathrm{det}}(t)
+=
+\phi(t) - P_N(t)
+\]
+
+where \(P_N(t)\) is the fitted polynomial trend of order \(N\).
+
+For the configured default:
+
+\[
+N = 1
+\]
+
+so:
+
+\[
+P_1(t) = a_0 + a_1 t
+\]
+
+#### 5.4 Time Coordinate for Polynomial Fit
+
+Use a numerically stable centered time coordinate.
+
+If `times` is numeric:
+
+\[
+\tau = t - \mathrm{mean}(t)
+\]
+
+If `times` is datetime-like:
+
+\[
+\tau = (t - t_0)
+\]
+
+in seconds, where \(t_0\) may be the first time or mean time.
+
+For a 10-second window, centered seconds are stable and interpretable.
+
+Do not fit directly against large epoch timestamps.
+
+#### 5.5 Handling Missing Phase Samples
+
+The data may contain NaNs or invalid samples.
+
+Recommended behavior:
+
+1. Identify finite phase samples.
+2. Fit trend using finite samples only.
+3. Evaluate the trend over all timestamps.
+4. For nonfinite samples:
+   - either interpolate before detrending, or
+   - leave them as NaN and allow later modules to reject or handle the window.
+
+For reproducibility and propagation stability, the preferred behavior is:
+
+- interpolate short gaps linearly if enough valid samples exist,
+- reject or preserve NaNs if too many samples are missing.
+
+Because the current public API does not return rejection reasons, `prepare_window()` should be conservative:
+
+- If fewer than `polynomial_order + 2` valid phase samples exist, return a copied window with phase converted to finite-safe values only if possible.
+- Otherwise, leave invalid samples as NaN and downstream QC should reject via nonfinite metrics.
+
+A robust implementation may replace remaining NaNs with interpolated values before complex-signal construction because FFT propagation cannot handle NaNs.
+
+---
+
+### 6. Configurable Detrending Options
+
+The task requires configurable options:
+
+- linear,
+- quadratic,
+- polynomial order `N`,
+- optional high-pass.
+
+The config currently specifies:
+
+```yaml
+default_implementation: "polynomial"
+polynomial_order: 1
+```
+
+The public design of `AppConfig` does not explicitly list phase-detrending fields. Therefore implementation must be coordinated with `src/config.py`.
+
+Important design constraint:
+
+- Do not add new public methods to `SignalPreprocessor`.
+- Do not require downstream callers to pass detrending parameters.
+- `SignalPreprocessor.__init__(config: AppConfig)` should internally read the configured detrending behavior as exposed by `AppConfig`.
+
+Recommended internal behavior:
+
+| Config setting | Behavior |
+|---|---|
+| `default_implementation: polynomial`, `polynomial_order: 1` | Linear detrending |
+| `polynomial_order: 2` | Quadratic detrending |
+| `polynomial_order: N` | Nth-order polynomial detrending |
+| optional high-pass enabled in future config | High-pass filtering after or instead of polynomial detrending |
+
+Because `config.yaml` marks the paper’s method as unspecified, every output should be reproducible by logging the detrending method used.
+
+---
+
+### 7. Amplitude/SNR Handling Logic
+
+#### 7.1 Paper Basis
+
+The paper states:
+
+> The amplitude is represented by the signal-to-noise ratio (SNR) scaled to a 1-Hz band.
+
+and:
+
+> The high-rate SNR and connected phase are used for BP in 10-s intervals.
+
+Therefore `normalize_amplitude()` should treat the input amplitude as proportional to received field amplitude.
+
+The paper does not specify additional amplitude detrending.
+
+#### 7.2 Normalize Without Destroying Scintillation
+
+Amplitude scintillation is physically meaningful. The normalization must preserve relative amplitude fluctuations.
+
+Recommended default normalization:
+
+\[
+A_{\mathrm{norm}}(t) = \frac{A(t)}{\langle A(t)\rangle}
+\]
+
+where the mean is computed over finite positive samples within the 10-second window.
+
+This preserves:
+
+- relative amplitude fluctuations,
+- normalized intensity variance,
+- shape of amplitude scintillation.
+
+It removes arbitrary SNR scale, which is acceptable because the BP amplitude variance is normalized:
+
+\[
+V(L) = \frac{\langle A^2\rangle}{\langle A\rangle^2} - 1
+\]
+
+Therefore multiplying all amplitudes by a constant does not affect \(V(L)\).
+
+#### 7.3 Handling Invalid Amplitude Samples
+
+Amplitude/SNR values should be:
+
+- finite,
+- positive,
+- one-dimensional.
+
+If `amplitude` contains invalid values:
+
+1. Prefer `window.amplitude` if populated.
+2. If `window.amplitude` is missing or unusable, use `window.snr_vv`.
+3. Replace or interpolate short invalid gaps.
+4. If mean amplitude is nonpositive or nonfinite, return NaNs or a safe fallback that causes downstream rejection.
+
+Since FFT back propagation cannot handle NaNs, interpolation is recommended when possible.
+
+#### 7.4 SNR Preservation
+
+`normalize_amplitude()` should not overwrite `snr_vv`.
+
+`snr_vv` is still needed for diagnostics and `ScintillationMetrics.mean_snr_vv`.
+
+Only `SignalWindow.amplitude` should be replaced with normalized amplitude.
+
+---
+
+### 8. Complex Signal Construction
+
+`make_complex_signal(amplitude, phase_rad)` should implement:
+
+\[
+u = A \exp(i\phi)
+\]
+
+where:
+
+- `amplitude` is normalized field amplitude,
+- `phase_rad` is detrended phase in radians.
+
+Implementation logic:
+
+1. Validate same shape.
+2. Ensure arrays are finite or handle invalid values before exponentiation.
+3. Return complex NumPy array.
+
+This method is useful both for:
+
+- preprocessing tests,
+- `StationaryCorrector`,
+- possible future diagnostic workflows.
+
+However, per the current design, `SignalWindow` does not contain a `complex_signal` field. Therefore `prepare_window()` should not attempt to store the complex signal in the window unless the data structure is changed elsewhere.
+
+Downstream modules that need the complex field should call:
+
+```text
+SignalPreprocessor.make_complex_signal(amplitude, phase_rad)
+```
+
+or construct it internally using the same formula.
+
+---
+
+### 9. `prepare_window()` Detailed Logic
+
+`prepare_window(window)` should be the main method used by `Geolocator`.
+
+Expected steps:
+
+1. Copy input window:
+
+   ```text
+   prepared = window.copy()
+   ```
+
+2. Validate array lengths:
+
+   - `times`
+   - `phase_rad`
+   - `amplitude` or `snr_vv`
+
+   must correspond to the same number of high-rate samples.
+
+3. Select amplitude source:
+
+   - use `window.amplitude` if finite and nonempty,
+   - otherwise use `window.snr_vv`.
+
+4. Clean phase:
+
+   - convert to NumPy array,
+   - unwrap with `numpy.unwrap`,
+   - interpolate or handle invalid samples,
+   - detrend using `detrend_phase()`.
+
+5. Normalize amplitude:
+
+   - use `normalize_amplitude()`.
+
+6. Store into copied window:
+
+   ```text
+   prepared.phase_rad = detrended_phase_rad
+   prepared.amplitude = normalized_amplitude
+   ```
+
+7. Preserve:
+
+   - `prepared.snr_vv`
+   - `prepared.times`
+   - `prepared.rx_states`
+   - `prepared.tx_states`
+   - `prepared.tangent_height_km`
+   - all metadata
+
+8. Return prepared window.
+
+---
+
+### 10. Relationship to Scintillation Metrics
+
+`ScintillationCalculator.compute()` will receive the prepared window.
+
+The expected calculations are:
+
+\[
+\sigma_\phi = \mathrm{std}(\phi_{\mathrm{detrended}})
+\]
+
+and:
+
+\[
+S_4 =
+\frac{\sqrt{\langle I^2\rangle - \langle I\rangle^2}}
+{\langle I\rangle}
+\]
+
+where:
+
+\[
+I = A^2
+\]
+
+Therefore this module directly affects:
+
+- `sigma_phi_rad`,
+- `s4`,
+- whether a window passes the paper’s pre-BP threshold:
+
+\[
+\sigma_\phi > 0.25 \ \mathrm{rad}
+\]
+
+The reproduction should later check aggregate values against paper sanity statistics:
+
+```yaml
+synthetic_experiments:
+  observed_average_values:
+    sigma_phi_rad: 1.65
+    s4: 0.32
+    sigma_phi_over_s4_rad: 5.25
+```
+
+If preprocessing choices produce very different values, the detrending method or amplitude normalization may need sensitivity testing.
+
+---
+
+### 11. Relationship to Back Propagation
+
+The prepared phase and amplitude are used by `StationaryCorrector` and `BackpropProcessor`.
+
+The signal entering back propagation should represent the measured complex RO signal:
+
+\[
+u(t) = A(t)\exp(i\phi(t))
+\]
+
+The paper’s later corrections are not performed in this module:
+
+- stationary transmitter correction,
+- corrected path length,
+- wavefront curvature correction,
+- projection into BP plane,
+- interpolation onto uniform \(z\) grid.
+
+Those belong to:
+
+```text
+src/geolocation/stationary_correction.py
+```
+
+Therefore `SignalPreprocessor` should not apply geometry-dependent phase corrections.
+
+It should only perform signal-domain preparation within the 10-second time window.
+
+---
+
+### 12. Edge Cases and Required Behavior
+
+#### 12.1 Empty Window
+
+If phase or amplitude arrays are empty:
+
+- return a copied window with arrays unchanged or converted to empty arrays,
+- downstream metrics should fail naturally.
+
+Do not crash in a way that stops full-year processing.
+
+#### 12.2 All-NaN Phase
+
+If all phase samples are invalid:
+
+- detrending cannot be performed.
+- return NaN phase array or interpolated fallback only if scientifically defensible.
+- downstream `ScintillationCalculator` should produce invalid metrics and fail pre-BP QC.
+
+#### 12.3 Constant Amplitude
+
+If amplitude is constant and positive:
+
+- normalized amplitude becomes approximately all ones.
+- \(S_4 \approx 0\).
+- BP likely has no useful amplitude scintillation.
+- This is acceptable.
+
+#### 12.4 Nonpositive Amplitude
+
+Physical SNR/amplitude should be positive.
+
+If nonpositive values occur:
+
+- treat as invalid.
+- interpolate from valid neighbors where possible.
+- otherwise allow downstream rejection.
+
+#### 12.5 Very Short Window
+
+The paper uses 10-second windows. Expected sample counts:
+
+- GPS: about `500`
+- GLONASS: about `1000`
+
+If a window has far fewer samples:
+
+- detrending may still work mathematically,
+- but scintillation and BP may be unreliable.
+- No explicit paper threshold is given, so do not invent a rejection rule here.
+- Downstream QC and propagation failure handling should manage it.
+
+---
+
+### 13. High-Pass Filtering Option
+
+The paper does not specify a high-pass filter. Therefore high-pass filtering should not be the default.
+
+If implemented as an optional internal branch, it must be clearly marked as sensitivity-test behavior.
+
+Potential high-pass logic:
+
+1. Convert timestamps to seconds.
+2. Estimate sampling frequency from timestamps or use `window.sampling_rate_hz`.
+3. Apply a stable digital high-pass filter using `scipy.signal`.
+4. Use zero-phase filtering where possible, e.g. `sosfiltfilt`.
+
+But because no cutoff frequency is given in the paper or config, no default cutoff should be invented.
+
+Default should remain:
+
+```yaml
+default_implementation: "polynomial"
+polynomial_order: 1
+```
+
+---
+
+### 14. Reproducibility Notes
+
+This module is scientifically sensitive because the detrending method is unspecified in the paper.
+
+For reproducibility:
+
+1. The selected detrending method and order should be logged by the calling pipeline.
+2. The README should state that the default reproduction uses 10-second linear polynomial detrending because the paper does not specify the exact method.
+3. Sensitivity tests should compare:
+   - linear detrending,
+   - quadratic detrending,
+   - higher-order polynomial detrending,
+   - optional high-pass filtering if configured later.
+
+The final accepted geolocation counts should be compared against the paper’s reported totals:
+
+```yaml
+real_data_experiments:
+  monthly_l1_maps:
+    expected_total_geolocations:
+      2021: 332000
+      2023: 1108000
+```
+
+Large discrepancies may indicate differences in preprocessing, especially phase detrending or amplitude/SNR normalization.
+
+---
+
+### 15. Dependencies
+
+This module should depend on:
+
+- `numpy`
+- `scipy.signal`
+- `src.config.AppConfig`
+- `src.core.types.SignalWindow`
+
+It should not depend on:
+
+- geometry modules,
+- propagation modules,
+- magnetic-field modules,
+- geolocation/QC modules,
+- plotting modules,
+- data loaders.
+
+This keeps signal preprocessing isolated and testable.
+
+---
+
+### 16. Minimal Test Expectations
+
+Unit tests for this module should verify:
+
+1. `detrend_phase()` removes a known linear trend and preserves sinusoidal residual fluctuations.
+2. Polynomial order `1` behaves as linear detrending.
+3. Polynomial order `2` removes a quadratic trend if configured.
+4. `normalize_amplitude()` divides by mean and preserves relative variations.
+5. `make_complex_signal()` returns:
+
+   \[
+   A \exp(i\phi)
+   \]
+
+6. `prepare_window()` returns a copy and does not mutate the input `SignalWindow`.
+7. NaNs are handled consistently.
+8. A 10-second synthetic window with configured sampling rates produces arrays of unchanged length.
+
+---
+
+### 17. Final Implementation Principle
+
+`SignalPreprocessor` should perform only the minimum signal-domain operations needed to reproduce the paper:
+
+1. unwrap/clean phase,
+2. detrend phase over each 10-second window,
+3. normalize amplitude/SNR without suppressing scintillation,
+4. construct complex signal when requested.
+
+It must not apply physical geometry corrections, BP-plane projection, or QC decisions. Those are handled by downstream modules according to the design.

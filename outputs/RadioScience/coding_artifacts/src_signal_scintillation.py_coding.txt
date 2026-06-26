@@ -1,0 +1,299 @@
+## Code: src/signal/scintillation.py
+```python
+"""Scintillation-index calculations for COSMIC-2 BP geolocation.
+
+This module implements the narrow scintillation-metric layer used before
+back-propagation geolocation. It follows the definitions described in the paper
+and encoded in ``config.yaml``:
+
+    sigma_phi = std(phi_detrended)
+
+and
+
+    I = A^2
+    S4 = sqrt(<I^2> - <I>^2) / <I>
+
+where ``A`` is the amplitude/SNR-like high-rate signal amplitude.
+
+Important pipeline convention:
+    ``SignalPreprocessor`` is responsible for phase unwrapping/detrending and
+    amplitude preparation. This module does not detrend phase again because the
+    paper does not specify an exact detrending method, and double detrending
+    would bias ``sigma_phi`` low.
+
+Quality-control separation:
+    ``ScintillationMetrics.passes_threshold`` is populated using the paper's
+    strict pre-BP phase-scintillation threshold,
+
+        sigma_phi > 0.25 rad
+
+    matching ``config.yaml``. The authoritative full pre-BP QC, including
+    tangent-height filtering, belongs to ``QualityController``.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any
+
+import numpy as np
+from numpy.typing import NDArray
+
+from src.core import constants
+from src.core.types import ScintillationMetrics, SignalWindow
+
+
+_VARIANCE_ROUNDOFF_ABS_TOL: float = 1.0e-15
+
+
+class ScintillationCalculator:
+    """Compute phase and amplitude scintillation metrics for one signal window.
+
+    Args:
+        sigma_phi_threshold_rad: Strict phase-scintillation threshold in radians.
+            Defaults to the paper/configuration value ``0.25 rad``.
+
+    Public methods match the project design:
+        * ``compute(window)``
+        * ``compute_sigma_phi(phase_rad)``
+        * ``compute_s4(amplitude)``
+    """
+
+    def __init__(
+        self,
+        sigma_phi_threshold_rad: float = constants.DEFAULT_SIGMA_PHI_THRESHOLD_RAD,
+    ) -> None:
+        """Initialize the calculator with the paper-backed threshold.
+
+        Args:
+            sigma_phi_threshold_rad: Threshold for setting
+                ``ScintillationMetrics.passes_threshold``.
+
+        Raises:
+            ValueError: If the threshold is not finite and positive.
+        """
+        threshold_value: float = float(sigma_phi_threshold_rad)
+        if not math.isfinite(threshold_value) or threshold_value <= 0.0:
+            raise ValueError(
+                "sigma_phi_threshold_rad must be finite and positive, got "
+                f"{sigma_phi_threshold_rad!r}."
+            )
+
+        self.sigma_phi_threshold_rad: float = threshold_value
+
+    def compute(self, window: SignalWindow) -> ScintillationMetrics:
+        """Compute scintillation metrics for a preprocessed signal window.
+
+        Args:
+            window: A ``SignalWindow`` whose ``phase_rad`` has already been
+                detrended by ``SignalPreprocessor`` and whose ``amplitude``
+                represents signal amplitude ``A`` for the paper's ``I=A^2``
+                definition.
+
+        Returns:
+            ``ScintillationMetrics`` containing ``sigma_phi_rad``, ``s4``,
+            finite-sample mean SNR, and the strict ``sigma_phi > 0.25 rad``
+            threshold flag.
+
+        Raises:
+            TypeError: If ``window`` is not a ``SignalWindow``.
+        """
+        if not isinstance(window, SignalWindow):
+            raise TypeError(
+                f"window must be a SignalWindow, got {type(window).__name__}."
+            )
+
+        sigma_phi_rad: float = self.compute_sigma_phi(window.phase_rad)
+        s4: float = self.compute_s4(window.amplitude)
+        mean_snr_vv: float = self._compute_mean_snr(
+            snr_vv=window.snr_vv,
+            amplitude_fallback=window.amplitude,
+        )
+
+        passes_threshold: bool = (
+            math.isfinite(sigma_phi_rad)
+            and sigma_phi_rad > self.sigma_phi_threshold_rad
+        )
+
+        return ScintillationMetrics(
+            sigma_phi_rad=sigma_phi_rad,
+            s4=s4,
+            mean_snr_vv=mean_snr_vv,
+            passes_threshold=passes_threshold,
+        )
+
+    def compute_sigma_phi(self, phase_rad: NDArray[Any]) -> float:
+        """Compute phase scintillation index from detrended phase.
+
+        The paper uses interval averages, so the population standard deviation
+        is used: ``ddof=0``.
+
+        Args:
+            phase_rad: One-dimensional detrended phase samples in radians.
+
+        Returns:
+            ``sigma_phi`` in radians. Returns ``NaN`` for empty or all-invalid
+            inputs.
+
+        Raises:
+            ValueError: If ``phase_rad`` is not one-dimensional.
+        """
+        phase_array: NDArray[np.float64] = self._as_1d_float_array(
+            phase_rad,
+            "phase_rad",
+        )
+        finite_phase: NDArray[np.float64] = phase_array[np.isfinite(phase_array)]
+
+        if finite_phase.size == 0:
+            return math.nan
+
+        return float(np.std(finite_phase, ddof=0))
+
+    def compute_s4(self, amplitude: NDArray[Any]) -> float:
+        """Compute amplitude scintillation index ``S4``.
+
+        The implemented paper/configuration definition is:
+
+            I = A^2
+            S4 = sqrt(<I^2> - <I>^2) / <I>
+
+        Only finite, positive amplitude samples are used because COSMIC-2
+        amplitude is represented by SNR-like positive values.
+
+        Args:
+            amplitude: One-dimensional signal amplitude samples ``A``.
+
+        Returns:
+            Nonnegative ``S4`` value. Returns ``NaN`` if the metric is undefined
+            due to empty, invalid, nonpositive, or zero-mean intensity data.
+
+        Raises:
+            ValueError: If ``amplitude`` is not one-dimensional.
+        """
+        amplitude_array: NDArray[np.float64] = self._as_1d_float_array(
+            amplitude,
+            "amplitude",
+        )
+        valid_mask: NDArray[np.bool_] = (
+            np.isfinite(amplitude_array) & (amplitude_array > 0.0)
+        )
+        valid_amplitude: NDArray[np.float64] = amplitude_array[valid_mask]
+
+        if valid_amplitude.size == 0:
+            return math.nan
+
+        # S4 is invariant to multiplication of amplitude by a positive constant.
+        # Scaling by max amplitude prevents overflow in A^2 and I^2 for unusual
+        # corrupted or high-dynamic-range inputs while preserving the metric.
+        max_amplitude: float = float(np.max(valid_amplitude))
+        if not math.isfinite(max_amplitude) or max_amplitude <= 0.0:
+            return math.nan
+
+        scaled_amplitude: NDArray[np.float64] = valid_amplitude / max_amplitude
+        intensity: NDArray[np.float64] = scaled_amplitude * scaled_amplitude
+        finite_intensity: NDArray[np.float64] = intensity[np.isfinite(intensity)]
+
+        if finite_intensity.size == 0:
+            return math.nan
+
+        mean_intensity: float = float(np.mean(finite_intensity))
+        if not math.isfinite(mean_intensity) or mean_intensity <= 0.0:
+            return math.nan
+
+        mean_intensity_squared: float = float(np.mean(finite_intensity * finite_intensity))
+        if not math.isfinite(mean_intensity_squared):
+            return math.nan
+
+        intensity_variance: float = mean_intensity_squared - mean_intensity * mean_intensity
+
+        if intensity_variance < 0.0:
+            if abs(intensity_variance) <= _VARIANCE_ROUNDOFF_ABS_TOL:
+                intensity_variance = 0.0
+            else:
+                return math.nan
+
+        s4: float = math.sqrt(intensity_variance) / mean_intensity
+        if not math.isfinite(s4):
+            return math.nan
+
+        return float(max(s4, 0.0))
+
+    @staticmethod
+    def _as_1d_float_array(values: NDArray[Any] | Any, name: str) -> NDArray[np.float64]:
+        """Convert input to a one-dimensional float array.
+
+        Args:
+            values: Array-like input.
+            name: Name used in error messages.
+
+        Returns:
+            One-dimensional ``float64`` array.
+
+        Raises:
+            ValueError: If conversion fails or the result is not one-dimensional.
+        """
+        try:
+            array: NDArray[np.float64] = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be convertible to a float array.") from exc
+
+        if array.ndim != 1:
+            raise ValueError(f"{name} must be one-dimensional, got {array.ndim}D.")
+
+        return array.astype(np.float64, copy=False)
+
+    def _compute_mean_snr(
+        self,
+        snr_vv: NDArray[Any],
+        amplitude_fallback: NDArray[Any],
+    ) -> float:
+        """Compute finite-sample mean SNR for diagnostics.
+
+        ``SignalWindow.snr_vv`` is preferred. If it is unavailable or contains
+        no finite positive samples, ``amplitude`` is used as a documented
+        fallback because the COSMIC-2 product represents amplitude by SNR scaled
+        to a 1-Hz band. If upstream preprocessing normalized amplitude, this
+        fallback is only a diagnostic placeholder and not a replacement for
+        product SNR metadata.
+
+        Args:
+            snr_vv: SNR samples in V/V.
+            amplitude_fallback: Amplitude samples used only if SNR is unusable.
+
+        Returns:
+            Mean finite positive SNR-like value, or ``NaN`` if unavailable.
+        """
+        snr_mean: float = self._positive_finite_mean(snr_vv, "snr_vv")
+        if math.isfinite(snr_mean):
+            return snr_mean
+
+        return self._positive_finite_mean(amplitude_fallback, "amplitude_fallback")
+
+    def _positive_finite_mean(self, values: NDArray[Any], name: str) -> float:
+        """Compute mean of finite positive values in a one-dimensional array.
+
+        Args:
+            values: Array-like input.
+            name: Name used in validation errors.
+
+        Returns:
+            Mean value, or ``NaN`` when no positive finite samples exist.
+
+        Raises:
+            ValueError: If ``values`` is not one-dimensional.
+        """
+        array: NDArray[np.float64] = self._as_1d_float_array(values, name)
+        valid_values: NDArray[np.float64] = array[np.isfinite(array) & (array > 0.0)]
+
+        if valid_values.size == 0:
+            return math.nan
+
+        mean_value: float = float(np.mean(valid_values))
+        if not math.isfinite(mean_value):
+            return math.nan
+
+        return mean_value
+
+
+__all__ = ["ScintillationCalculator"]
+```

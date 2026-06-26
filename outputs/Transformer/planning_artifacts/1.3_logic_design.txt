@@ -1,0 +1,41 @@
+----------------------------------------
+[Required packages]
+- numpy==1.21.0
+- torch==1.9.0
+- tokenizers==0.10.3
+- sacrebleu==1.5.1
+
+----------------------------------------
+[Required Other language third-party packages]
+- No third-party dependencies required
+
+----------------------------------------
+[Logic Analysis]
+- ['config.py', 'Contains all configuration parameters such as hyperparameters, dataset paths, training settings, and model architecture details. This file is imported by all other modules to ensure consistency and ease of parameter tuning.']
+- ['dataset_loader.py', "Defines the DatasetLoader class that handles loading and preprocessing for both translation and parsing tasks. Implements methods load_translation_data() and load_parsing_data() that utilize Hugging Face's tokenizers and PyTorch's DataLoader. Depends on torch, tokenizers, and configuration data from config.py."]
+- ['model.py', 'Implements the TransformerModel class based on the paper. This class aggregates modules including encoder, decoder, multi-head attention, positional encoding, and feed-forward layers. Built using torch.nn.Module and organized into sub-components. Imports configuration details from config.py.']
+- ['trainer.py', 'Contains the Trainer class that manages the training loop. This includes forward propagation, backpropagation, optimizer updates using Adam with a custom learning rate scheduler (linear warmup and inverse square-root decay), label smoothing, dropout, and checkpoint management. Imports the TransformerModel from model.py and data loaders from dataset_loader.py.']
+- ['evaluation.py', 'Defines the Evaluation class responsible for running inference using beam search and assessing model performance. Computes BLEU scores for translation tasks (with sacrebleu) and F1 scores for constituency parsing. It imports the trained TransformerModel and evaluation configurations from config.py.']
+- ['main.py', 'Serves as the entry point of the application. It loads the configuration, initializes the DatasetLoader to prepare data, instantiates the TransformerModel, triggers the training process via Trainer, and finally calls the Evaluation module for inference and metric computation. It orchestrates the overall workflow.']
+
+----------------------------------------
+[Task list]
+- config.py
+- dataset_loader.py
+- model.py
+- trainer.py
+- evaluation.py
+- main.py
+
+----------------------------------------
+[Full API spec]
+
+
+----------------------------------------
+[Shared Knowledge]
+All modules share a common configuration defined in config.py that includes hyperparameters, paths, and other experiment settings. Utility functions for logging, checkpoint handling, and error management are used across trainer.py and evaluation.py. Data preprocessing regarding tokenization and batching logic is central to both dataset_loader.py and Trainer, ensuring consistency in model inputs.
+
+----------------------------------------
+[Anything UNCLEAR]
+Clarification is needed on the exact tokenizer configuration (e.g., number of merge operations or vocabulary size), the detailed batching strategy (fixed token count per batch versus dynamic batching), and the recommended hardware setup for large-scale experiments to ensure reproducibility.
+

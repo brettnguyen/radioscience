@@ -1,0 +1,110 @@
+Below is the detailed logic analysis for the DatasetLoader module, outlining step‐by‐step how the COSMIC-2 HR scintillation data will be read, filtered, segmented, and resampled, including references to the configuration settings:
+
+──────────────────────────────
+1. Initialization and Configuration Reading
+
+• The DatasetLoader class should have an __init__ method that accepts a configuration dictionary (loaded from config.yaml).  
+  – From the configuration, the loader will extract all relevant parameters such as:
+  – The quality control (QC) thresholds:  
+   • qc:sigma_phi_threshold (0.25 rad)  
+   • qc:LOS_tangent_min_km (150 km)  
+  – The simulation parameters needed for resampling:  
+   • simulation:sampling_rate (e.g., 100 Hz)  
+   • simulation:rx_velocity_km_s (e.g., 4 km/s)  
+   • bp_interval_seconds (10 seconds) which defines the duration for each segment  
+  – The data_source (a string that indicates where the COSMIC-2 HR data is coming from).
+
+• Store these values as instance variables so that they are available to all methods.
+
+──────────────────────────────
+2. Reading the Data from Disk/Storage
+
+• The load_data() method is responsible for reading the COSMIC-2 HR scintillation data.  
+  – Given that the exact file format is not fully specified, implement this method in a modular way so that it can either:
+   • Open and parse the actual COSMIC-2 data files (e.g., using Pandas if the format is CSV or another tabular format), or  
+   • Use placeholder code (or support multiple file types) for later integration.
+  – The expected output for each loaded “data interval” is a Python dictionary containing at least these keys:
+   • "signal": which itself contains arrays for phase and amplitude (e.g., NumPy arrays)
+   • "timestamps": an array of time stamps (or sample indices) corresponding to the HR data
+   • "geometry": a sub-dictionary containing metadata such as the transmitter (Tx), receiver (Rx) positions, and the LOS tangent point altitude.
+
+• If the data_source configuration provides a file path or directory, use that to locate and read the files.
+
+──────────────────────────────
+3. Segmenting the Data into 10-Second Intervals
+
+• Once the raw data is read, the next step is to segment it into 10-second intervals based on the bp_interval_seconds configuration value.
+  – For a sampling rate of 100 Hz, this gives 10 × 100 = 1000 samples per segment.
+  – Loop over the continuous time series (if the file represents a continuous observation) and split it into these fixed-length intervals.
+  – Each segment should then be represented as a separate dictionary (with its “signal”, “timestamps”, and “geometry”).
+
+──────────────────────────────
+4. Applying Quality Control (Filtering)
+
+For each 10-s interval the DatasetLoader must decide whether or not to keep the data based on two filtering criteria:
+
+• (a) Phase Scintillation Index (σϕ) Filtering:
+  – Compute or extract the phase scintillation index for the current interval.
+  – Check that σϕ > qc:sigma_phi_threshold (i.e., greater than 0.25 rad).
+  – If the interval’s σϕ is below the threshold, discard it.
+
+• (b) LOS Tangent Altitude Filtering:
+  – Extract the LOS tangent point altitude (this should be available in the geometry metadata).
+  – Check that this altitude is greater than qc:LOS_tangent_min_km (i.e., above 150 km).
+  – Discard the interval if it does not meet this geometry requirement.
+
+• Optionally, log or count the number of intervals that are rejected for each reason.
+
+──────────────────────────────
+5. Converting Time Series to a Uniform Spatial Grid
+
+For the intervals that pass the QC filters, the next step is to resample or interpolate the HR data into a spatial domain:
+
+• Use the simulation parameters:
+  – The sampling_rate (e.g., 100 Hz) and the rx_velocity_km_s (4 km/s) will determine the spatial sampling interval.
+  – Calculate the distance per sample:  
+   distance_per_sample = rx_velocity_km_s × (1 / sampling_rate)  
+   For instance, 4 km/s divided by 100 Hz = 0.04 km (i.e., 40 meters per sample).
+
+• Generate a uniform spatial grid for the 10-second interval:
+  – The total distance traveled in the interval is = rx_velocity_km_s × bp_interval_seconds.
+  – Create a new spatial coordinate array (e.g., using numpy.linspace) that spans from 0 to that total distance using the calculated step.
+  
+• Resample (interpolate) both the phase and amplitude signals onto this new spatial grid:
+  – Use a linear interpolation method (or an appropriate SciPy function) so that the resulting signal arrays are evenly sampled in space.
+  – Replace or add the “position” field to the data dictionary along with the resampled “signal”.
+
+──────────────────────────────
+6. Returning the Data
+
+• The load_data() method should finally return a list of dictionaries, where each dictionary represents one 10-second interval that:
+  – Contains the filtered, resampled data,
+  – Has keys for "signal" (with phase and amplitude arrays on a uniform spatial grid),
+  – "timestamps" (if still needed, or now representing spatial coordinates),
+  – "geometry" (containing Tx/Rx positions, LOS tangent altitude, etc.).
+  
+• If no valid intervals are found, the loader should either return an empty list or raise an informative warning.
+
+──────────────────────────────
+7. Error Handling and Future Extensions
+
+• Because the exact data format and file organization is not fully specified, design the DatasetLoader so that the file-reading portion is modular.  
+  – For example, include clear comments or placeholders where specific parsing code must be implemented.  
+  – Consider supporting multiple file types if necessary.
+  
+• Ensure that the loader makes use of configuration parameters from config.yaml, and that any hard-coded values (e.g., 100 Hz or 10 seconds) are instead read from the configuration.
+
+• Include basic error handling for missing data fields or incorrect formats, and log these issues appropriately.
+
+──────────────────────────────
+Summary
+
+The DatasetLoader will:
+ 1. Initialize with configuration settings (QC thresholds, sampling rate, receiver velocity, interval length, etc.).  
+ 2. Read COSMIC-2 HR scintillation data from disk (with flexibility for different file formats).  
+ 3. Segment the complete dataset into 10-second intervals and store each interval as a dictionary with fields for the signals, time stamps, and geometric information.  
+ 4. Apply quality control filters based on the phase scintillation threshold and LOS tangent altitude.  
+ 5. Convert the time-based HR data into a uniform spatial grid using the receiver’s velocity and sampling rate (resulting in ~40 m spacing for 100 Hz data at 4 km/s).  
+ 6. Return a list of data segments ready for further processing (e.g., by the BPModel and Trainer) in the geolocation pipeline.
+
+This structured approach ensures that the rest of the pipeline (modeling BP, applying geometry corrections, and ultimately geolocating plasma irregularities) receives clean, uniformly sampled, and quality-checked input data as described in the experimental plan.

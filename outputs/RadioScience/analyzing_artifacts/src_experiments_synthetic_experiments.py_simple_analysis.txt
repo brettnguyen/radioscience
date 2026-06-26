@@ -1,0 +1,1408 @@
+## Logic Analysis: `src/experiments/synthetic_experiments.py`
+
+### 1. Purpose of This Module
+
+`src/experiments/synthetic_experiments.py` implements the paper’s controlled numerical validation experiments for the back-propagation geolocation method. These experiments are not the final COSMIC-2 data-processing pipeline; they validate the physical and numerical behavior of the method under known synthetic conditions.
+
+The class must follow the design interface exactly:
+
+```text
+class SyntheticExperiments {
+    +__init__(config: AppConfig, generator: PhaseScreenGenerator, propagator: FftPropagator)
+    +run_all() dict
+    +single_phase_screen() dict
+    +outer_scale_estimation() dict
+    +orientation_error() dict
+    +two_screens_aligned() dict
+    +two_screens_misaligned() dict
+    +thermal_noise() dict
+    +multivalued_geometry() dict
+}
+```
+
+This module should depend only on:
+
+- `AppConfig`
+- `PhaseScreenGenerator`
+- `FftPropagator`
+- shared constants from `src/core/constants.py`
+- NumPy/SciPy as needed
+
+It should **not** directly write files or plot figures. Per the design, it returns dictionaries of arrays, scalar diagnostics, and metadata. `ResultWriter` and `Plotter` handle persistence and visualization outside this module.
+
+---
+
+## 2. Paper Alignment
+
+The synthetic experiments reproduce the method-validation logic from Sections 2–4 of the paper.
+
+The experiments must preserve the paper’s assumptions:
+
+1. Thin phase-screen approximation.
+2. Plane-wave expansion solution of the wave equation.
+3. Back propagation in coordinate representation.
+4. Normalized BP amplitude variance as the localization metric:
+
+\[
+V(L)=\frac{\langle A^2\rangle}{\langle A\rangle^2}-1
+\]
+
+5. Phase-screen location inferred from the minimum of \(V(L)\).
+6. Random phase irregularities with 1D spectrum:
+
+\[
+\Phi(k_z)\sim (k_0^2+k_z^2)^{-p/2}
+\]
+
+with configuration values:
+
+- `synthetic_experiments.phase_screen.spectral_index_p = 1.5`
+- `synthetic_experiments.phase_screen.outer_scale_km = 10`
+
+7. Observed-average validation values from `config.yaml`:
+
+- `sigma_phi_rad = 1.65`
+- `s4 = 0.32`
+- `sigma_phi_over_s4_rad = 5.25`
+- `distance_from_phase_screen_to_receiver_km = 1900`
+- `estimated_outer_scale_km = 9.7`
+
+8. Back-propagation distance grid from `config.yaml`:
+
+```yaml
+back_propagation.distance_grid:
+  min_km: 100
+  max_km: 6000
+  step_km: 100
+```
+
+---
+
+## 3. Configuration Dependency Analysis
+
+Although `config.yaml` contains many nested synthetic-experiment parameters, the current design’s `AppConfig` interface lists only flattened fields such as:
+
+- `bp_min_distance_km`
+- `bp_max_distance_km`
+- `bp_step_km`
+- `random_seed`
+
+Therefore, implementation must avoid assuming public members that are not part of the design unless `AppConfig.from_yaml()` explicitly maps them into supported fields or constants.
+
+For this module to reproduce the configured experiments faithfully, the following values from `config.yaml` must be accessible either through `AppConfig` or through `src/core/constants.py` initialized consistently with the configuration:
+
+### Required synthetic values
+
+From `config.yaml`:
+
+```yaml
+synthetic_experiments.phase_screen.spectral_index_p: 1.5
+synthetic_experiments.phase_screen.outer_scale_km: 10
+synthetic_experiments.observed_average_values.sigma_phi_rad: 1.65
+synthetic_experiments.observed_average_values.s4: 0.32
+synthetic_experiments.observed_average_values.sigma_phi_over_s4_rad: 5.25
+synthetic_experiments.observed_average_values.distance_from_phase_screen_to_receiver_km: 1900
+synthetic_experiments.observed_average_values.estimated_outer_scale_km: 9.7
+synthetic_experiments.modeled_cases.orientation_error.delta_alpha_deg: 0.6
+synthetic_experiments.modeled_cases.two_phase_screens_same_orientation.separation_km: 1000
+synthetic_experiments.modeled_cases.two_phase_screens_same_orientation.sigma_phi_ratio_stronger_to_weaker: 1.5
+synthetic_experiments.modeled_cases.two_phase_screens_different_orientation.alpha_cases_deg:
+  - [30, 60]
+  - [60, 30]
+synthetic_experiments.modeled_cases.thermal_noise.phase_screen_distance_km: 2000
+synthetic_experiments.modeled_cases.thermal_noise.sigma_phi_cases_rad:
+  - 1.65
+  - 0.25
+synthetic_experiments.modeled_cases.thermal_noise.snr_1hz_cases_vv:
+  - 200
+  - 400
+  - 600
+synthetic_experiments.modeled_cases.thermal_noise.assumed_sampling_rate_hz: 100
+synthetic_experiments.modeled_cases.thermal_noise.assumed_projected_scan_velocity_km_s: 4
+synthetic_experiments.modeled_cases.thermal_noise.modeled_spatial_interval_km: 40
+synthetic_experiments.modeled_cases.thermal_noise.windowed_spatial_interval_km: 35
+synthetic_experiments.modeled_cases.thermal_noise.internal_grid_step_m: 10
+```
+
+If these nested fields are not exposed by `AppConfig`, the implementation should not silently invent fallback values. It should either:
+
+1. Use constants explicitly derived from the paper/configuration, or  
+2. Raise a clear configuration error, or  
+3. Return a result dictionary marking the experiment as skipped because required configuration values are unavailable.
+
+---
+
+## 4. Shared Numerical Conventions
+
+### 4.1 Distance and Units
+
+Use explicit units consistently:
+
+- Propagation distances: kilometers in result metadata, meters internally for `FftPropagator`.
+- Spatial grids: meters.
+- Phase: radians.
+- Wavelength: meters.
+- Angles: radians internally, degrees in result summaries where useful.
+
+### 4.2 Wavelength
+
+`config.yaml` states:
+
+```yaml
+synthetic_experiments.wavelength.default_signal: "L1"
+```
+
+The module should use the L1 wavelength from `src/core/constants.py`.
+
+The paper does not explicitly state the synthetic wavelength for every figure, so L1 is the configured default.
+
+### 4.3 Phase Screen Representation
+
+The paper defines the field after the phase screen as:
+
+\[
+u_{\text{out}}(z)=A_0\exp[i k S_0(z)]
+\]
+
+where \(S_0(z)\) is path delay/advance.
+
+However, the design for `PhaseScreenGenerator.generate_1d(...)` says the screen is normalized to requested `sigma_phi_rad`. Therefore, within this module the generated array should be treated as **phase in radians** unless the generator implementation documents otherwise.
+
+The synthetic field immediately after the screen should therefore be:
+
+\[
+u_0(z)=\exp[i\phi_0(z)]
+\]
+
+where:
+
+\[
+\mathrm{std}(\phi_0)=\sigma_\phi
+\]
+
+If the generator returns path delay in meters instead, this module must convert it using:
+
+\[
+\phi_0 = k S_0
+\]
+
+but this behavior must be consistent across all experiments.
+
+### 4.4 Back-Propagation Grid
+
+Use the configured BP distance grid:
+
+\[
+L = 100, 200, \dots, 6000\ \mathrm{km}
+\]
+
+from:
+
+```yaml
+back_propagation.distance_grid.min_km: 100
+back_propagation.distance_grid.max_km: 6000
+back_propagation.distance_grid.step_km: 100
+```
+
+This grid should be used wherever a synthetic \(V(L)\) curve is computed.
+
+---
+
+## 5. `SyntheticExperiments.__init__`
+
+### Inputs
+
+```text
+config: AppConfig
+generator: PhaseScreenGenerator
+propagator: FftPropagator
+```
+
+### Responsibilities
+
+The constructor should only store references:
+
+- `self.config`
+- `self.generator`
+- `self.propagator`
+
+It should not run experiments.
+
+### Important constraint
+
+Do not instantiate `PhaseScreenGenerator` or `FftPropagator` inside this class. The design requires them to be injected.
+
+---
+
+# 6. `run_all()`
+
+### Purpose
+
+Run all configured synthetic experiments and return a single dictionary containing results.
+
+### Expected output structure
+
+A suitable result dictionary should have keys:
+
+```text
+{
+  "single_phase_screen": ...,
+  "outer_scale_estimation": ...,
+  "orientation_error": ...,
+  "two_screens_aligned": ...,
+  "two_screens_misaligned": ...,
+  "thermal_noise": ...,
+  "multivalued_geometry": ...
+}
+```
+
+Each sub-result should include:
+
+- input parameters used,
+- computed arrays,
+- scalar diagnostics,
+- success/failure flags,
+- paper-alignment notes.
+
+### Configuration behavior
+
+`config.yaml` contains per-experiment enabled flags, for example:
+
+```yaml
+synthetic_experiments.modeled_cases.single_phase_screen.enabled: true
+```
+
+If those flags are exposed through `AppConfig`, `run_all()` should respect them. If not exposed, `run_all()` may run all methods by default, because the design interface does not include an enabled/disabled mechanism.
+
+---
+
+# 7. `single_phase_screen()`
+
+## 7.1 Paper Objective
+
+Reproduce the basic result shown conceptually in Figure 4:
+
+- Forward propagation through one thin phase screen produces amplitude scintillation.
+- Back propagation from the receiver toward the transmitter causes amplitude variance to decrease.
+- The normalized amplitude variance \(V(L)\) reaches a minimum at the true phase-screen distance.
+
+## 7.2 Configured Parameters
+
+Use:
+
+```yaml
+synthetic_experiments.phase_screen.spectral_index_p: 1.5
+synthetic_experiments.phase_screen.outer_scale_km: 10
+synthetic_experiments.observed_average_values.sigma_phi_rad: 1.65
+synthetic_experiments.observed_average_values.distance_from_phase_screen_to_receiver_km: 1900
+```
+
+Use BP distance grid:
+
+```yaml
+back_propagation.distance_grid.min_km: 100
+back_propagation.distance_grid.max_km: 6000
+back_propagation.distance_grid.step_km: 100
+```
+
+## 7.3 Algorithm
+
+1. Build spatial coordinate \(z_m\).
+   - The exact general synthetic grid size is not specified in the paper.
+   - If no dedicated synthetic grid configuration exists, the implementation may reuse the configured thermal-noise modeling grid:
+     - `modeled_spatial_interval_km = 40`
+     - `internal_grid_step_m = 10`
+   - This should be documented in the output metadata.
+
+2. Generate one 1D phase screen:
+
+\[
+\phi_0(z)
+\]
+
+using:
+
+```text
+PhaseScreenGenerator.generate_1d(
+    z_m,
+    p=1.5,
+    outer_scale_km=10,
+    sigma_phi_rad=1.65,
+    wavelength_m=L1_wavelength
+)
+```
+
+3. Construct field immediately after the screen:
+
+\[
+u_0(z)=\exp[i\phi_0(z)]
+\]
+
+4. Forward propagate from the screen to the receiver by:
+
+\[
+L_{\text{true}} = 1900\ \mathrm{km}
+\]
+
+using:
+
+```text
+FftPropagator.propagate_2d(u0, z_m, distance_m)
+```
+
+5. For each candidate BP distance \(L\) on the configured grid:
+
+```text
+bp_field = FftPropagator.backpropagate_2d(receiver_field, z_m, L_m)
+V(L) = FftPropagator.amplitude_variance(bp_field)
+```
+
+6. Find the minimum of \(V(L)\).
+
+## 7.4 Expected Result
+
+The minimum should occur near:
+
+\[
+L = 1900\ \mathrm{km}
+\]
+
+Because the BP grid step is configured as 100 km, exact recovery is expected if 1900 km is on the grid, which it is.
+
+## 7.5 Output
+
+Return dictionary fields such as:
+
+```text
+{
+  "parameters": {
+    "p": 1.5,
+    "outer_scale_km": 10,
+    "sigma_phi_rad": 1.65,
+    "true_distance_km": 1900,
+    "wavelength_signal": "L1"
+  },
+  "distances_km": ndarray,
+  "v_curve": ndarray,
+  "estimated_distance_km": float,
+  "distance_error_km": float,
+  "success": bool
+}
+```
+
+---
+
+# 8. `outer_scale_estimation()`
+
+## 8.1 Paper Objective
+
+Reproduce the logic of Figure 3:
+
+- The ratio \(\sigma_\phi / S_4\) depends on outer scale \(l_0\) and screen-receiver distance \(L\).
+- Using observed COSMIC-2 averages:
+
+\[
+\langle \sigma_\phi/S_4 \rangle \approx 5.25\ \mathrm{rad}
+\]
+
+and:
+
+\[
+\langle L\rangle \approx 1900\ \mathrm{km}
+\]
+
+the paper estimates:
+
+\[
+l_0 \approx 9.7\ \mathrm{km}
+\]
+
+which supports using:
+
+\[
+l_0=10\ \mathrm{km}
+\]
+
+## 8.2 Configured Parameters
+
+Use:
+
+```yaml
+synthetic_experiments.observed_average_values.sigma_phi_rad: 1.65
+synthetic_experiments.observed_average_values.s4: 0.32
+synthetic_experiments.observed_average_values.sigma_phi_over_s4_rad: 5.25
+synthetic_experiments.observed_average_values.distance_from_phase_screen_to_receiver_km: 1900
+synthetic_experiments.observed_average_values.estimated_outer_scale_km: 9.7
+synthetic_experiments.phase_screen.outer_scale_km: 10
+synthetic_experiments.phase_screen.spectral_index_p: 1.5
+```
+
+## 8.3 Configuration Limitation
+
+The paper’s Figure 3 requires a sweep over several \(l_0\) and \(L\) values. `config.yaml` provides:
+
+- target distance: 1900 km,
+- configured outer scale: 10 km,
+- estimated outer scale: 9.7 km,
+
+but does **not** provide a full list of outer-scale sweep values or distance sweep values.
+
+Therefore, to avoid inventing values, the implementation should do one of the following:
+
+1. If sweep arrays are added to configuration, use them.
+2. Otherwise, compute only the configured target case and explicitly mark the full sweep as unavailable.
+3. Optionally evaluate the two configured outer scales:
+   - 9.7 km,
+   - 10 km,
+
+at the configured distance 1900 km.
+
+## 8.4 Algorithm for Each Configured Case
+
+For each available outer scale \(l_0\) and distance \(L\):
+
+1. Generate a 1D phase screen with:
+
+\[
+p=1.5
+\]
+
+and requested \(\sigma_\phi=1.65\ \mathrm{rad}\).
+
+2. Propagate the field to distance \(L\).
+
+3. Compute amplitude:
+
+\[
+A=|u|
+\]
+
+4. Compute intensity:
+
+\[
+I=A^2
+\]
+
+5. Compute:
+
+\[
+S_4=\frac{\sqrt{\langle I^2\rangle-\langle I\rangle^2}}{\langle I\rangle}
+\]
+
+6. Compute:
+
+\[
+\sigma_\phi/S_4
+\]
+
+## 8.5 Expected Result
+
+For:
+
+\[
+L=1900\ \mathrm{km}
+\]
+
+and:
+
+\[
+l_0 \approx 9.7\text{--}10\ \mathrm{km}
+\]
+
+the ratio should be close to:
+
+\[
+5.25\ \mathrm{rad}
+\]
+
+Exact agreement is not guaranteed from a single random realization, so the output should report realization-dependent variability if repeated screens are later configured.
+
+## 8.6 Output
+
+Return:
+
+```text
+{
+  "parameters": {
+    "target_ratio_rad": 5.25,
+    "target_distance_km": 1900,
+    "configured_outer_scale_km": 10,
+    "estimated_outer_scale_km": 9.7
+  },
+  "cases": [
+    {
+      "outer_scale_km": ...,
+      "distance_km": ...,
+      "computed_s4": ...,
+      "computed_sigma_phi_over_s4": ...
+    }
+  ],
+  "configuration_warning": optional str
+}
+```
+
+---
+
+# 9. `orientation_error()`
+
+## 9.1 Paper Objective
+
+Reproduce the analytic relation from Section 2.1 and Table 1:
+
+\[
+\Delta L = 2L\tan(\alpha)\Delta\alpha
+\]
+
+The paper uses:
+
+\[
+\Delta\alpha = 0.6^\circ
+\]
+
+as a proxy for approximately 1% magnetic-field orientation error.
+
+## 9.2 Configured Parameters
+
+Use:
+
+```yaml
+synthetic_experiments.modeled_cases.orientation_error.delta_alpha_deg: 0.6
+synthetic_experiments.modeled_cases.orientation_error.table_cases:
+  - alpha_deg: 15
+    distances_km: [1000, 3000, 5000]
+  - alpha_deg: 45
+    distances_km: [1000, 3000, 5000]
+  - alpha_deg: 75
+    distances_km: [1000, 3000, 5000]
+```
+
+## 9.3 Algorithm
+
+For each configured pair \((L,\alpha)\):
+
+1. Convert:
+
+\[
+\Delta\alpha=0.6^\circ
+\]
+
+to radians.
+
+2. Compute:
+
+\[
+\Delta L = 2L\tan(\alpha)\Delta\alpha
+\]
+
+3. Store result in kilometers.
+
+## 9.4 Expected Table Values
+
+The results should approximately reproduce Table 1:
+
+| \(L\) km | \(\alpha=15^\circ\) | \(\alpha=45^\circ\) | \(\alpha=75^\circ\) |
+|---:|---:|---:|---:|
+| 1000 | 6 km | 21 km | 78 km |
+| 3000 | 17 km | 63 km | 235 km |
+| 5000 | 28 km | 105 km | 392 km |
+
+Small rounding differences are acceptable.
+
+## 9.5 Optional Numerical BP Check
+
+The paper also demonstrates this effect using BP curves. However, the analytic formula is the main reproducible target. A numerical check would require applying incorrect coordinate projection scaling:
+
+\[
+z=z'\cos(\alpha+\Delta\alpha)
+\]
+
+instead of:
+
+\[
+z=z'\cos(\alpha)
+\]
+
+This can be added, but it must not replace the analytic table.
+
+## 9.6 Output
+
+Return:
+
+```text
+{
+  "delta_alpha_deg": 0.6,
+  "table": [
+    {
+      "alpha_deg": 15,
+      "distance_km": 1000,
+      "delta_l_km": ...
+    },
+    ...
+  ],
+  "paper_formula": "DeltaL = 2 * L * tan(alpha) * DeltaAlpha"
+}
+```
+
+---
+
+# 10. `two_screens_aligned()`
+
+## 10.1 Paper Objective
+
+Reproduce Section 2.2:
+
+1. Two phase screens with the same orientation and equal \(\sigma_\phi\) are not separately resolvable by BP.
+2. If one screen has 1.5 times larger \(\sigma_\phi\), BP localizes the stronger screen.
+3. This is true regardless of whether the stronger screen is closer to or farther from the receiver.
+
+## 10.2 Configured Parameters
+
+Use:
+
+```yaml
+synthetic_experiments.modeled_cases.two_phase_screens_same_orientation.separation_km: 1000
+synthetic_experiments.modeled_cases.two_phase_screens_same_orientation.sigma_phi_ratio_stronger_to_weaker: 1.5
+synthetic_experiments.phase_screen.spectral_index_p: 1.5
+synthetic_experiments.phase_screen.outer_scale_km: 10
+synthetic_experiments.observed_average_values.sigma_phi_rad: 1.65
+```
+
+## 10.3 Configuration Limitation
+
+The configuration gives separation distance but does not explicitly define absolute screen distances. The paper text mentions separation of 1000 km and says similar results occur for other separations, but the exact absolute locations are not specified in the parsed text.
+
+To avoid inventing values, implementation should:
+
+- require configured absolute distances, or
+- derive a deterministic pair from a configured central distance if such a value is exposed, or
+- use the configured average distance 1900 km as one screen location and place the other according to the configured separation, while explicitly documenting that choice.
+
+The safest documented choice is:
+
+\[
+L_1 = 1900\ \mathrm{km}
+\]
+
+from:
+
+```yaml
+synthetic_experiments.observed_average_values.distance_from_phase_screen_to_receiver_km: 1900
+```
+
+and:
+
+\[
+L_2 = L_1 + 1000\ \mathrm{km}
+\]
+
+from:
+
+```yaml
+separation_km: 1000
+```
+
+This keeps both screens inside the configured BP range.
+
+## 10.4 Forward Propagation Logic
+
+Assuming screen 1 is closer to the transmitter side and screen 2 is closer to the receiver side, propagation must preserve ordering.
+
+A simple implementation can model receiver-side propagation as:
+
+1. Start with incident field:
+
+\[
+u=\mathbf{1}
+\]
+
+2. Apply first screen:
+
+\[
+u \leftarrow u \exp(i\phi_1)
+\]
+
+3. Propagate from screen 1 to screen 2 by separation distance.
+
+4. Apply second screen:
+
+\[
+u \leftarrow u \exp(i\phi_2)
+\]
+
+5. Propagate from screen 2 to receiver.
+
+The absolute ordering must be documented in output metadata.
+
+## 10.5 BP Logic
+
+For the receiver field, compute \(V(L)\) over the configured BP grid using:
+
+```text
+FftPropagator.backpropagate_2d(...)
+FftPropagator.amplitude_variance(...)
+```
+
+## 10.6 Cases
+
+### Case A: Equal strengths
+
+Use:
+
+\[
+\sigma_{\phi,1}=\sigma_{\phi,2}=1.65\ \mathrm{rad}
+\]
+
+Expected result:
+
+- \(V(L)\) does not resolve both screens as two reliable geolocations.
+- A broad or ambiguous minimum may appear.
+- The output should mark this as “not separately resolvable.”
+
+### Case B: Screen 1 stronger
+
+Use:
+
+\[
+\sigma_{\phi,1}=1.5\sigma_{\phi,2}
+\]
+
+where ratio comes from:
+
+```yaml
+sigma_phi_ratio_stronger_to_weaker: 1.5
+```
+
+Expected result:
+
+- Minimum of \(V(L)\) should be associated with the stronger screen.
+
+### Case C: Screen 2 stronger
+
+Swap the strengths.
+
+Expected result:
+
+- Minimum should move to the stronger screen.
+
+## 10.7 Output
+
+Return:
+
+```text
+{
+  "parameters": {
+    "separation_km": 1000,
+    "sigma_phi_base_rad": 1.65,
+    "stronger_to_weaker_ratio": 1.5
+  },
+  "screen_distances_km": [...],
+  "equal_strength": {
+    "distances_km": ndarray,
+    "v_curve": ndarray,
+    "estimated_minimum_km": float,
+    "interpretation": "not separately resolvable"
+  },
+  "screen1_stronger": {...},
+  "screen2_stronger": {...}
+}
+```
+
+---
+
+# 11. `two_screens_misaligned()`
+
+## 11.1 Paper Objective
+
+Reproduce Section 2.3:
+
+For two phase screens with different irregularity orientations and equal \(\sigma_\phi\):
+
+- The screen with smaller scan angle \(\alpha\) is localizable.
+- This holds regardless of whether that screen is closer to or farther from the receiver.
+
+Configured cases:
+
+```yaml
+alpha_cases_deg:
+  - [30, 60]
+  - [60, 30]
+```
+
+## 11.2 Required Propagation
+
+This experiment requires:
+
+- 3D forward propagation using `FftPropagator.propagate_3d(...)`
+- 2D back propagation using `FftPropagator.backpropagate_2d(...)`
+
+The paper’s 3D propagation equation is:
+
+\[
+u(x,y,z)=
+\sum_{mn} c_{mn}
+\exp[
+ik_{zm}z
++
+ik_{yn}y
++
+i\sqrt{k^2-k_{zm}^2-k_{yn}^2}(x-x_0)
+]
+\]
+
+## 11.3 Phase-Screen Generation
+
+Use:
+
+```text
+PhaseScreenGenerator.generate_2d(
+    y_m,
+    z_m,
+    alpha_rad,
+    p=1.5,
+    outer_scale_km=10,
+    sigma_phi_rad=1.65,
+    wavelength_m=L1_wavelength
+)
+```
+
+The generator must produce oriented 1D-like irregularities embedded in the 2D \(y,z\) plane.
+
+## 11.4 Configuration Limitation
+
+The configuration provides the scan-angle pairs but does not explicitly provide:
+
+- absolute screen distances,
+- screen separation for the misaligned case,
+- 2D grid size in \(y,z\).
+
+To remain faithful and reproducible, implementation should:
+
+1. Use configured values if later added.
+2. Otherwise reuse documented configured values:
+   - average distance 1900 km,
+   - separation 1000 km from the aligned-screen experiment,
+   - thermal-noise spatial interval/grid if no separate grid exists.
+
+The output must explicitly state this reuse.
+
+## 11.5 Algorithm
+
+For each configured alpha pair:
+
+\[
+(\alpha_1,\alpha_2)=(30^\circ,60^\circ)
+\]
+
+and:
+
+\[
+(\alpha_1,\alpha_2)=(60^\circ,30^\circ)
+\]
+
+1. Generate two 2D phase screens with equal:
+
+\[
+\sigma_\phi=1.65\ \mathrm{rad}
+\]
+
+2. Forward propagate through both screens in 3D.
+
+3. Extract synthetic receiver trajectory along the configured 1D \(z\)-axis, consistent with the paper.
+
+4. Project/extract the 1D signal corresponding to the BP plane for each assumed screen orientation.
+
+5. Apply 2D BP and compute \(V(L)\).
+
+6. Identify the minimum of \(V(L)\).
+
+## 11.6 Expected Result
+
+For:
+
+\[
+\alpha_1=30^\circ,\quad \alpha_2=60^\circ
+\]
+
+the first screen should be localizable.
+
+For:
+
+\[
+\alpha_1=60^\circ,\quad \alpha_2=30^\circ
+\]
+
+the second screen should be localizable.
+
+The key validation is qualitative:
+
+```text
+smaller alpha dominates localization
+```
+
+## 11.7 Output
+
+Return:
+
+```text
+{
+  "parameters": {
+    "alpha_cases_deg": [[30, 60], [60, 30]],
+    "sigma_phi_rad": 1.65,
+    "outer_scale_km": 10,
+    "p": 1.5
+  },
+  "cases": [
+    {
+      "alpha1_deg": 30,
+      "alpha2_deg": 60,
+      "distances_km": ndarray,
+      "v_curve_for_alpha1_plane": ndarray,
+      "v_curve_for_alpha2_plane": ndarray,
+      "localized_screen": 1,
+      "expected_localized_screen": 1,
+      "success": bool
+    },
+    ...
+  ]
+}
+```
+
+---
+
+# 12. `thermal_noise()`
+
+## 12.1 Paper Objective
+
+Reproduce Section 2.4 and Figure 11:
+
+- Thermal noise is additive complex noise on \(u_1\) and \(u_2\).
+- Noise shifts \(V(L)\) upward.
+- The shape of \(V(L)\) remains similar.
+- Strong scintillation remains detectable.
+- Weak scintillation near the threshold becomes marginal or undetectable at low SNR.
+
+## 12.2 Configured Parameters
+
+Use:
+
+```yaml
+synthetic_experiments.modeled_cases.thermal_noise.phase_screen_distance_km: 2000
+synthetic_experiments.modeled_cases.thermal_noise.sigma_phi_cases_rad:
+  - 1.65
+  - 0.25
+synthetic_experiments.modeled_cases.thermal_noise.snr_1hz_cases_vv:
+  - 200
+  - 400
+  - 600
+synthetic_experiments.modeled_cases.thermal_noise.assumed_sampling_rate_hz: 100
+synthetic_experiments.modeled_cases.thermal_noise.assumed_projected_scan_velocity_km_s: 4
+synthetic_experiments.modeled_cases.thermal_noise.modeled_spatial_interval_km: 40
+synthetic_experiments.modeled_cases.thermal_noise.windowed_spatial_interval_km: 35
+synthetic_experiments.modeled_cases.thermal_noise.internal_grid_step_m: 10
+```
+
+## 12.3 Noise Model
+
+The complex signal is:
+
+\[
+u = u_1 + i u_2 = A\exp(i\phi)
+\]
+
+Thermal noise is added independently to:
+
+\[
+u_1,\ u_2
+\]
+
+The paper defines:
+
+\[
+\sigma_\phi = \frac{1}{\mathrm{SNR}}
+\]
+
+For high-rate sampling:
+
+\[
+\mathrm{SNR}_{f_s}=
+\frac{\mathrm{SNR}_{1Hz}}{\sqrt{f_s}}
+\]
+
+For example, the configured/paper average case:
+
+\[
+\mathrm{SNR}_{1Hz}=400
+\]
+
+\[
+f_s=100
+\]
+
+\[
+\mathrm{SNR}_{100Hz}=40
+\]
+
+\[
+\sigma_\phi=1/40=0.025\ \mathrm{rad}
+\]
+
+The paper additionally increases noise standard deviation by factor 2 because the internal grid step is 10 m while the observational spacing is 40 m.
+
+This factor is justified by:
+
+```yaml
+internal_grid_step_m: 10
+assumed_projected_scan_velocity_km_s: 4
+assumed_sampling_rate_hz: 100
+```
+
+which gives observational spacing:
+
+\[
+\Delta z =
+\frac{4\ \mathrm{km/s}}{100\ \mathrm{Hz}}
+=
+0.04\ \mathrm{km}
+=
+40\ \mathrm{m}
+\]
+
+## 12.4 Algorithm
+
+For each configured \(\sigma_\phi\):
+
+\[
+1.65,\ 0.25
+\]
+
+and each configured SNR:
+
+\[
+200,\ 400,\ 600
+\]
+
+1. Generate phase screen using:
+
+\[
+p=1.5,\quad l_0=10\ \mathrm{km}
+\]
+
+2. Propagate to:
+
+\[
+L=2000\ \mathrm{km}
+\]
+
+3. Add complex noise to the receiver field.
+
+For each SNR:
+
+\[
+\mathrm{SNR}_{eff}=
+\frac{\mathrm{SNR}_{1Hz}}{\sqrt{100}}
+\]
+
+Noise standard deviation relative to unit amplitude:
+
+\[
+\sigma_u=\frac{1}{\mathrm{SNR}_{eff}}
+\]
+
+Then multiply by the paper’s factor 2 for the configured 10 m internal grid:
+
+\[
+\sigma_u \leftarrow 2\sigma_u
+\]
+
+4. Add independent Gaussian noise:
+
+\[
+u_{\text{noisy}}
+=
+u
++
+n_1
++
+i n_2
+\]
+
+5. Compute \(V(L)\) by BP over the configured distance grid.
+
+6. Compare noisy \(V(L)\) with noiseless baseline.
+
+## 12.5 Expected Result
+
+For:
+
+\[
+\sigma_\phi=1.65\ \mathrm{rad}
+\]
+
+the minimum should remain clear for all configured SNRs.
+
+For:
+
+\[
+\sigma_\phi=0.25\ \mathrm{rad}
+\]
+
+the minimum should be weaker, especially for:
+
+\[
+\mathrm{SNR}_{1Hz}=200
+\]
+
+Noise should mainly raise the \(V(L)\) baseline.
+
+## 12.6 Output
+
+Return:
+
+```text
+{
+  "parameters": {
+    "phase_screen_distance_km": 2000,
+    "sigma_phi_cases_rad": [1.65, 0.25],
+    "snr_1hz_cases_vv": [200, 400, 600],
+    "sampling_rate_hz": 100,
+    "projected_scan_velocity_km_s": 4,
+    "internal_grid_step_m": 10
+  },
+  "cases": [
+    {
+      "sigma_phi_rad": 1.65,
+      "snr_1hz_vv": 400,
+      "effective_snr": 40,
+      "noise_sigma": ...,
+      "distances_km": ndarray,
+      "v_curve": ndarray,
+      "estimated_minimum_km": ...,
+      "minimum_detectable": bool
+    },
+    ...
+  ]
+}
+```
+
+---
+
+# 13. `multivalued_geometry()`
+
+## 13.1 Paper Objective
+
+Reproduce the conceptual explanation from Figures 19–20:
+
+- Multi-valued geolocations are not caused by multiple physical irregularity regions.
+- They are caused by the interaction between the distance-dependent scan angle \(\cos\alpha(L)\) and the BP degeneracy.
+- A real \(\cos\alpha(L)\) curve can cross a degenerate curve multiple times, yielding multiple valid \(D(L)=0\) solutions.
+
+## 13.2 Paper-Specific Values
+
+The paper discusses an example with:
+
+\[
+L_0=2500\ \mathrm{km}
+\]
+
+and degenerate curves for:
+
+\[
+\cos\alpha(L_0)=0.4,\dots,1.0
+\]
+
+with step 0.1.
+
+However, these values are not present in `config.yaml`.
+
+## 13.3 Configuration Limitation
+
+Because `config.yaml` does not provide:
+
+- degenerate reference distance \(L_0=2500\) km,
+- \(\cos\alpha\) family values,
+- synthetic crossing distances such as 1200, 2500, 4000 km,
+
+the implementation must not silently hard-code them unless they are added to configuration or constants explicitly tied to the paper.
+
+Recommended behavior:
+
+1. If multivalued parameters are configured, compute the synthetic demonstration.
+2. Otherwise, return a structured skipped result explaining that the required Figure 20 parameters are not available in configuration.
+
+## 13.4 If Configured Later
+
+The logic should be:
+
+1. Define one or more synthetic scan-angle curves:
+
+\[
+\cos\alpha(L)
+\]
+
+2. For a known phase-screen distance \(L_0\), compute BP response as a function of assumed \(\alpha\).
+
+3. Construct:
+
+\[
+D(L)=L_{\text{BP-min}}(L)-L
+\]
+
+4. Identify zero crossings:
+
+\[
+D(L)=0
+\]
+
+5. If more than one crossing occurs, mark the case as multivalued.
+
+## 13.5 Output
+
+If skipped:
+
+```text
+{
+  "status": "skipped",
+  "reason": "Required multivalued geometry parameters are not present in config.yaml",
+  "paper_reference": "Figures 19-20"
+}
+```
+
+If implemented:
+
+```text
+{
+  "parameters": {...},
+  "distances_km": ndarray,
+  "cos_alpha_curve": ndarray,
+  "d_curve": ndarray,
+  "zero_crossings_km": [...],
+  "is_multivalued": bool
+}
+```
+
+---
+
+# 14. Internal Helper Logic
+
+Although the design exposes only public methods listed above, the implementation may use private helper functions inside the module, for example:
+
+```text
+_make_distance_grid()
+_make_z_grid()
+_compute_v_curve()
+_compute_s4_from_field()
+_find_minimum_distance()
+```
+
+These should remain private and must not be used by other modules.
+
+### 14.1 Distance Grid Helper
+
+Should derive from config:
+
+```yaml
+back_propagation.distance_grid:
+  min_km: 100
+  max_km: 6000
+  step_km: 100
+```
+
+Expected array:
+
+\[
+[100, 200, \dots, 6000]
+\]
+
+### 14.2 V-Curve Helper
+
+Given receiver field \(u_r(z)\):
+
+1. For each distance \(L\):
+   - backpropagate
+   - compute amplitude variance
+2. Return:
+
+```text
+distances_km, v_curve
+```
+
+Use:
+
+```text
+FftPropagator.backpropagate_2d(...)
+FftPropagator.amplitude_variance(...)
+```
+
+Do not reimplement propagation inside this module.
+
+---
+
+# 15. Reproducibility Requirements
+
+Use:
+
+```yaml
+reproducibility.random_seed: 42
+```
+
+The actual random phase screens are generated by `PhaseScreenGenerator`, which is constructed with the seed according to the design. If `thermal_noise()` creates additional random noise internally, it must use the same configured seed or a deterministic derived seed.
+
+All returned dictionaries should include:
+
+```text
+"random_seed": 42
+```
+
+where applicable.
+
+---
+
+# 16. Expected Validation Outcomes
+
+The module should help confirm these paper claims:
+
+| Experiment | Expected outcome |
+|---|---|
+| Single phase screen | \(V(L)\) minimum at true phase-screen distance |
+| Outer-scale estimation | \(l_0 \approx 9.7\text{--}10\) km consistent with \(\sigma_\phi/S_4 \approx 5.25\) at \(L\approx1900\) km |
+| Orientation error | Table 1 reproduced using \(\Delta L=2L\tan(\alpha)\Delta\alpha\) |
+| Two aligned screens | Equal-strength screens not separately resolvable |
+| Two aligned screens, unequal | Stronger screen dominates localization |
+| Two misaligned screens | Smaller scan angle dominates localization |
+| Thermal noise | Noise raises \(V(L)\) baseline; weak scintillation becomes marginal |
+| Multivalued geometry | Should be skipped unless required parameters are configured |
+
+---
+
+# 17. Critical Implementation Notes
+
+1. Do not hard-code paper values if they are available in `config.yaml`.
+2. Do not assume nested `AppConfig` attributes unless `src/config.py` explicitly provides them.
+3. Use `PhaseScreenGenerator` for phase-screen creation.
+4. Use `FftPropagator` for all propagation and amplitude variance.
+5. Do not call real-data geolocation classes from this module.
+6. Do not perform file writing or plotting here.
+7. Return rich result dictionaries suitable for `ResultWriter.write_diagnostics(...)` and `Plotter.plot_synthetic_outputs(...)`.
+8. Clearly mark any experiment as partially reproduced or skipped when configuration lacks required parameters.
+9. Preserve units in output keys, for example:
+   - `distance_km`
+   - `z_m`
+   - `sigma_phi_rad`
+   - `alpha_deg`
+   - `wavelength_m`
+
+---
+
+## 18. Summary
+
+`SyntheticExperiments` is the numerical validation layer for the reproduction. It should demonstrate that the implemented FFT propagation and phase-screen modeling reproduce the physical behavior described in the paper before real COSMIC-2 data are processed.
+
+The most important outputs are:
+
+1. \(V(L)\) minimum at the true screen distance.
+2. Correct orientation-error scaling.
+3. Failure to resolve equal aligned screens.
+4. Dominance of stronger aligned screen.
+5. Dominance of smaller scan angle for misaligned screens.
+6. Thermal-noise baseline lifting.
+7. Explicit handling of missing configuration for multivalued synthetic geometry.

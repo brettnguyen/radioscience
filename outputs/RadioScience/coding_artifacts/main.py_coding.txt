@@ -1,0 +1,927 @@
+## Code: main.py
+```python
+## main.py
+"""Command-line entry point for COSMIC-2 BP geolocation reproduction.
+
+This module orchestrates the reproducibility pipeline for the paper:
+
+    "Geolocation of the Ionospheric Irregularities in the Equatorial F Layer
+    by Back Propagation of COSMIC-2 Radio Occultation Signals"
+
+It intentionally contains no scientific back-propagation implementation. All
+scientific logic is delegated to the designed service classes:
+
+* SyntheticExperiments
+* RealDataExperiments
+* Geolocator
+* BackpropProcessor
+* QualityController
+* ResultWriter
+* Plotter
+
+Supported modes:
+    synthetic
+        Run all synthetic validation experiments.
+
+    process-year
+        Process all available COSMIC-2 windows for one year and one signal.
+
+    monthly-maps
+        Process configured year(s), create post-sunset monthly bins, and plot
+        Figure 21-style maps.
+
+    l1-l2
+        Process and pair L1/L2 geolocations for the configured comparison
+        period.
+
+    f107
+        Load cached or download F10.7 solar flux data and plot a Figure
+        22-style time series.
+
+The public defaults come from config.yaml through AppConfig and a raw YAML
+reader for configuration fields not yet exposed by AppConfig's flat public
+interface. Paper thresholds and scientific parameters are not hard-coded here.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+import logging
+from pathlib import Path
+import sys
+from typing import Any, Mapping, Sequence
+
+import pandas as pd
+import yaml
+
+from src.config import AppConfig, ConfigLoadError
+from src.core import constants
+from src.data.cosmic_loader import CosmicLoader
+from src.data.f107_loader import F107Loader
+from src.data.orbit_loader import OrbitLoader
+from src.experiments.real_data_experiments import RealDataExperiments
+from src.experiments.synthetic_experiments import SyntheticExperiments
+from src.geometry.bp_plane import BpPlaneBuilder
+from src.geometry.coordinates import CoordinateTransformer
+from src.geometry.los import LosGeometry
+from src.geometry.magnetic_field import MagneticFieldModel
+from src.geolocation.backprop_processor import BackpropProcessor
+from src.geolocation.geolocator import Geolocator
+from src.geolocation.qc import QualityController
+from src.geolocation.stationary_correction import StationaryCorrector
+from src.io.writers import ResultWriter
+from src.propagation.fft_propagator import FftPropagator
+from src.propagation.kirchhoff import KirchhoffPropagator
+from src.propagation.phase_screen import PhaseScreenGenerator
+from src.signal.preprocessing import SignalPreprocessor
+from src.signal.scintillation import ScintillationCalculator
+from src.visualization.plots import Plotter
+
+
+_LOGGER = logging.getLogger(__name__)
+
+_MODE_SYNTHETIC: str = "synthetic"
+_MODE_PROCESS_YEAR: str = "process-year"
+_MODE_MONTHLY_MAPS: str = "monthly-maps"
+_MODE_L1_L2: str = "l1-l2"
+_MODE_F107: str = "f107"
+
+_SUPPORTED_MODES: tuple[str, ...] = (
+    _MODE_SYNTHETIC,
+    _MODE_PROCESS_YEAR,
+    _MODE_MONTHLY_MAPS,
+    _MODE_L1_L2,
+    _MODE_F107,
+)
+
+_DEFAULT_CONFIG_CANDIDATES: tuple[Path, ...] = (
+    Path("config/default.yaml"),
+    Path("config.yaml"),
+)
+
+_DEFAULT_F107_SOURCE_URL: str = "https://omniweb.gsfc.nasa.gov/form/dx1.html"
+_DEFAULT_F107_CACHE_PATH: Path = Path("data/f107/f107.csv")
+
+
+@dataclass(frozen=True, slots=True)
+class CliOptions:
+    """Parsed command-line options."""
+
+    config_path: Path
+    mode: str
+    year: int | None
+    signal: str | None
+    start_date: date | None
+    end_date: date | None
+    log_level: str
+
+
+@dataclass(slots=True)
+class PipelineServices:
+    """Container for instantiated pipeline services."""
+
+    config: AppConfig
+    raw_config: dict[str, Any]
+    cosmic_loader: CosmicLoader
+    orbit_loader: OrbitLoader
+    transformer: CoordinateTransformer
+    los_geometry: LosGeometry
+    magnetic_model: MagneticFieldModel
+    plane_builder: BpPlaneBuilder
+    preprocessor: SignalPreprocessor
+    scintillation: ScintillationCalculator
+    fft_propagator: FftPropagator
+    kirchhoff_propagator: KirchhoffPropagator
+    corrector: StationaryCorrector
+    qc: QualityController
+    backprop_processor: BackpropProcessor
+    geolocator: Geolocator
+    phase_screen_generator: PhaseScreenGenerator
+    synthetic_experiments: SyntheticExperiments
+    real_data_experiments: RealDataExperiments
+    plotter: Plotter
+    writer: ResultWriter
+    wavelength_m: float
+
+
+class Main:
+    """Top-level command-line application orchestrator."""
+
+    def __init__(self, config_path: Path) -> None:
+        """Load validated and raw configuration.
+
+        Args:
+            config_path: Path to YAML configuration.
+
+        Raises:
+            ConfigLoadError: If AppConfig validation fails.
+            ValueError: If raw YAML cannot be loaded as a mapping.
+        """
+        self.config_path: Path = Path(config_path).expanduser()
+        self.config: AppConfig = AppConfig.from_yaml(self.config_path)
+        self.raw_config: dict[str, Any] = self._load_raw_config(self.config_path)
+
+    def run(self, options: CliOptions) -> None:
+        """Dispatch the selected CLI mode.
+
+        Args:
+            options: Parsed command-line options.
+
+        Raises:
+            ValueError: If the mode is unsupported or mode-specific arguments
+                are missing.
+        """
+        mode: str = options.mode
+
+        if mode == _MODE_SYNTHETIC:
+            self.run_synthetic()
+            return
+
+        if mode == _MODE_PROCESS_YEAR:
+            if options.year is None:
+                raise ValueError("--year is required for --mode process-year.")
+            signal: str = self._resolve_signal(options.signal)
+            self.run_real_data(year=options.year, signal=signal)
+            return
+
+        if mode == _MODE_MONTHLY_MAPS:
+            signal = self._resolve_monthly_map_signal(options.signal)
+            years: list[int] = (
+                [int(options.year)]
+                if options.year is not None
+                else self._configured_monthly_map_years()
+            )
+            self.run_monthly_maps(years=years, signal=signal)
+            return
+
+        if mode == _MODE_L1_L2:
+            start_date: date = options.start_date or self._configured_l1_l2_start_date()
+            end_date: date = options.end_date or self._configured_l1_l2_end_date()
+            self.run_l1_l2_comparison(start=start_date, end=end_date)
+            return
+
+        if mode == _MODE_F107:
+            self.run_f107(start=options.start_date, end=options.end_date)
+            return
+
+        raise ValueError(f"Unsupported mode {mode!r}. Expected one of {_SUPPORTED_MODES}.")
+
+    def run_synthetic(self) -> None:
+        """Run all synthetic validation experiments and write diagnostics/plots."""
+        signal: str = self._configured_synthetic_signal()
+        services: PipelineServices = self._build_services(signal=signal)
+
+        synthetic_enabled: bool = self._raw_bool(
+            path=("synthetic_experiments", "enabled"),
+            default=True,
+        )
+        if not synthetic_enabled:
+            _LOGGER.warning(
+                "synthetic_experiments.enabled is false in configuration, but "
+                "synthetic mode was explicitly requested. Continuing."
+            )
+
+        _LOGGER.info("Running synthetic BP validation experiments.")
+        results: dict[str, Any] = services.synthetic_experiments.run_all()
+
+        if self._output_enabled("save_diagnostics", default=True):
+            diagnostics_path: Path = services.writer.write_diagnostics(
+                results,
+                "synthetic/synthetic_results.json",
+            )
+            _LOGGER.info("Wrote synthetic diagnostics to %s", diagnostics_path)
+
+        plot_dir: Path = services.config.output_dir / "synthetic" / "figures"
+        services.plotter.plot_synthetic_outputs(results, plot_dir)
+        _LOGGER.info("Wrote synthetic plots to %s", plot_dir)
+
+    def run_real_data(self, year: int, signal: str) -> None:
+        """Process one real-data year/signal and write geolocation results.
+
+        Args:
+            year: UTC calendar year.
+            signal: Signal selector such as ``L1``.
+        """
+        year_value: int = int(year)
+        signal_value: str = str(signal).strip()
+        if not signal_value:
+            raise ValueError("signal must be non-empty.")
+
+        services: PipelineServices = self._build_services(signal=signal_value)
+
+        self._log_real_data_targets(year=year_value, signal=signal_value)
+
+        _LOGGER.info("Processing COSMIC-2 data for year=%s, signal=%s.", year_value, signal_value)
+        results_df: pd.DataFrame = services.real_data_experiments.process_year(
+            year=year_value,
+            signal=signal_value,
+        )
+
+        output_name: str = f"real_data/geolocations_{self._safe_name(signal_value)}_{year_value}.parquet"
+        output_path: Path = services.writer.write_dataframe(results_df, output_name)
+        _LOGGER.info("Wrote yearly geolocation table to %s", output_path)
+        self._log_result_summary(results_df, label=f"{signal_value} {year_value}")
+
+    def run_monthly_maps(self, years: Sequence[int], signal: str) -> None:
+        """Process configured monthly-map years and create bins/plots.
+
+        Args:
+            years: Target years. If multiple years are supplied, each is
+                processed independently.
+            signal: Signal selector, normally ``L1``.
+        """
+        if not years:
+            raise ValueError("At least one year is required for monthly-maps mode.")
+
+        signal_value: str = str(signal).strip()
+        if not signal_value:
+            raise ValueError("signal must be non-empty for monthly-maps mode.")
+
+        services: PipelineServices = self._build_services(signal=signal_value)
+
+        for year_value in [int(year) for year in years]:
+            self._log_real_data_targets(year=year_value, signal=signal_value)
+
+            _LOGGER.info(
+                "Processing monthly-map inputs for year=%s, signal=%s.",
+                year_value,
+                signal_value,
+            )
+            results_df: pd.DataFrame = services.real_data_experiments.process_year(
+                year=year_value,
+                signal=signal_value,
+            )
+            result_path: Path = services.writer.write_dataframe(
+                results_df,
+                f"monthly_maps/geolocations_{self._safe_name(signal_value)}_{year_value}.parquet",
+            )
+            _LOGGER.info("Wrote monthly-map source geolocations to %s", result_path)
+            self._log_result_summary(results_df, label=f"monthly source {signal_value} {year_value}")
+
+            binned_df: pd.DataFrame = services.real_data_experiments.make_monthly_bins(results_df)
+            binned_path: Path = services.writer.write_dataframe(
+                binned_df,
+                f"monthly_maps/monthly_bins_{self._safe_name(signal_value)}_{year_value}.parquet",
+            )
+            _LOGGER.info("Wrote monthly binned geolocations to %s", binned_path)
+
+            if self._output_enabled("save_monthly_maps", default=True):
+                plot_dir: Path = services.config.output_dir / "monthly_maps" / "figures"
+                services.plotter.plot_monthly_maps(binned_df, plot_dir)
+                _LOGGER.info("Wrote monthly map figure(s) to %s", plot_dir)
+
+    def run_l1_l2_comparison(self, start: date, end: date) -> None:
+        """Run L1/L2 comparison experiment.
+
+        Args:
+            start: Start date.
+            end: End date. The RealDataExperiments implementation uses a
+                start-inclusive/end-exclusive convention.
+        """
+        start_date: date = self._coerce_date(start, "start")
+        end_date: date = self._coerce_date(end, "end")
+        if start_date >= end_date:
+            raise ValueError(
+                f"L1/L2 start date must be earlier than end date, got "
+                f"{start_date.isoformat()} and {end_date.isoformat()}."
+            )
+
+        services: PipelineServices = self._build_services(signal=self._resolve_signal(None))
+
+        _LOGGER.info(
+            "Processing L1/L2 comparison for %s to %s.",
+            start_date.isoformat(),
+            end_date.isoformat(),
+        )
+        _LOGGER.info(
+            "Paper/config validation targets: L1≈%s, L2≈%s, common≈%s.",
+            constants.EXPECTED_L1_L2_L1_COUNT,
+            constants.EXPECTED_L1_L2_L2_COUNT,
+            constants.EXPECTED_L1_L2_COMMON_COUNT,
+        )
+
+        pairs_df: pd.DataFrame = services.real_data_experiments.process_l1_l2_period(
+            start=start_date,
+            end=end_date,
+        )
+
+        output_path: Path = services.writer.write_dataframe(
+            pairs_df,
+            "l1_l2/l1_l2_pairs.parquet",
+        )
+        _LOGGER.info("Wrote L1/L2 paired geolocations to %s", output_path)
+
+        if self._output_enabled("save_l1_l2_histogram", default=True):
+            plot_path: Path = services.config.output_dir / "l1_l2" / "l1_l2_zonal_difference_histogram.png"
+            services.plotter.plot_l1_l2_histogram(pairs_df, plot_path)
+            _LOGGER.info("Wrote L1/L2 histogram to %s", plot_path)
+
+        _LOGGER.info("L1/L2 paired common cases: %s", len(pairs_df))
+
+    def run_f107(self, start: date | None, end: date | None) -> None:
+        """Load/download F10.7 data, persist it, and create a plot.
+
+        Args:
+            start: Optional start date used for download or cache filtering.
+            end: Optional end date used for download or cache filtering.
+        """
+        f107_source_url: str = self._configured_f107_source_url()
+        f107_cache_path: Path = self._configured_f107_cache_path()
+        output_services: PipelineServices = self._build_services(signal=self._resolve_signal(None))
+        loader: F107Loader = F107Loader(f107_source_url)
+
+        if f107_cache_path.exists():
+            _LOGGER.info("Loading cached F10.7 data from %s", f107_cache_path)
+            f107_df: pd.DataFrame = loader.load_cached(f107_cache_path)
+
+            if start is not None or end is not None:
+                if start is None or end is None:
+                    raise ValueError(
+                        "Both --start-date and --end-date must be supplied when "
+                        "filtering cached F10.7 data."
+                    )
+                start_date: date = self._coerce_date(start, "start")
+                end_date: date = self._coerce_date(end, "end")
+                if start_date > end_date:
+                    raise ValueError("F10.7 --start-date must be <= --end-date.")
+                f107_df = self._filter_f107_date_range(f107_df, start_date, end_date)
+        else:
+            if start is None or end is None:
+                raise ValueError(
+                    "F10.7 cache file does not exist and config.yaml does not "
+                    "define an F10.7 date range. Provide both --start-date and "
+                    "--end-date, or create the cached file at "
+                    f"{f107_cache_path}."
+                )
+            start_date = self._coerce_date(start, "start")
+            end_date = self._coerce_date(end, "end")
+            if start_date > end_date:
+                raise ValueError("F10.7 --start-date must be <= --end-date.")
+
+            _LOGGER.info(
+                "Downloading F10.7 data from %s for %s to %s.",
+                f107_source_url,
+                start_date.isoformat(),
+                end_date.isoformat(),
+            )
+            f107_df = loader.download(start=start_date, end=end_date)
+
+        output_path: Path = output_services.writer.write_dataframe(
+            f107_df,
+            "f107/f107.parquet",
+        )
+        _LOGGER.info("Wrote F10.7 table to %s", output_path)
+
+        if self._output_enabled("save_f107_plot", default=True):
+            plot_path: Path = output_services.config.output_dir / "f107" / "f107_timeseries.png"
+            output_services.plotter.plot_f107(f107_df, plot_path)
+            _LOGGER.info("Wrote F10.7 plot to %s", plot_path)
+
+    def _build_services(self, signal: str) -> PipelineServices:
+        """Instantiate services in the design-specified dependency order.
+
+        Args:
+            signal: Signal used to choose the injected FFT propagator
+                wavelength.
+
+        Returns:
+            Fully constructed service container.
+        """
+        wavelength_m: float = self._resolve_wavelength_for_signal(signal)
+
+        cosmic_loader: CosmicLoader = CosmicLoader(self.config)
+        orbit_loader: OrbitLoader = OrbitLoader(self.config)
+        transformer: CoordinateTransformer = CoordinateTransformer()
+        los_geometry: LosGeometry = LosGeometry(transformer)
+        magnetic_model: MagneticFieldModel = MagneticFieldModel(self.config.igrf_model)
+        plane_builder: BpPlaneBuilder = BpPlaneBuilder(los_geometry, magnetic_model)
+
+        preprocessor: SignalPreprocessor = SignalPreprocessor(self.config)
+        scintillation: ScintillationCalculator = ScintillationCalculator()
+        fft_propagator: FftPropagator = FftPropagator(wavelength_m)
+        kirchhoff_propagator: KirchhoffPropagator = KirchhoffPropagator(wavelength_m)
+        corrector: StationaryCorrector = StationaryCorrector(self.config)
+        qc: QualityController = QualityController(self.config)
+
+        backprop_processor: BackpropProcessor = BackpropProcessor(
+            self.config,
+            plane_builder,
+            corrector,
+            fft_propagator,
+            qc,
+        )
+        geolocator: Geolocator = Geolocator(
+            self.config,
+            preprocessor,
+            scintillation,
+            los_geometry,
+            backprop_processor,
+            qc,
+        )
+
+        phase_screen_generator: PhaseScreenGenerator = PhaseScreenGenerator(
+            self.config.random_seed
+        )
+        synthetic_experiments: SyntheticExperiments = SyntheticExperiments(
+            self.config,
+            phase_screen_generator,
+            fft_propagator,
+        )
+        real_data_experiments: RealDataExperiments = RealDataExperiments(
+            self.config,
+            cosmic_loader,
+            geolocator,
+        )
+
+        plotter: Plotter = Plotter()
+        writer: ResultWriter = ResultWriter(self.config.output_dir)
+
+        return PipelineServices(
+            config=self.config,
+            raw_config=self.raw_config,
+            cosmic_loader=cosmic_loader,
+            orbit_loader=orbit_loader,
+            transformer=transformer,
+            los_geometry=los_geometry,
+            magnetic_model=magnetic_model,
+            plane_builder=plane_builder,
+            preprocessor=preprocessor,
+            scintillation=scintillation,
+            fft_propagator=fft_propagator,
+            kirchhoff_propagator=kirchhoff_propagator,
+            corrector=corrector,
+            qc=qc,
+            backprop_processor=backprop_processor,
+            geolocator=geolocator,
+            phase_screen_generator=phase_screen_generator,
+            synthetic_experiments=synthetic_experiments,
+            real_data_experiments=real_data_experiments,
+            plotter=plotter,
+            writer=writer,
+            wavelength_m=wavelength_m,
+        )
+
+    @staticmethod
+    def _load_raw_config(config_path: Path) -> dict[str, Any]:
+        """Load raw YAML for fields not exposed by AppConfig.
+
+        Args:
+            config_path: YAML configuration path.
+
+        Returns:
+            Raw nested configuration dictionary.
+
+        Raises:
+            ValueError: If YAML is empty or not a mapping.
+        """
+        try:
+            with Path(config_path).expanduser().open("r", encoding="utf-8") as stream:
+                loaded: Any = yaml.safe_load(stream)
+        except OSError as exc:
+            raise ValueError(f"Could not read raw configuration {config_path}: {exc}") from exc
+        except yaml.YAMLError as exc:
+            raise ValueError(f"Invalid raw YAML configuration {config_path}: {exc}") from exc
+
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Configuration {config_path} must contain a YAML mapping.")
+        return loaded
+
+    def _resolve_signal(self, cli_signal: str | None) -> str:
+        """Resolve primary signal from CLI or config."""
+        if cli_signal is not None and str(cli_signal).strip():
+            return str(cli_signal).strip()
+        return str(
+            self._raw_get(
+                ("signals", "primary_signal"),
+                default=constants.DEFAULT_PRIMARY_SIGNAL,
+            )
+        ).strip()
+
+    def _resolve_monthly_map_signal(self, cli_signal: str | None) -> str:
+        """Resolve monthly-map signal from CLI or config."""
+        if cli_signal is not None and str(cli_signal).strip():
+            return str(cli_signal).strip()
+        return str(
+            self._raw_get(
+                ("real_data_experiments", "monthly_l1_maps", "signal"),
+                default=self._resolve_signal(None),
+            )
+        ).strip()
+
+    def _configured_monthly_map_years(self) -> list[int]:
+        """Return configured monthly-map years."""
+        value: Any = self._raw_get(
+            ("real_data_experiments", "monthly_l1_maps", "years"),
+            default=list(constants.DEFAULT_MONTHLY_MAP_YEARS),
+        )
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            raise ValueError("Configured monthly map years must be a sequence of years.")
+        years: list[int] = [int(year) for year in value]
+        if not years:
+            raise ValueError("Configured monthly map years are empty.")
+        return years
+
+    def _configured_l1_l2_start_date(self) -> date:
+        """Return configured L1/L2 comparison start date."""
+        value: Any = self._raw_get(
+            ("signals", "l1_l2_comparison", "start_date"),
+            default=self._raw_get(
+                ("real_data_experiments", "l1_l2_comparison", "start_date"),
+                default=constants.DEFAULT_L1_L2_START_DATE,
+            ),
+        )
+        return self._coerce_date(value, "configured L1/L2 start_date")
+
+    def _configured_l1_l2_end_date(self) -> date:
+        """Return configured L1/L2 comparison end date."""
+        value: Any = self._raw_get(
+            ("signals", "l1_l2_comparison", "end_date"),
+            default=self._raw_get(
+                ("real_data_experiments", "l1_l2_comparison", "end_date"),
+                default=constants.DEFAULT_L1_L2_END_DATE,
+            ),
+        )
+        return self._coerce_date(value, "configured L1/L2 end_date")
+
+    def _configured_synthetic_signal(self) -> str:
+        """Return configured synthetic default signal."""
+        return str(
+            self._raw_get(
+                ("synthetic_experiments", "wavelength", "default_signal"),
+                default=self._resolve_signal(None),
+            )
+        ).strip()
+
+    def _configured_f107_source_url(self) -> str:
+        """Return configured F10.7 source URL."""
+        return str(
+            self._raw_get(
+                ("data", "f107", "source"),
+                default=_DEFAULT_F107_SOURCE_URL,
+            )
+        ).strip()
+
+    def _configured_f107_cache_path(self) -> Path:
+        """Return configured F10.7 cache path."""
+        value: Any = self._raw_get(
+            ("paths", "f107_data_path"),
+            default=_DEFAULT_F107_CACHE_PATH,
+        )
+        return Path(value).expanduser()
+
+    def _resolve_wavelength_for_signal(self, signal: str) -> float:
+        """Resolve a signal wavelength using shared constants.
+
+        Args:
+            signal: GNSS signal name.
+
+        Returns:
+            Carrier wavelength in meters.
+        """
+        signal_value: str = str(signal).strip() or constants.DEFAULT_SIGNAL
+        try:
+            return constants.signal_wavelength_m(signal_value)
+        except ValueError:
+            if "L2" in signal_value.upper():
+                return constants.GPS_L2_WAVELENGTH_M
+            if "L1" in signal_value.upper():
+                return constants.GPS_L1_WAVELENGTH_M
+            raise
+
+    def _output_enabled(self, key: str, default: bool) -> bool:
+        """Read an outputs.* boolean flag from raw config."""
+        return self._raw_bool(("outputs", key), default=default)
+
+    def _raw_get(self, path: Sequence[str], default: Any) -> Any:
+        """Return a nested raw-config value, with default on missing path."""
+        value: Any = self.raw_config
+        for part in path:
+            if not isinstance(value, Mapping) or part not in value:
+                return default
+            value = value[part]
+        return value
+
+    def _raw_bool(self, path: Sequence[str], default: bool) -> bool:
+        """Return a nested raw-config boolean value."""
+        value: Any = self._raw_get(path, default=default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized: str = value.strip().lower()
+            if normalized in {"true", "1", "yes", "y", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "n", "off"}:
+                return False
+        return bool(value)
+
+    @staticmethod
+    def _coerce_date(value: Any, name: str) -> date:
+        """Convert date-like input to ``datetime.date``.
+
+        Args:
+            value: Date-like object or ISO string.
+            name: Name used in error messages.
+
+        Returns:
+            Python date.
+
+        Raises:
+            ValueError: If conversion fails.
+        """
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                value = value.astimezone(timezone.utc)
+            return value.date()
+
+        if isinstance(value, date):
+            return value
+
+        try:
+            timestamp: pd.Timestamp = pd.to_datetime(value)
+        except Exception as exc:
+            raise ValueError(f"{name} must be date-like, got {value!r}.") from exc
+
+        if pd.isna(timestamp):
+            raise ValueError(f"{name} could not be converted to a valid date.")
+
+        return timestamp.date()
+
+    @staticmethod
+    def _filter_f107_date_range(
+        f107_df: pd.DataFrame,
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        """Filter F10.7 DataFrame to an inclusive date interval."""
+        if "date" not in f107_df.columns:
+            raise ValueError("F10.7 DataFrame does not contain required column 'date'.")
+
+        working: pd.DataFrame = f107_df.copy()
+        working["date"] = pd.to_datetime(working["date"], errors="coerce").dt.normalize()
+        start_timestamp: pd.Timestamp = pd.Timestamp(start)
+        end_timestamp: pd.Timestamp = pd.Timestamp(end)
+
+        filtered: pd.DataFrame = working.loc[
+            (working["date"] >= start_timestamp) & (working["date"] <= end_timestamp)
+        ].reset_index(drop=True)
+
+        if filtered.empty:
+            raise ValueError(
+                f"No cached F10.7 rows fall in requested range "
+                f"{start.isoformat()} to {end.isoformat()}."
+            )
+
+        return filtered
+
+    @staticmethod
+    def _safe_name(value: str) -> str:
+        """Return a filesystem-safe compact name component."""
+        safe: str = "".join(
+            character if character.isalnum() or character in {"_", "-"} else "_"
+            for character in str(value).strip()
+        )
+        return safe or "unknown"
+
+    @staticmethod
+    def _log_result_summary(results_df: pd.DataFrame, label: str) -> None:
+        """Log accepted/rejected summary for a result table."""
+        if results_df.empty:
+            _LOGGER.info("No rows produced for %s.", label)
+            return
+
+        if "accepted" not in results_df.columns:
+            _LOGGER.info("Rows produced for %s: %d.", label, len(results_df))
+            return
+
+        accepted_series: pd.Series = results_df["accepted"]
+        if accepted_series.dtype != bool:
+            accepted_mask: pd.Series = accepted_series.astype(str).str.lower().isin(
+                {"true", "1", "yes", "accepted"}
+            )
+        else:
+            accepted_mask = accepted_series.fillna(False)
+
+        accepted_count: int = int(accepted_mask.sum())
+        rejected_count: int = int(len(results_df) - accepted_count)
+
+        _LOGGER.info(
+            "Summary for %s: total=%d, accepted=%d, rejected=%d.",
+            label,
+            len(results_df),
+            accepted_count,
+            rejected_count,
+        )
+
+        if "rejection_reason" in results_df.columns and rejected_count > 0:
+            reason_counts: pd.Series = (
+                results_df.loc[~accepted_mask, "rejection_reason"]
+                .fillna("unknown")
+                .astype(str)
+                .value_counts()
+                .head(10)
+            )
+            _LOGGER.info("Top rejection reasons for %s:\n%s", label, reason_counts.to_string())
+
+    @staticmethod
+    def _log_real_data_targets(year: int, signal: str) -> None:
+        """Log paper validation targets without enforcing them."""
+        signal_key: str = str(signal).strip().upper()
+        if signal_key == "L1" and int(year) in constants.EXPECTED_L1_GEOLOCATIONS_BY_YEAR:
+            _LOGGER.info(
+                "Paper validation target for L1 %s accepted geolocations: %s.",
+                year,
+                constants.EXPECTED_L1_GEOLOCATIONS_BY_YEAR[int(year)],
+            )
+
+
+def _default_config_path() -> Path:
+    """Return the first existing default config path, or config/default.yaml."""
+    for candidate in _DEFAULT_CONFIG_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return _DEFAULT_CONFIG_CANDIDATES[0]
+
+
+def _parse_date_argument(value: str | None) -> date | None:
+    """Parse optional YYYY-MM-DD CLI date."""
+    if value is None:
+        return None
+
+    try:
+        timestamp: pd.Timestamp = pd.to_datetime(value)
+    except Exception as exc:
+        raise argparse.ArgumentTypeError(f"Invalid date {value!r}: {exc}") from exc
+
+    if pd.isna(timestamp):
+        raise argparse.ArgumentTypeError(f"Invalid date {value!r}.")
+
+    return timestamp.date()
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build command-line argument parser."""
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(
+        description=(
+            "Reproduce COSMIC-2 back-propagation geolocation experiments: "
+            "synthetic validation, yearly processing, monthly maps, L1/L2 "
+            "comparison, and F10.7 plotting."
+        )
+    )
+
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=_default_config_path(),
+        help=(
+            "Path to YAML configuration. Defaults to config/default.yaml if it "
+            "exists, otherwise config.yaml."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=_SUPPORTED_MODES,
+        help="Pipeline mode to run.",
+    )
+    parser.add_argument(
+        "--year",
+        type=int,
+        default=None,
+        help="UTC year. Required for process-year; optional for monthly-maps.",
+    )
+    parser.add_argument(
+        "--signal",
+        type=str,
+        default=None,
+        help="GNSS signal selector, e.g. L1, L2, or L2C. Defaults to config.",
+    )
+    parser.add_argument(
+        "--start-date",
+        type=_parse_date_argument,
+        default=None,
+        help="Start date YYYY-MM-DD for l1-l2 override or f107 mode.",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=_parse_date_argument,
+        default=None,
+        help="End date YYYY-MM-DD for l1-l2 override or f107 mode.",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
+        help="Python logging level.",
+    )
+
+    return parser
+
+
+def _parse_cli(argv: Sequence[str] | None = None) -> CliOptions:
+    """Parse command-line arguments into a typed options object."""
+    parser: argparse.ArgumentParser = _build_arg_parser()
+    namespace: argparse.Namespace = parser.parse_args(argv)
+
+    return CliOptions(
+        config_path=Path(namespace.config).expanduser(),
+        mode=str(namespace.mode),
+        year=namespace.year,
+        signal=namespace.signal,
+        start_date=namespace.start_date,
+        end_date=namespace.end_date,
+        log_level=str(namespace.log_level),
+    )
+
+
+def _configure_logging(level: str) -> None:
+    """Configure root logging."""
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Program entry point.
+
+    Args:
+        argv: Optional CLI argument sequence. If ``None``, argparse reads
+            ``sys.argv``.
+
+    Returns:
+        Process exit code. Zero indicates success.
+    """
+    try:
+        options: CliOptions = _parse_cli(argv)
+        _configure_logging(options.log_level)
+
+        _LOGGER.info("Loading configuration from %s", options.config_path)
+        app: Main = Main(options.config_path)
+        app.run(options)
+        _LOGGER.info("Pipeline completed successfully.")
+        return 0
+
+    except ConfigLoadError as exc:
+        _configure_logging("ERROR")
+        _LOGGER.error("Configuration loading failed: %s", exc)
+        return 2
+    except FileNotFoundError as exc:
+        _LOGGER.error("Required file was not found: %s", exc)
+        return 2
+    except ValueError as exc:
+        _LOGGER.error("Invalid command or configuration: %s", exc)
+        return 2
+    except KeyboardInterrupt:
+        _LOGGER.error("Interrupted by user.")
+        return 130
+    except Exception as exc:
+        _LOGGER.exception("Pipeline failed unexpectedly: %s", exc)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

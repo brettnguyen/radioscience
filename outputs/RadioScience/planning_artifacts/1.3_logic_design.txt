@@ -1,0 +1,98 @@
+----------------------------------------
+[Required packages]
+- numpy>=1.26.0
+- scipy>=1.11.0
+- pandas>=2.1.0
+- pyarrow>=14.0.0
+- xarray>=2023.12.0
+- netCDF4>=1.6.5
+- h5py>=3.10.0
+- pyyaml>=6.0.1
+- pydantic>=2.5.0
+- tqdm>=4.66.0
+- matplotlib>=3.8.0
+- cartopy>=0.22.0
+- pyproj>=3.6.0
+- pymap3d>=3.0.0
+- astropy>=6.0.0
+- ppigrf>=1.0.0
+- numba>=0.59.0
+- pytest>=7.4.0
+- ruff>=0.1.0
+
+----------------------------------------
+[Required Other language third-party packages]
+- No third-party dependencies required
+
+----------------------------------------
+[Logic Analysis]
+- ['requirements.txt', 'Define all Python dependencies required for the project. Core numerical work depends on numpy and scipy. File I/O depends on xarray, netCDF4, h5py, pandas, and pyarrow. Coordinate transforms use pymap3d and pyproj. Magnetic-field evaluation uses ppigrf, or a replaceable equivalent IGRF-13 package. Visualization uses matplotlib and cartopy. numba is optional but useful for accelerating propagation loops and geometry-heavy routines. This file has no internal project dependencies and should be created first.']
+- ['README.md', 'Document installation, data acquisition, expected directory layout, configuration fields, command-line examples, and reproduction targets. Include links to CDAAC COSMIC-2 HR data, IGS GNSS orbit/clock products, IGRF-13 source/model, and OMNIWeb F10.7 data. Should describe the two main run modes: synthetic validation and real COSMIC-2 processing. Depends conceptually on the full design but can be drafted early and updated as implementation details stabilize.']
+- ['config/default.yaml', 'Central YAML configuration file. Must include paths for COSMIC-2 HR data, receiver orbit data, GNSS orbit data, F10.7 cache, and output directory. Must include method constants from the paper: 10 s window length, sigma_phi threshold 0.25 rad, tangent-point height threshold 150 km, BP range 100 to 6000 km, BP step 100 km, magnetic-field candidate step 100 km, Q threshold 1.2, cos(alpha) threshold 0.1, V(L) smoothing window 1000 km, smoothing polynomial order 2, monthly map bin size 3 degrees, post-sunset local-time range 18 to 24 hr. Downstream modules should never hard-code these values except physical constants.']
+- ['src/core/constants.py', 'Implement shared physical and method constants. Include speed of light, Earth reference ellipsoid constants if not delegated to pyproj, GNSS carrier frequencies/wavelengths for GPS L1, GPS L2C/L2, GLONASS L1/L2 if needed, radians/degrees conversion helpers, default BP range values, and default synthetic phase-screen parameters p=1.5 and outer_scale=10 km. Imported by propagation, signal, geolocation, and experiments modules. Should not import any project modules to avoid circular dependencies.']
+- ['src/core/types.py', 'Define lightweight dataclasses or pydantic models used across the system: Vector3, StateVector, SignalWindow, ScintillationMetrics, BpPlaneGeometry, CorrectedSignal, BpCurve, DCurve, and GeolocationResult. These are the shared contracts between data loading, geometry, signal processing, back propagation, QC, and result writing. This file should only depend on standard library, numpy typing if desired, pandas optional only for conversion helpers. All later modules depend on these types.']
+- ['src/config.py', 'Implement AppConfig loading and validation from YAML. Use pydantic for type validation and default values. Expose AppConfig.from_yaml(path). Validate directories where appropriate but allow missing external datasets during synthetic-only runs. This module depends on config/default.yaml structure and is imported by main.py and almost all top-level orchestration classes.']
+- ['src/io/writers.py', 'Implement ResultWriter for writing GeolocationResult lists and pandas DataFrames to parquet/csv/json. Also write diagnostic objects such as V curves and D curves to compressed NPZ or JSON. This module depends on src/core/types.py, pandas, numpy, pathlib, and pyarrow. It should not depend on processing modules. Downstream experiments and main.py use it for persistence.']
+- ['src/geometry/coordinates.py', 'Implement CoordinateTransformer. Responsibilities: ECEF to geodetic conversion, geodetic to ECEF conversion, local solar time from UTC and longitude, ENU basis if needed, and safe longitude wrapping. Prefer pyproj or pymap3d instead of custom geodesy. This module depends on src/core/types.py and external geodetic libraries. It is used by LOS geometry, magnetic-field evaluation, plotting, and final geolocation output.']
+- ['src/geometry/los.py', 'Implement LosGeometry. Responsibilities: compute midpoint Tx/Rx positions for a SignalWindow, define the receiver-to-transmitter LOS unit vector, compute candidate position along LOS for a given distance L, estimate tangent-point height for pre-BP filtering, and convert accepted distance L into geodetic latitude/longitude/altitude. Depends on CoordinateTransformer and core types. Critical implementation detail: verify sign convention so candidate points lie between receiver and transmitter. This module is required by BpPlaneBuilder and Geolocator.']
+- ['src/geometry/magnetic_field.py', 'Implement MagneticFieldModel wrapper around ppigrf or equivalent IGRF-13 provider. Given time and ECEF/geodetic position, return magnetic-field vector and unit vector. It should internally convert ECEF to latitude, longitude, altitude using CoordinateTransformer or accept geodetic coordinates. Dependency: coordinates.py, core types, ppigrf. Used by BpPlaneBuilder for each L_mf candidate distance. Must isolate external IGRF API differences so the rest of the code remains stable.']
+- ['src/geometry/bp_plane.py', 'Implement BpPlaneBuilder. For each SignalWindow and candidate magnetic-field distance L_mf, construct the local 2D BP coordinate system. Steps: get midpoint LOS x-axis; compute candidate point along LOS; evaluate IGRF magnetic field; project magnetic field onto phase-screen plane perpendicular to LOS; define irregularity alignment direction; define z-axis in BP plane perpendicular to projected irregularity direction and x-axis; compute scan angle alpha from LOS scan trajectory projected onto the screen; compute cos(alpha), alpha, and beta diagnostics. Depends on LosGeometry, MagneticFieldModel, CoordinateTransformer, and core types. This is central to reproducing the paper because D(L_mf)=L0-L_mf depends on plane orientation.']
+- ['src/signal/preprocessing.py', 'Implement SignalPreprocessor. Responsibilities: validate and clean high-rate phase/SNR arrays, unwrap phase if necessary, detrend phase, normalize amplitude/SNR, and build complex signal amplitude*exp(i*phase). The exact detrending method is unclear from the paper, so implement configurable options: linear, quadratic, polynomial order N, and optional high-pass. Default should be simple polynomial detrending over each 10 s window. Depends on scipy.signal/numpy, AppConfig, and SignalWindow. Used by Geolocator before scintillation index calculation and BP.']
+- ['src/signal/scintillation.py', 'Implement ScintillationCalculator. Compute sigma_phi=std(detrended phase) and S4 from intensity I=A^2 as sqrt(mean(I^2)-mean(I)^2)/mean(I). Also compute mean SNR. Return ScintillationMetrics and threshold flag. Depends on core types and numpy. Used by Geolocator for pre-BP QC. The output should be checked against paper sanity values: average accepted sigma_phi around 1.65 rad, average S4 around 0.32.']
+- ['src/data/orbit_loader.py', 'Implement OrbitLoader. Responsibilities: load COSMIC-2 receiver orbit data and IGS GNSS orbit/clock products, interpolate Tx and Rx state vectors to high-rate timestamps, and attach StateVector lists to SignalWindow objects. Exact file formats may vary, so design this as an adapter layer with separate private parsers for CDAAC receiver orbit and SP3 GNSS orbits if needed. Depends on astropy/scipy interpolation, core types, and config. CosmicLoader may call this loader, or RealDataExperiments may call it after loading event metadata.']
+- ['src/data/cosmic_loader.py', 'Implement CosmicLoader. Responsibilities: list COSMIC-2 HR files by year/date/signal, read netCDF/HDF files using xarray/netCDF4/h5py, extract timestamps, phase, SNR/amplitude, GNSS metadata, receiver ID, transmitter PRN, antenna, sampling rate, and segment observations into 10 s SignalWindow objects. It should call or cooperate with OrbitLoader to populate Tx/Rx states. Depends on AppConfig, core types, pandas/xarray/h5py, and orbit_loader.py. This module is the main data ingestion dependency for real-data experiments.']
+- ['src/data/f107_loader.py', 'Implement F107Loader. Responsibilities: download or load cached daily F10.7 solar flux data from OMNIWeb, return pandas DataFrame with date and F10.7 values, and support plotting Figure 22-style time series. Depends on pandas and possibly requests if online download is implemented. Independent from geolocation processing, used only in real-data experiment reporting.']
+- ['src/propagation/phase_screen.py', 'Implement PhaseScreenGenerator for synthetic experiments. Generate 1D random phase screens with spectrum Phi(kz) proportional to (k0^2+kz^2)^(-p/2), with p=1.5 and outer scale l0=10 km by default. Generate 2D oriented screens for misaligned two-screen experiments. Normalize screen phase to requested sigma_phi in radians. Depends on numpy, scipy FFT if needed, constants, and core types. Used only by SyntheticExperiments, but critical for validating the propagation engine.']
+- ['src/propagation/fft_propagator.py', 'Implement FftPropagator. Main methods: propagate_2d(field_z,z_m,distance_m), backpropagate_2d(field_z,z_m,distance_m), propagate_3d(field_yz,y_m,z_m,distance_m), amplitude_variance(field). Use FFT plane-wave expansion: each spatial frequency kz gets phase exp(i*sqrt(k^2-kz^2)*distance). Handle evanescent/invalid frequencies robustly by zeroing, clipping, or using complex square root consistently. For back propagation use negative distance or conjugate propagation operator. Depends on numpy/scipy FFT and constants. Used by synthetic experiments and real BackpropProcessor. This is one of the core computational modules.']
+- ['src/propagation/kirchhoff.py', 'Implement KirchhoffPropagator interface as a secondary validation path. Because the paper parse omitted the exact equation, initially provide a documented placeholder or basic scalar diffraction integral implementation for selected diagnostic cases. It should not block the main FFT-based reproduction. Depends on numpy, constants, and core types. Used optionally by BackpropProcessor or tests to compare Option 1 arbitrary-trajectory behavior.']
+- ['src/geolocation/stationary_correction.py', "Implement StationaryCorrector. For each candidate screen distance L and BP plane geometry, project Tx/Rx state vectors into local x,z coordinates; compute screen crossing height z_s; apply the paper's stationary-transmitter correction. Support both Option 1 x2'=x2 and Option 2 x2'=x20; default to Option 2 for FFT propagation. Compute original path L_tr, corrected path L'_tr, corrected excess phase S'=S_exc+L'_tr, keep amplitude unchanged, and apply wavefront curvature correction z^2*tan(alpha)^2/(2R). Interpolate corrected complex signal onto a uniform z grid for FFT propagation. Depends on BpPlaneGeometry, SignalWindow, CorrectedSignal, constants, numpy/scipy interpolation. Used by BackpropProcessor inside the inner L loop."]
+- ['src/geolocation/qc.py', 'Implement QualityController. Pre-BP QC: sigma_phi > 0.25 rad and tangent height >150 km. V-curve processing: smooth V(L) using second-order sliding polynomial regression in a 1000 km window; find global local minimum not at endpoints; compute L1 and L2 as monotonic-increase spans on both sides; compute Q=min(V1,V2)/V0; require L1 and L2 >= two BP samples. D-curve processing: find zero crossings where D(L_mf)=L0-L_mf changes sign or equals zero and sign persists for at least two samples on both sides. Final QC: single-valued only, Q>1.2, cos(alpha)>0.1. Depends on AppConfig, core types, numpy/scipy. Used by Geolocator and BackpropProcessor.']
+- ['src/geolocation/backprop_processor.py', 'Implement BackpropProcessor, the core real-data BP engine. For each L_mf from 100 to 6000 km step 100 km: build BP plane using IGRF; then for each BP screen distance L from 100 to 6000 km step 100 km: call StationaryCorrector, backpropagate corrected signal with FftPropagator, compute V(L). Smooth V(L), find L0, compute Q, and store BpCurve. After all L_mf values, form D(L_mf)=L0-L_mf and create DCurve with zero crossings. Depends on BpPlaneBuilder, StationaryCorrector, FftPropagator, QualityController, AppConfig, core types. This module links geometry, signal correction, propagation, and QC.']
+- ['src/geolocation/geolocator.py', 'Implement Geolocator as the per-window orchestration API. process_window(window,wavelength): preprocess signal, compute scintillation metrics, apply pre-BP QC, run BackpropProcessor to compute DCurve, reject multi-valued cases, compute final accepted geolocation from crossing distance, compute local time, and return GeolocationResult. process_many iterates over windows with tqdm and returns a list of results. Depends on SignalPreprocessor, ScintillationCalculator, LosGeometry, BackpropProcessor, QualityController, constants, and core types. This is the primary API used by real-data experiments.']
+- ['src/experiments/synthetic_experiments.py', 'Implement SyntheticExperiments. Reproduce method-validation experiments from the paper: single phase screen, outer-scale estimation using sigma_phi/S4 versus l0 and L, orientation error relation DeltaL=2L tan(alpha) DeltaAlpha, two aligned phase screens with equal and 1.5x unequal strengths, two misaligned screens using 3D forward propagation and 2D BP, thermal noise effect for SNR 200/400/600 V/V and sigma_phi 1.65/0.25 rad, and synthetic multi-valued geometry. Depends on PhaseScreenGenerator and FftPropagator. Outputs dictionaries, NPZ arrays, and plots through Plotter/ResultWriter.']
+- ['src/experiments/real_data_experiments.py', "Implement RealDataExperiments. process_year(year,signal) loads windows through CosmicLoader and processes them through Geolocator. process_l1_l2_period processes L1 and L2/L2C for the target period, excludes GPS L2P, and pairs common events by event ID/GNSS/time window. make_monthly_bins filters accepted results to post-sunset local time 18-24 hr and bins latitude/longitude into 3x3 degree monthly maps. Depends on CosmicLoader, Geolocator, pandas, constants, and ResultWriter indirectly. This module implements the paper's main experiments: 2021/2023 monthly L1 maps and L1/L2 comparison."]
+- ['src/visualization/plots.py', 'Implement Plotter. Plot synthetic spectra, V(L), D(L), cos(alpha), monthly geolocation density maps, L1/L2 zonal-difference histogram with 0.5 degree bins, and F10.7 time series. Depends on matplotlib, cartopy, pandas, numpy, and core types. Should not perform computation beyond bin display and figure formatting. Used by main.py after experiment outputs are produced.']
+- ['main.py', 'Implement command-line entry point. Parse arguments such as --config, --mode synthetic|process-year|monthly-maps|l1-l2|f107, --year, --signal, --start-date, --end-date. Instantiate AppConfig and all required service classes in dependency order. Dispatch to SyntheticExperiments or RealDataExperiments. Use ResultWriter and Plotter for outputs. Depends on almost every top-level module but should contain minimal scientific logic. This file is written near the end after all core APIs exist.']
+
+----------------------------------------
+[Task list]
+- requirements.txt
+- README.md
+- config/default.yaml
+- src/core/constants.py
+- src/core/types.py
+- src/config.py
+- src/io/writers.py
+- src/geometry/coordinates.py
+- src/geometry/los.py
+- src/geometry/magnetic_field.py
+- src/geometry/bp_plane.py
+- src/signal/preprocessing.py
+- src/signal/scintillation.py
+- src/data/orbit_loader.py
+- src/data/cosmic_loader.py
+- src/data/f107_loader.py
+- src/propagation/phase_screen.py
+- src/propagation/fft_propagator.py
+- src/propagation/kirchhoff.py
+- src/geolocation/stationary_correction.py
+- src/geolocation/qc.py
+- src/geolocation/backprop_processor.py
+- src/geolocation/geolocator.py
+- src/experiments/synthetic_experiments.py
+- src/experiments/real_data_experiments.py
+- src/visualization/plots.py
+- main.py
+
+----------------------------------------
+[Full API spec]
+
+
+----------------------------------------
+[Shared Knowledge]
+The entire system shares a small set of scientific conventions and constants. Distances in public APIs should be explicit in names, usually *_km for geolocation/BP distances and *_m for ECEF coordinates and propagation grids. Phase is in radians. Wavelength is in meters. Positions are ECEF unless a method explicitly says geodetic. Candidate BP distances and magnetic-field distances both use 100 to 6000 km with 100 km step by default. The key geolocation equation is D(L_mf)=L0-L_mf, where L0 is the distance of the global local minimum of smoothed V(L) for a BP plane defined by magnetic field at L_mf. The normalized BP amplitude variance is V=<A^2>/<A>^2 - 1. The QC thresholds are sigma_phi>0.25 rad, tangent height>150 km, Q>1.2, cos(alpha)>0.1, single-valued zero crossing only, and valid local minimum away from endpoints with L1/L2 at least two 100 km samples. The synthetic phase-screen defaults are spectral index p=1.5 and outer scale l0=10 km. Real-data monthly maps use accepted post-sunset geolocations only, local time 18-24 hr, and 3 degree by 3 degree bins. All modules should use the shared dataclasses in src/core/types.py and configuration in AppConfig rather than duplicating fields or hard-coding parameters.
+
+----------------------------------------
+[Anything UNCLEAR]
+The paper leaves several details unresolved. The exact COSMIC-2 HR data schema and whether CDAAC products already provide demodulated/connected GLONASS phase must be verified. The exact phase detrending method used before sigma_phi calculation is unspecified. The operational implementation may have used FFT plane-wave BP or Kirchhoff integral BP; the design defaults to FFT with stationary-correction Option 2 but should support comparison with Option 1/Kirchhoff later. The exact SNR-to-amplitude normalization used for BP is not fully specified. The parsed paper omitted the Kirchhoff diffraction integral equation. The sign convention in the final geolocation vector must be validated against real geometry. The paper is inconsistent about the L1/L2 comparison duration: the abstract says 2 months, while the body says February 19 to March 1, 2021. The local-time reference for post-sunset filtering is not explicitly stated; this design uses geolocation longitude by default.
+
