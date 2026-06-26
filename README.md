@@ -27,6 +27,78 @@ The reproduction code generated under `outputs/RadioScience_repo/` is organized 
 
 No machine-learning model is trained here. This is a scientific signal-processing and geolocation reproduction project.
 
+## How This Was Created
+
+This repository was created from a Paper2Code workflow rather than written manually from scratch.
+
+High-level creation process:
+
+1. **Started with the RadioScience paper PDF**
+   - The source paper was saved under `input_pdfs/radio_science.pdf`.
+
+2. **Converted the paper into machine-readable JSON**
+   - The paper content was converted into JSON form so the Paper2Code pipeline could process the title, abstract, sections, equations, and extracted text.
+   - The resulting paper files are stored under `examples/`, including:
+
+```text
+examples/RadioScience.json
+examples/RadioScience_cleaned.json
+```
+
+3. **Ran the Paper2Code planning stage**
+   - Paper2Code read the cleaned JSON paper representation.
+   - It generated:
+     - an overall reproduction plan,
+     - an architecture design,
+     - a file-by-file implementation plan,
+     - a configuration file.
+   - These artifacts are stored in:
+
+```text
+outputs/RadioScience/planning_artifacts/
+outputs/RadioScience/planning_response.json
+outputs/RadioScience/planning_trajectories.json
+outputs/RadioScience/planning_config.yaml
+```
+
+4. **Ran the Paper2Code analysis stage**
+   - For each planned source file, Paper2Code generated a detailed logic analysis explaining what that file should do and how it should connect to the paper methodology.
+   - These analysis files are stored in:
+
+```text
+outputs/RadioScience/analyzing_artifacts/
+outputs/RadioScience/*_simple_analysis_response.json
+outputs/RadioScience/*_simple_analysis_trajectories.json
+```
+
+5. **Ran the Paper2Code coding stage**
+   - Paper2Code then generated the actual Python reproduction project one file at a time.
+   - The generated code is stored in:
+
+```text
+outputs/RadioScience_repo/
+```
+
+6. **Used OpenAI GPT-5.5 for generation**
+   - The Paper2Code scripts were configured to use:
+
+```text
+gpt-5.5
+```
+
+   - The model was used for planning, logic analysis, and code generation.
+
+7. **Approximate API cost**
+   - The full run cost roughly **$25 USD** in OpenAI API usage.
+   - The exact dollar amount is approximate because the local Paper2Code cost table did not include `gpt-5.5` pricing at generation time.
+   - Token usage and model-call logs are preserved in:
+
+```text
+outputs/RadioScience/cost_info.log
+```
+
+In short: this repo is the result of taking a scientific PDF, converting it into structured JSON, passing that through the Paper2Code planning/analyzing/coding pipeline, and using GPT-5.5 to generate a reproducible Python project scaffold.
+
 ## What The Code Does
 
 In simple terms, the generated code tries to recreate the paper's full processing pipeline.
