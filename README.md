@@ -27,6 +27,58 @@ The reproduction code generated under `outputs/RadioScience_repo/` is organized 
 
 No machine-learning model is trained here. This is a scientific signal-processing and geolocation reproduction project.
 
+## What The Code Does
+
+In simple terms, the generated code tries to recreate the paper's full processing pipeline.
+
+1. **Simulates radio-signal distortion**
+   - Creates synthetic ionosphere disturbance screens.
+   - Sends simulated radio waves through them.
+   - Checks whether the back-propagation method can recover where the disturbance was.
+
+2. **Loads COSMIC-2 radio occultation data**
+   - Reads satellite observation files.
+   - Extracts phase, signal strength/SNR, transmitter position, receiver position, time, and metadata.
+
+3. **Estimates where the ionospheric disturbance happened**
+   - Splits observations into short time windows.
+   - Calculates scintillation metrics such as `S4` and `sigma_phi`.
+   - Builds the receiver-to-transmitter line of sight.
+   - Uses magnetic-field geometry to define the back-propagation plane.
+   - Runs back propagation over candidate distances, roughly 100 km to 6000 km.
+   - Finds the distance where the distorted signal best focuses.
+   - Converts that distance into latitude, longitude, and height.
+
+4. **Creates outputs**
+   - Writes geolocation tables.
+   - Tracks accepted and rejected events.
+   - Produces plots and maps.
+   - Supports L1/L2 signal comparison products.
+
+The main generated code lives in:
+
+```text
+outputs/RadioScience_repo/
+```
+
+The main entry point is:
+
+```text
+outputs/RadioScience_repo/main.py
+```
+
+The most important generated source folders are:
+
+```text
+src/data/          reads data
+src/signal/        computes signal and scintillation metrics
+src/geometry/      handles satellite geometry and magnetic-field setup
+src/propagation/   performs back propagation
+src/geolocation/   decides final location and quality control
+src/experiments/   runs synthetic and real-data experiments
+src/visualization/ makes plots and maps
+```
+
 ## Repository Contents
 
 - `data/`
